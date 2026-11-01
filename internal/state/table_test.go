@@ -178,3 +178,22 @@ func TestDuplicateOpenKeepsExistingOwner(t *testing.T) {
 		t.Fatalf("snapshot = %+v, want owner pid 10", snap)
 	}
 }
+
+func TestBaselineSocketHeldByTwoProcessesListsBoth(t *testing.T) {
+	tb := New()
+	k := key("0.0.0.0", 22)
+	for _, pid := range []uint32{1, 1044} {
+		o := open(5, k, pid)
+		o.Source = model.SourceBaseline
+		tb.Apply(o)
+	}
+	snap := tb.Snapshot()
+	if len(snap) != 1 || len(snap[0].Procs) != 2 || snap[0].Procs[0].PID != 1 || snap[0].Procs[1].PID != 1044 {
+		t.Fatalf("snapshot = %+v, want pids 1 and 1044", snap)
+	}
+	tb.Apply(closeObs(5, k))
+	tb.Apply(open(5, k, 77))
+	if snap := tb.Snapshot(); len(snap) != 1 || len(snap[0].Procs) != 1 || snap[0].Procs[0].PID != 77 {
+		t.Fatalf("co-owners must not outlive the socket: %+v", snap)
+	}
+}

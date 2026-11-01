@@ -52,3 +52,25 @@ Edge cases:
 - Owners: `bpf/owners.bpf.c`, an `iter/task_file` program run once (`link.AttachIter`, read to EOF) that writes `{cookie, tgid, uid, comm}` per listening TCP socket per process; `exe` is read from `/proc/<pid>/exe`. Joined to the dump by socket cookie: one observation per socket per owning process, one with an empty process for kernel listeners (nfsd, ksmbd).
 - Order: a cookie-assigning dump, then owners, then the dump that is reported. A socket that appears after the owners were read is reported without an owner (the live probe has its `opened` with the owner).
 - MPTCP (Go's default for listeners): the fd holds the MPTCP socket, but inet_diag and the probe see its first TCP subflow, so the iterator reports the subflow's cookie. On 6.8 it can only read that cookie (via `bpf_rdonly_cast`), not assign it, and the kernel assigns cookies lazily; the first dump assigns them. `SO_COOKIE` on an MPTCP fd returns the MPTCP socket's own cookie, not the subflow's.
+
+## Running the agent (`lw-agent`)
+
+`go build ./cmd/lw-agent` (Linux only; other platforms print "linux only" and exit 1).
+
+| Flag | Default | |
+| --- | --- | --- |
+| `--nats-url` | `nats://127.0.0.1:4222` | NATS server |
+| `--nats-creds` | | credentials file |
+| `--tls-ca`, `--tls-cert`, `--tls-key` | | TLS for the NATS connection |
+| `--machine-id-path` | `/etc/machine-id` | host id used in subjects |
+| `--heartbeat` | `30s` | heartbeat interval |
+
+Logs are JSON (`log/slog`) on stderr. The agent exits non-zero, with the reason, when the kernel is older than 6.8, `/sys/kernel/btf/vmlinux` is missing, lockdown is `confidentiality`, a BPF program fails to load or attach (the verifier log is included), or the probe reader stops. On SIGTERM it stops the probes, flushes the queue for up to 2 s and exits 0. The startup checks live in `internal/preflight`.
+
+### systemd
+
+`deploy/lw-agent.service` runs it as the static `lw-agent` user with only `CAP_BPF CAP_PERFMON CAP_SYS_PTRACE` (`CAP_SYS_PTRACE` is only for reading `/proc/<pid>/exe` of other users' processes), `NoNewPrivileges`, `ProtectSystem=strict` and `ProtectHome`. It is `WantedBy=sysinit.target` with `DefaultDependencies=no`, so it starts before the network; the publisher queues until NATS is reachable. `ProtectKernelTunables` is deliberately off: it hides `/proc/kallsyms`.
+
+In the VM, `make install-agent` (`dev/install-agent.sh`) builds the binary, creates the user, installs the binary to `/usr/local/bin` and the unit, then enables and restarts it. `dev/install-nats.sh` installs `deploy/nats-server.conf` and runs nats-server as a service so there is a broker across reboots. Check with `sudo journalctl -u lw-agent` (look for `snapshot published`) and `nats stream info ASM_EVENTS`.
+
+A listener held by several processes (socket-activated sshd: systemd and sshd) lists every holder in the baseline snapshot.

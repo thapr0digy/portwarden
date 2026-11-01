@@ -2,7 +2,7 @@
 VM := lw
 REPO := $(CURDIR)
 
-.PHONY: vm generate test itest e2e
+.PHONY: vm generate test itest e2e install-agent
 
 # Re-runnable: starts the existing instance, or creates it from dev/lima.yaml.
 vm:
@@ -20,3 +20,7 @@ itest:
 
 e2e:
 	limactl shell $(VM) bash -lc 'cd $(REPO) && dev/e2e.sh'
+
+# Builds, installs and enables the lw-agent systemd unit in the VM (dev/install-agent.sh).
+install-agent:
+	limactl shell $(VM) bash -lc 'cd $(REPO) && dev/install-agent.sh'

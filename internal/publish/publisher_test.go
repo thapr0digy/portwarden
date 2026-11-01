@@ -2,6 +2,8 @@ package publish
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -445,4 +447,70 @@ func TestStreamManagementDeniedStillPublishes(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("messages did not arrive with stream management denied")
+}
+
+func TestConfigRefusedClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"name in use with other config", &jetstream.APIError{Code: 400, ErrorCode: jetstream.JSErrCodeStreamNameInUse}, true},
+		{"invalid config", &jetstream.APIError{Code: 500, ErrorCode: 10052}, true},
+		{"subjects overlap", &jetstream.APIError{Code: 400, ErrorCode: 10065}, true},
+		{"forbidden", &jetstream.APIError{Code: 403, ErrorCode: 0}, true},
+		{"wrapped refusal", fmt.Errorf("x: %w", &jetstream.APIError{Code: 400, ErrorCode: jetstream.JSErrCodeStreamNameInUse}), true},
+		{"insufficient resources", &jetstream.APIError{Code: 500, ErrorCode: 10023}, false},
+		{"no leader", &jetstream.APIError{Code: 503, ErrorCode: 10008}, false},
+		{"generic update error", &jetstream.APIError{Code: 500, ErrorCode: 10069}, false},
+		{"jetstream not enabled", &jetstream.APIError{Code: 503, ErrorCode: jetstream.JSErrCodeJetStreamNotEnabled}, false},
+		{"timeout", context.DeadlineExceeded, false},
+		{"not an api error", errors.New("boom"), false},
+	}
+	for _, c := range cases {
+		if got := configRefused(c.err); got != c.want {
+			t.Errorf("%s: configRefused = %v, want %v", c.name, got, c.want)
+		}
+	}
+	var p Publisher
+	if !p.ensureRefused(errors.New("timeout"), 0) == false {
+		t.Error("plain error must not be refused without a recorded permission violation")
+	}
+	p.perms.record(fmt.Errorf("%w: Permissions Violation for Publish to \"$JS.API.STREAM.UPDATE.ASM_EVENTS\"", nats.ErrPermissionViolation))
+	if !p.ensureRefused(context.DeadlineExceeded, 0) {
+		t.Error("permission violation on stream API must be refused")
+	}
+	if p.ensureRefused(context.DeadlineExceeded, p.perms.count()) {
+		t.Error("violation recorded before the attempt must not count")
+	}
+}
+
+func TestStreamDeletedWhilePublishingIsReensured(t *testing.T) {
+	port := freePort(t)
+	startServer(t, port, t.TempDir())
+	p := newPublisher(t, port)
+
+	p.Snapshot(snapshotOf())
+	readStream(t, port, 1)
+
+	admin, err := nats.Connect(natsURL(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	js, err := jetstream.New(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := js.DeleteStream(context.Background(), streamName); err != nil {
+		t.Fatal(err)
+	}
+
+	p.Changes([]state.Change{openedChange(8080)})
+	msgs := readStream(t, port, 1)
+	var ev asmv1.ListenerEvent
+	mustUnmarshal(t, msgs[0].data, &ev)
+	if ev.Seq != 2 || ev.Listener.Port != 8080 {
+		t.Fatalf("event = %v, want seq 2 port 8080 after the stream was recreated", &ev)
+	}
 }

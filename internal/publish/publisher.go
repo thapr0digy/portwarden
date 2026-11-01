@@ -395,6 +395,9 @@ func (p *Publisher) sendOne(m outMsg, streamReady *bool) error {
 	msg := &nats.Msg{Subject: m.subject, Data: m.data}
 	if _, err := p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(m.id)); err != nil {
 		err = fmt.Errorf("publish %s: %w", m.subject, err)
+		if errors.Is(err, jetstream.ErrNoStreamResponse) {
+			*streamReady = false // stream vanished; re-ensure before the retry
+		}
 		if p.publishNeverSucceeds(err, m.subject, mark) {
 			return &permanentError{err}
 		}
@@ -427,12 +430,31 @@ func (p *Publisher) publishNeverSucceeds(err error, subject string, permMark uin
 
 // ensureRefused reports whether a stream ensure failed in a way that retrying cannot fix:
 // the user may not manage streams, or the existing stream's config is incompatible.
+// Every other error (no leader, insufficient resources, timeouts) is transient.
 func (p *Publisher) ensureRefused(err error, permMark uint64) bool {
+	return configRefused(err) || p.perms.denied(permMark, "$JS.API.STREAM.")
+}
+
+// Error codes from nats-server v2.15.2 server/jetstream_errors_generated.go.
+const (
+	jsStreamInvalidConfig  jetstream.ErrorCode = 10052 // JSStreamInvalidConfigF
+	jsStreamSubjectOverlap jetstream.ErrorCode = 10065 // JSStreamSubjectOverlapErr
+	httpForbidden                              = 403
+)
+
+// configRefused reports whether err is the server refusing our stream definition for
+// good: an existing stream with a different configuration (JSErrCodeStreamNameInUse),
+// an invalid or overlapping configuration, or an explicit authorization failure.
+func configRefused(err error) bool {
 	var api *jetstream.APIError
-	if errors.As(err, &api) {
-		return api.ErrorCode != jetstream.JSErrCodeJetStreamNotEnabled
+	if !errors.As(err, &api) {
+		return false
 	}
-	return p.perms.denied(permMark, "$JS.API.STREAM.")
+	switch api.ErrorCode {
+	case jetstream.JSErrCodeStreamNameInUse, jsStreamInvalidConfig, jsStreamSubjectOverlap:
+		return true
+	}
+	return api.Code == httpForbidden
 }
 
 // permTracker remembers permission violations that the server reports asynchronously.

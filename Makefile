@@ -14,8 +14,9 @@ generate:
 test:
 	go test ./...
 
+# Builds the test binaries as the VM user and runs only them as root (dev/itest.sh).
 itest:
-	limactl shell $(VM) bash -lc 'cd $(REPO) && sudo -E env "PATH=$$PATH" go test -tags integration ./...'
+	limactl shell $(VM) bash -lc 'cd $(REPO) && dev/itest.sh'
 
 e2e:
 	limactl shell $(VM) bash -lc 'cd $(REPO) && dev/e2e.sh'

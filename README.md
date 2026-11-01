@@ -12,7 +12,7 @@ Kernel-touching work happens in a Lima VM named `lw` (Ubuntu 24.04), which mount
 | `make vm` | Create and start the VM (`limactl start --name=lw dev/lima.yaml`); provisions the toolchain |
 | `make generate` | In the VM: `buf generate` then `go generate ./...` (protobuf and bpf2go) |
 | `make test` | `go test ./...` (macOS or Linux, no root) |
-| `make itest` | In the VM: `sudo -E go test -tags integration ./...` (root, real kernel) |
+| `make itest` | In the VM: `dev/itest.sh` builds each package's `-tags integration` test binary as the VM user, then runs only the binaries as root (real kernel), so the Go caches stay user-owned. Extra args go to each binary: `limactl shell lw bash -lc 'cd $PWD && dev/itest.sh -test.run TestSnapshot'` |
 | `make e2e` | In the VM: `dev/e2e.sh` |
 
 `gen/asm/v1/events.pb.go` is committed, so `go build ./...` works on macOS without `buf`.

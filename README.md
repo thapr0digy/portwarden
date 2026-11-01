@@ -13,7 +13,7 @@ Kernel-touching work happens in a Lima VM named `lw` (Ubuntu 24.04), which mount
 | `make generate` | In the VM: `buf generate` then `go generate ./...` (protobuf and bpf2go) |
 | `make test` | `go test ./...` (macOS or Linux, no root) |
 | `make itest` | In the VM: `dev/itest.sh` builds each package's `-tags integration` test binary as the VM user, then runs only the binaries as root (real kernel), so the Go caches stay user-owned. Extra args go to each binary: `limactl shell lw bash -lc 'cd $PWD && dev/itest.sh -test.run TestSnapshot'` |
-| `make e2e` | In the VM: `dev/e2e.sh` |
+| `make e2e` | In the VM: `dev/e2e.sh` builds both binaries, runs its own nats-server (port 4333) and agent (the `lw-agent` unit is stopped meanwhile and restarted after), prints `opened latency: <n> ms` (must be <= 1000) and `bpf runs during load: <n>` (must be 0 over 10 000 real connections with `kernel.bpf_stats_enabled=1`), exits non-zero on any miss |
 
 `gen/asm/v1/events.pb.go` is committed, so `go build ./...` works on macOS without `buf`.
 `bpf/vmlinux.h` is produced in the VM with `bpftool btf dump file /sys/kernel/btf/vmlinux format c`.
@@ -66,6 +66,19 @@ Edge cases:
 | `--heartbeat` | `30s` | heartbeat interval |
 
 Logs are JSON (`log/slog`) on stderr. The agent exits non-zero, with the reason, when the kernel is older than 6.8, `/sys/kernel/btf/vmlinux` is missing, lockdown is `confidentiality`, a BPF program fails to load or attach (the verifier log is included), or the probe reader stops. On SIGTERM it stops the probes, flushes the queue for up to 2 s and exits 0. The startup checks live in `internal/preflight`.
+
+## Watching the stream (`lw-watch`)
+
+`go run ./cmd/lw-watch [--nats-url nats://127.0.0.1:4222] [--host <machine-id>|*] [--since 10m]` prints one line per message from `ASM_EVENTS` (ordered consumer on `asm.<host>.>`, replaying from now minus `--since`; `--since 0s` is new messages only; `--host` defaults to `*`, all hosts). The host column is the first 8 characters of `host_id`.
+
+```
+2026-10-30T14:02:11.418Z 0123abcd seq=42 OPENED tcp 0.0.0.0:8443 pid=4410 /opt/app/bin/server
+2026-10-30T14:02:12.001Z 0123abcd seq=43 SNAPSHOT n=12
+2026-10-30T14:02:41.001Z 0123abcd seq=44 HEARTBEAT drops=0/0/0
+GAP run=01J... expected=45 got=47
+```
+
+Only the first process is shown (`(+N more)` for further holders); `HEARTBEAT drops=` is ringbuf/queue/foreign-netns. A `GAP` line means `seq` skipped within one `run_id`.
 
 ### systemd
 

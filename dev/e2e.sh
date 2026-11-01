@@ -15,7 +15,7 @@ SERVER_PORT=8099
 CONNECTIONS=10000
 MAX_LATENCY_MS=1000
 LINE_TIMEOUT_S=5
-AGENT_PROGS='["on_listen","on_stop","owners"]'
+REQUIRED_PROGS=(on_listen on_stop) # the open and close probes must be among the agent's programs
 
 work=$(mktemp -d)
 nats_url="nats://127.0.0.1:$NATS_PORT"
@@ -66,10 +66,20 @@ wait_for() {
 # seen <pattern> <count>: the watch output has at least <count> matching lines.
 seen() { [ "$(grep -c -- "$1" "$work/watch.log" || true)" -ge "$2" ]; }
 
-# agent_runs: "<name> <run_cnt> <run_time_ns>" for each of the agent's BPF programs.
+# agent_prog_ids: ids of every BPF program the agent holds (through a prog or link fd),
+# read from its /proc/<pid>/fdinfo; bpftool's own "pids" field is empty here because the
+# agent closes the prog fds once the links are attached. Anything the agent attaches
+# later or renames is picked up without editing this script.
+agent_prog_ids() {
+	local pid
+	pid=$(pgrep -f "^$work/lw-agent ") || fail "lw-agent process not found"
+	sudo sh -c "cat /proc/$pid/fdinfo/* 2>/dev/null" | awk '/^prog_id:/ {print $2}' | sort -un
+}
+
+# agent_runs: "<name> <run_cnt> <run_time_ns>" for each program id in $prog_ids.
 agent_runs() {
-	sudo bpftool prog show -j | jq -r --argjson names "$AGENT_PROGS" \
-		'.[] | select(.name as $n | $names | index($n)) | "\(.name) \(.run_cnt // 0) \(.run_time_ns // 0)"' | sort
+	sudo bpftool prog show -j | jq -r --arg ids "$prog_ids" \
+		'($ids | split("\n") | map(tonumber)) as $want | .[] | select(.id as $i | $want | index($i)) | "\(.name) \(.run_cnt // 0) \(.run_time_ns // 0)"' | sort
 }
 
 start_server() {
@@ -125,8 +135,12 @@ log "closed line seen"
 log "efficiency: $CONNECTIONS connections with bpf stats on"
 old_bpf_stats=$(sysctl -n kernel.bpf_stats_enabled)
 sudo sysctl -q kernel.bpf_stats_enabled=1
+prog_ids=$(agent_prog_ids)
 runs_start=$(agent_runs)
-[ -n "$runs_start" ] || fail "no agent BPF programs found (expected $AGENT_PROGS)"
+for want in "${REQUIRED_PROGS[@]}"; do
+	grep -q "^$want " <<<"$runs_start" || fail "agent does not hold BPF program $want (holds: $(awk '{print $1}' <<<"$runs_start" | tr '\n' ' '))"
+done
+log "agent BPF programs: $(awk '{print $1}' <<<"$runs_start" | tr '\n' ' ')"
 
 start_server
 wait_for "second OPENED tcp 0.0.0.0:$SERVER_PORT" "$LINE_TIMEOUT_S" seen "OPENED tcp 0.0.0.0:$SERVER_PORT" 2
@@ -145,6 +159,7 @@ stop_server
 
 read -r runs ns < <(paste -d' ' <(echo "$runs_before") <(echo "$runs_after") |
 	awk '{runs += $5 - $2; ns += $6 - $3} END {print runs, ns}')
+paste -d' ' <(echo "$runs_before") <(echo "$runs_after") | awk '{printf "e2e:   %s run_cnt +%d\n", $1, $5 - $2}'
 echo "bpf runs during load: $runs"
 if [ "$runs" -gt 0 ]; then
 	echo "average ns per run: $((ns / runs))"

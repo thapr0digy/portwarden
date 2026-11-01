@@ -154,13 +154,13 @@ func heartbeatLoop(ctx context.Context, every time.Duration, pr *probes.Probes, 
 	}
 }
 
-// loggingSink logs each snapshot's size before handing it on.
+// loggingSink logs each snapshot's size as it is queued; delivery to NATS is separate.
 type loggingSink struct {
 	*publish.Publisher
 	log *slog.Logger
 }
 
 func (s loggingSink) Snapshot(listeners []state.Listener) {
-	s.log.Info("snapshot published", "listeners", len(listeners))
+	s.log.Info("snapshot queued", "listeners", len(listeners))
 	s.Publisher.Snapshot(listeners)
 }

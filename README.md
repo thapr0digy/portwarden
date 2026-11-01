@@ -71,6 +71,8 @@ Logs are JSON (`log/slog`) on stderr. The agent exits non-zero, with the reason,
 
 `deploy/lw-agent.service` runs it as the static `lw-agent` user with only `CAP_BPF CAP_PERFMON CAP_SYS_PTRACE` (`CAP_SYS_PTRACE` is only for reading `/proc/<pid>/exe` of other users' processes), `NoNewPrivileges`, `ProtectSystem=strict` and `ProtectHome`. It is `WantedBy=sysinit.target` with `DefaultDependencies=no`, so it starts before the network; the publisher queues until NATS is reachable. `ProtectKernelTunables` is deliberately off: it hides `/proc/kallsyms`.
 
-In the VM, `make install-agent` (`dev/install-agent.sh`) builds the binary, creates the user, installs the binary to `/usr/local/bin` and the unit, then enables and restarts it. `dev/install-nats.sh` installs `deploy/nats-server.conf` and runs nats-server as a service so there is a broker across reboots. Check with `sudo journalctl -u lw-agent` (look for `snapshot published`) and `nats stream info ASM_EVENTS`.
+In the VM, `make install-agent` (`dev/install-agent.sh`) builds the binary, creates the user, installs the binary to `/usr/local/bin` and the unit, then enables and restarts it. `dev/install-nats.sh` installs `deploy/nats-server.conf` and runs nats-server as a service so there is a broker across reboots. Check with `sudo journalctl -u lw-agent` (look for `snapshot queued`: the snapshot is queued for NATS, not necessarily delivered yet; `nats publishing resumed` or a stream message confirms delivery) and `nats stream info ASM_EVENTS`.
+
+Per-host users should only publish `asm.<host>.>` (`deploy/nats-server-auth.example.conf`; the admin creates the stream, and `$JS.API.>` is admin-level). The agent's stream-ensure call is refused for such a user and it keeps publishing.
 
 A listener held by several processes (socket-activated sshd: systemd and sshd) lists every holder in the baseline snapshot.

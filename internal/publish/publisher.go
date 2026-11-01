@@ -426,12 +426,14 @@ func (p *Publisher) sendOne(m outMsg, streamReady *bool) error {
 	if !p.nc.IsConnected() {
 		return nats.ErrDisconnected
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
-	defer cancel()
 	if !*streamReady {
+		// Its own deadline: a denied lookup (host users) times out, and must not use up
+		// the publish's time.
+		ensureCtx, cancelEnsure := context.WithTimeout(context.Background(), publishTimeout)
 		mark := p.perms.expect(streamAPIPrefix)
-		err := p.ensureStream(ctx)
+		err := p.ensureStream(ensureCtx)
 		p.perms.expect("")
+		cancelEnsure()
 		if err != nil {
 			if !p.ensureRefused(err, mark) {
 				return fmt.Errorf("ensure stream: %w", err)
@@ -441,6 +443,8 @@ func (p *Publisher) sendOne(m outMsg, streamReady *bool) error {
 		}
 		*streamReady = true
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
+	defer cancel()
 	mark := p.perms.expect(m.subject)
 	msg := &nats.Msg{Subject: m.subject, Data: m.data}
 	_, err := p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(m.id))

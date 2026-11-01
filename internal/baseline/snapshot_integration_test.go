@@ -4,6 +4,7 @@ package baseline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -157,10 +158,22 @@ func TestSnapshotOwnsUnlistedMPTCPListener(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		// The thread stays locked and is discarded when the goroutine exits.
+		// The thread stays locked and is discarded when the goroutine exits, except the
+		// main thread, which the runtime parks instead; so move the thread back first, or
+		// /proc/self/ns/net (HostNetNS) would name the fresh netns in later tests.
 		runtime.LockOSThread()
 		var r result
+		orig, err := unix.Open("/proc/thread-self/ns/net", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			r.err = err
+			done <- r
+			return
+		}
+		defer unix.Close(orig)
 		r.port, r.obs, r.err = snapshotInFreshNetns()
+		if err := unix.Setns(orig, unix.CLONE_NEWNET); err != nil {
+			r.err = errors.Join(r.err, fmt.Errorf("restore netns: %w", err))
+		}
 		done <- r
 	}()
 	r := <-done

@@ -4,6 +4,7 @@ package probes
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -65,6 +66,7 @@ func collectOwn(t *testing.T, p *Probes, window time.Duration) []model.Observati
 func waitFor(t *testing.T, p *Probes, match func(model.Observation) bool) model.Observation {
 	t.Helper()
 	deadline := time.After(eventWait)
+	var seen []model.Observation
 	for {
 		select {
 		case o, ok := <-p.Events():
@@ -74,8 +76,11 @@ func waitFor(t *testing.T, p *Probes, match func(model.Observation) bool) model.
 			if o.Proc.PID == uint32(os.Getpid()) && match(o) {
 				return o
 			}
+			seen = append(seen, o)
 		case <-deadline:
-			t.Fatal("no matching observation within", eventWait)
+			drops, foreign := p.Counters()
+			t.Fatalf("no matching observation within %s (pid %d); saw %+v; ringbuf drops %d, foreign netns %d",
+				eventWait, os.Getpid(), seen, drops, foreign)
 			return model.Observation{}
 		}
 	}
@@ -341,39 +346,58 @@ func TestDualStackSingleListener(t *testing.T) {
 	}
 }
 
-// listenInNewNetns listens on 127.0.0.1 inside a fresh network namespace. The goroutine
-// stays locked to its thread and exits, so the runtime discards the altered thread.
-func listenInNewNetns() error {
+// inFreshNetns runs f on a locked thread moved into a new network namespace, then moves
+// the thread back before the goroutine exits. The runtime discards a thread whose locked
+// goroutine exits, except the main thread, which it parks instead; left in the fresh
+// netns, that thread would make /proc/self/ns/net (the thread-group leader's) name the
+// wrong namespace for every later test.
+func inFreshNetns(f func() error) error {
 	done := make(chan error, 1)
 	go func() {
 		runtime.LockOSThread()
 		done <- func() error {
+			orig, err := unix.Open("/proc/thread-self/ns/net", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+			if err != nil {
+				return err
+			}
+			defer unix.Close(orig)
 			if err := unix.Unshare(unix.CLONE_NEWNET); err != nil {
 				return err
 			}
-			fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
-			if err != nil {
-				return err
+			ferr := f()
+			if err := unix.Setns(orig, unix.CLONE_NEWNET); err != nil {
+				return errors.Join(ferr, fmt.Errorf("restore netns: %w", err))
 			}
-			defer unix.Close(fd)
-			ifr, err := unix.NewIfreq("lo")
-			if err != nil {
-				return err
-			}
-			if err := unix.IoctlIfreq(fd, unix.SIOCGIFFLAGS, ifr); err != nil {
-				return err
-			}
-			ifr.SetUint16(ifr.Uint16() | unix.IFF_UP)
-			if err := unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr); err != nil {
-				return err
-			}
-			if err := unix.Bind(fd, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
-				return err
-			}
-			return unix.Listen(fd, 16)
+			return ferr
 		}()
 	}()
 	return <-done
+}
+
+// listenInNewNetns listens on 127.0.0.1 inside a fresh network namespace.
+func listenInNewNetns() error {
+	return inFreshNetns(func() error {
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			return err
+		}
+		defer unix.Close(fd)
+		ifr, err := unix.NewIfreq("lo")
+		if err != nil {
+			return err
+		}
+		if err := unix.IoctlIfreq(fd, unix.SIOCGIFFLAGS, ifr); err != nil {
+			return err
+		}
+		ifr.SetUint16(ifr.Uint16() | unix.IFF_UP)
+		if err := unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr); err != nil {
+			return err
+		}
+		if err := unix.Bind(fd, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+			return err
+		}
+		return unix.Listen(fd, 16)
+	})
 }
 
 func TestOtherNetnsDropped(t *testing.T) {

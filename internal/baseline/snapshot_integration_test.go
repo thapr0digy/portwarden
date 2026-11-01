@@ -308,3 +308,45 @@ func TestSnapshotIgnoresEstablished(t *testing.T) {
 		t.Errorf("dump holds %d sockets on port %d, want only the listener", onPort, port)
 	}
 }
+
+func TestSnapshotIPv6Loopback(t *testing.T) {
+	_, port := listen(t, "[::1]:0")
+	own := ownObservations(snapshot(t))
+	if len(own) != 1 || own[0].Key.Port != port {
+		t.Fatalf("snapshot observations owned by this process = %+v, want one on port %d", own, port)
+	}
+	if own[0].Key.Addr != netip.IPv6Loopback() {
+		t.Errorf("Addr = %v, want ::1", own[0].Key.Addr)
+	}
+}
+
+func TestSnapshotV4MappedKeysAsIPv4(t *testing.T) {
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(fd) })
+	if err := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 0); err != nil {
+		t.Fatal(err)
+	}
+	mapped := netip.MustParseAddr("::ffff:127.0.0.1")
+	if err := unix.Bind(fd, &unix.SockaddrInet6{Addr: mapped.As16()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Listen(fd, 16); err != nil {
+		t.Fatal(err)
+	}
+	sa, err := unix.Getsockname(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint16(sa.(*unix.SockaddrInet6).Port)
+
+	own := ownObservations(snapshot(t))
+	if len(own) != 1 || own[0].Key.Port != port {
+		t.Fatalf("snapshot observations owned by this process = %+v, want one on port %d", own, port)
+	}
+	if own[0].Key.Addr != netip.MustParseAddr("127.0.0.1") {
+		t.Errorf("Addr = %v, want 127.0.0.1 (unmapped)", own[0].Key.Addr)
+	}
+}

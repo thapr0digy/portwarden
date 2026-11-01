@@ -388,3 +388,56 @@ func TestOtherNetnsDropped(t *testing.T) {
 		t.Errorf("foreignNetns = %d, want >= 1", foreign)
 	}
 }
+
+// tcp6Listener listens on addr (port 0) with a raw AF_INET6 socket, IPV6_V6ONLY off, and
+// returns its fd and port.
+func tcp6Listener(t *testing.T, addr netip.Addr) (int, uint16) {
+	t.Helper()
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("socket: %v", err)
+	}
+	t.Cleanup(func() { _ = unix.Close(fd) })
+	if err := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Bind(fd, &unix.SockaddrInet6{Addr: addr.As16()}); err != nil {
+		t.Fatalf("bind %v: %v", addr, err)
+	}
+	if err := unix.Listen(fd, 16); err != nil {
+		t.Fatal(err)
+	}
+	return fd, boundPort(t, fd)
+}
+
+func TestOpenIPv6Loopback(t *testing.T) {
+	p := startProbes(t)
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+
+	o := waitFor(t, p, openedOnPort(port))
+	if o.Key.Addr != netip.IPv6Loopback() {
+		t.Errorf("Addr = %v, want ::1", o.Key.Addr)
+	}
+	if want := model.NewKey(hostNetNS(t), "tcp", netip.IPv6Loopback(), port); o.Key != want {
+		t.Errorf("Key = %v, want %v", o.Key, want)
+	}
+}
+
+func TestOpenV4MappedKeysAsIPv4(t *testing.T) {
+	p := startProbes(t)
+	fd, port := tcp6Listener(t, netip.MustParseAddr("::ffff:127.0.0.1"))
+	cookie := socketCookie(t, fd)
+
+	o := waitFor(t, p, func(o model.Observation) bool { return o.Kind == model.Opened && o.Cookie == cookie })
+	if o.Key.Addr != netip.MustParseAddr("127.0.0.1") || o.Key.Port != port {
+		t.Errorf("Key = %v, want 127.0.0.1:%d (unmapped)", o.Key, port)
+	}
+	if o.Key.String() != model.NewKey(hostNetNS(t), "tcp", netip.MustParseAddr("127.0.0.1"), port).String() {
+		t.Errorf("Key string = %q", o.Key.String())
+	}
+}

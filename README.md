@@ -86,6 +86,10 @@ Only the first process is shown (`(+N more)` for further holders); `HEARTBEAT dr
 
 In the VM, `make install-agent` (`dev/install-agent.sh`) builds the binary, creates the user, installs the binary to `/usr/local/bin` and the unit, then enables and restarts it. `dev/install-nats.sh` installs `deploy/nats-server.conf` and runs nats-server as a service so there is a broker across reboots. Check with `sudo journalctl -u lw-agent` (look for `snapshot queued`: the snapshot is queued for NATS, not necessarily delivered yet; `nats publishing resumed` or a stream message confirms delivery) and `nats stream info ASM_EVENTS`.
 
-Per-host users should only publish `asm.<host>.>` (`deploy/nats-server-auth.example.conf`; the admin creates the stream, and `$JS.API.>` is admin-level). The agent's stream-ensure call is refused for such a user and it keeps publishing.
+Stream: on connect (and after each reconnect) the agent looks up `ASM_EVENTS` and creates it (file storage, `asm.>`, 7-day max age, 2-minute dedupe window) only if it does not exist. An existing stream is used as it is: its retention, replicas and limits are never changed.
+
+Per-host users should only publish `asm.<host>.>` and subscribe to `_INBOX_<host>.>` (`deploy/nats-server-auth.example.conf`; the admin creates the stream, and `$JS.API.>` is admin-level). The agent uses `_INBOX_<host>` as its reply-inbox prefix, so JetStream publish acks arrive there. Never give a host `_INBOX.>`: JetStream consumers receive message payloads on `_INBOX.<id>` subjects, so that would let any host read every consumer's deliveries. The stream lookup is refused for such a user and the agent keeps publishing. A permission violation that does not belong to the request in flight (for example a missing inbox permission, which leaves every publish waiting for an ack) is logged at Warn as `nats permission violation` with its subject.
+
+If messages are dropped because the queue is full (10 000 messages, e.g. NATS unreachable at boot), the agent queues a fresh `snapshot` once the queue has drained, as it does after a reconnect.
 
 A listener held by several processes (socket-activated sshd: systemd and sshd) lists every holder in the baseline snapshot.

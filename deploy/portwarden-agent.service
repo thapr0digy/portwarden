@@ -1,0 +1,28 @@
+[Unit]
+Description=Portwarden agent (TCP listener inventory to NATS)
+DefaultDependencies=no
+Before=network-pre.target shutdown.target
+# Needed for a clean SIGTERM (and queue flush) at shutdown now default dependencies are off.
+Conflicts=shutdown.target
+Wants=network-pre.target
+After=local-fs.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Static system user, created by dev/install-agent.sh:
+#   useradd --system --no-create-home --shell /usr/sbin/nologin portwarden-agent
+User=portwarden-agent
+ExecStart=/usr/local/bin/portwarden-agent
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE
+NoNewPrivileges=yes
+# Both leave /proc and /sys readable. ProtectKernelTunables is left off on purpose:
+# it hides /proc/kallsyms.
+ProtectSystem=strict
+ProtectHome=yes
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=sysinit.target

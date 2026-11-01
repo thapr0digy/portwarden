@@ -43,3 +43,12 @@ Edge cases:
 - MPTCP listeners show up as their TCP subflow socket.
 - DCCP also calls `inet_csk_listen_stop`; the protocol check excludes it.
 - `shutdown(SHUT_RD)` on a listener, then `listen()` again, reuses the same socket cookie: the table sees a close then an open.
+
+## Baseline snapshot
+
+`internal/baseline.Snapshot()` lists every TCP listener in the host netns once at agent start, as `source=baseline` `opened` observations.
+
+- Sockets: a hand-built `SOCK_DIAG_BY_FAMILY` dump (`golang.org/x/sys/unix`, no netlink library) for `AF_INET` and `AF_INET6` with `idiag_states = 1<<TCP_LISTEN` only, so the kernel walks the listening hash and never the established one. Needs no capability. A reply flagged `NLM_F_DUMP_INTR` is retried up to 3 times, then fails.
+- Owners: `bpf/owners.bpf.c`, an `iter/task_file` program run once (`link.AttachIter`, read to EOF) that writes `{cookie, tgid, uid, comm}` per listening TCP socket per process; `exe` is read from `/proc/<pid>/exe`. Joined to the dump by socket cookie: one observation per socket per owning process, one with an empty process for kernel listeners (nfsd, ksmbd).
+- Order: a cookie-assigning dump, then owners, then the dump that is reported. A socket that appears after the owners were read is reported without an owner (the live probe has its `opened` with the owner).
+- MPTCP (Go's default for listeners): the fd holds the MPTCP socket, but inet_diag and the probe see its first TCP subflow, so the iterator reports the subflow's cookie. On 6.8 it can only read that cookie (via `bpf_rdonly_cast`), not assign it, and the kernel assigns cookies lazily; the first dump assigns them. `SO_COOKIE` on an MPTCP fd returns the MPTCP socket's own cookie, not the subflow's.

@@ -52,6 +52,16 @@ type verifierError struct{ err *ebpf.VerifierError }
 func (v verifierError) Error() string { return fmt.Sprintf("%+v", v.err) }
 func (v verifierError) Unwrap() error { return v.err }
 
+// WithVerifierLog returns err unchanged unless it holds an *ebpf.VerifierError, which
+// it wraps so that the error message carries the full verifier log.
+func WithVerifierLog(err error) error {
+	var ve *ebpf.VerifierError
+	if errors.As(err, &ve) {
+		return verifierError{ve}
+	}
+	return err
+}
+
 // Start loads the programs with hostNetNS as the only accepted network namespace
 // inode, attaches them and starts draining the ring buffer into Events.
 func Start(hostNetNS uint32) (*Probes, error) {
@@ -69,11 +79,7 @@ func Start(hostNetNS uint32) (*Probes, error) {
 
 	p := &Probes{events: make(chan model.Observation, eventsBuffer), done: make(chan struct{})}
 	if err := spec.LoadAndAssign(&p.objs, nil); err != nil {
-		var ve *ebpf.VerifierError
-		if errors.As(err, &ve) {
-			err = verifierError{ve}
-		}
-		return nil, fmt.Errorf("load listen programs: %w", err)
+		return nil, fmt.Errorf("load listen programs: %w", WithVerifierLog(err))
 	}
 
 	for _, prog := range []*ebpf.Program{p.objs.OnListen, p.objs.OnStop} {
@@ -199,7 +205,7 @@ func decode(raw []byte) (model.Observation, error) {
 
 	obs := model.Observation{
 		Cookie: ev.Cookie,
-		Proc:   model.Process{PID: ev.Tgid, Comm: comm(ev.Comm)},
+		Proc:   model.Process{PID: ev.Tgid, Comm: CommString(ev.Comm)},
 		At:     monotonicToWall(ev.TsNs),
 		Source: model.SourceEBPF,
 	}
@@ -214,7 +220,7 @@ func decode(raw []byte) (model.Observation, error) {
 		obs.Kind = model.Opened
 		obs.Key = model.NewKey(ev.Netns, "tcp", addr, ev.Port)
 		obs.Proc.UID = ev.Uid
-		obs.Proc.Exe = exePath(ev.Tgid)
+		obs.Proc.Exe = ExePath(ev.Tgid)
 	default:
 		return model.Observation{}, fmt.Errorf("unknown event kind %d", ev.Kind)
 	}
@@ -231,7 +237,8 @@ func address(family uint16, raw [16]uint8) (netip.Addr, error) {
 	return netip.Addr{}, fmt.Errorf("unknown address family %d", family)
 }
 
-func comm(raw [16]int8) string {
+// CommString converts a NUL-terminated task comm, as bpf2go types char[16], to a string.
+func CommString(raw [16]int8) string {
 	b := make([]byte, 0, len(raw))
 	for _, c := range raw {
 		if c == 0 {
@@ -242,8 +249,9 @@ func comm(raw [16]int8) string {
 	return string(b)
 }
 
-// exePath resolves the process's executable, or "" if it has exited or is not readable.
-func exePath(tgid uint32) string {
+// ExePath resolves the process's executable from /proc/<pid>/exe, or "" if it has
+// exited or is not readable.
+func ExePath(tgid uint32) string {
 	exe, err := os.Readlink("/proc/" + strconv.FormatUint(uint64(tgid), 10) + "/exe")
 	if err != nil {
 		return ""

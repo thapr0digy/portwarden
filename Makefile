@@ -4,8 +4,9 @@ REPO := $(CURDIR)
 
 .PHONY: vm generate test itest e2e
 
+# Re-runnable: starts the existing instance, or creates it from dev/lima.yaml.
 vm:
-	limactl start --name=$(VM) dev/lima.yaml
+	@if limactl list -q | grep -qx $(VM); then limactl start $(VM); else limactl start --name=$(VM) dev/lima.yaml; fi
 
 generate:
 	limactl shell $(VM) bash -lc 'cd $(REPO) && buf generate && go generate ./...'

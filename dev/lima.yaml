@@ -4,12 +4,14 @@ cpus: 4
 memory: 4GiB
 disk: 30GiB
 mounts:
-  - location: "~/projects/listener-watch"
-    mountPoint: "/Users/pr0digy/projects/listener-watch"
+  # mountPoint defaults to the host path, so `cd <repo>` works in `limactl shell`.
+  - location: "{{.Home}}/projects/listener-watch"
     writable: true
 provision:
   - mode: system
     script: |
       #!/bin/bash
       set -eux
-      /Users/pr0digy/projects/listener-watch/dev/provision.sh
+      # Lima exposes each mount as LIMA_CIDATA_MOUNTS_<n>_MOUNTPOINT.
+      repo=$(env | sed -n 's/^LIMA_CIDATA_MOUNTS_[0-9]*_MOUNTPOINT=//p' | grep '/listener-watch$' | head -1)
+      exec "$repo/dev/provision.sh"

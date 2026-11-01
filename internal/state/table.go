@@ -54,7 +54,12 @@ func (t *Table) Apply(o model.Observation) []Change {
 }
 
 func (t *Table) open(o model.Observation) []Change {
-	if _, live := t.sockets[o.Cookie]; live {
+	if stored, live := t.sockets[o.Cookie]; live {
+		// A baseline taken in a race can miss the owner that the kernel event carries.
+		if stored.Proc == (model.Process{}) {
+			stored.Proc = o.Proc
+			t.sockets[o.Cookie] = stored
+		}
 		return nil
 	}
 	t.sockets[o.Cookie] = o

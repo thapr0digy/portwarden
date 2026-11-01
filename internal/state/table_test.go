@@ -148,3 +148,33 @@ func TestOwnerlessListener(t *testing.T) {
 		t.Fatalf("snapshot = %+v", snap)
 	}
 }
+
+func TestDuplicateOpenFillsMissingOwner(t *testing.T) {
+	tb := New()
+	k := key("0.0.0.0", 8080)
+	ownerless := open(7, k, 0)
+	ownerless.Proc = model.Process{}
+	tb.Apply(ownerless)
+
+	if got := tb.Apply(open(7, k, 42)); len(got) != 0 {
+		t.Fatalf("duplicate open emitted %+v", got)
+	}
+	snap := tb.Snapshot()
+	if len(snap) != 1 || len(snap[0].Procs) != 1 || snap[0].Procs[0].PID != 42 {
+		t.Fatalf("snapshot = %+v, want owner pid 42", snap)
+	}
+}
+
+func TestDuplicateOpenKeepsExistingOwner(t *testing.T) {
+	tb := New()
+	k := key("0.0.0.0", 8080)
+	tb.Apply(open(7, k, 10))
+
+	if got := tb.Apply(open(7, k, 42)); len(got) != 0 {
+		t.Fatalf("duplicate open emitted %+v", got)
+	}
+	snap := tb.Snapshot()
+	if len(snap) != 1 || len(snap[0].Procs) != 1 || snap[0].Procs[0].PID != 10 {
+		t.Fatalf("snapshot = %+v, want owner pid 10", snap)
+	}
+}

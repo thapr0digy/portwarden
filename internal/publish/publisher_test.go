@@ -43,10 +43,13 @@ func freePort(t *testing.T) int {
 
 func startServer(t *testing.T, port int, storeDir string) *server.Server {
 	t.Helper()
-	s, err := server.NewServer(&server.Options{
-		Host: "127.0.0.1", Port: port, JetStream: true, StoreDir: storeDir,
-		NoLog: true, NoSigs: true,
-	})
+	return startServerWith(t, &server.Options{Port: port, StoreDir: storeDir})
+}
+
+func startServerWith(t *testing.T, opts *server.Options) *server.Server {
+	t.Helper()
+	opts.Host, opts.JetStream, opts.NoLog, opts.NoSigs = "127.0.0.1", true, true, true
+	s, err := server.NewServer(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,4 +346,103 @@ func TestCloseFlushesQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	readStream(t, port, 20)
+}
+
+func TestResnapshotReflectsChangesMadeDuringOutage(t *testing.T) {
+	port := freePort(t)
+	store := t.TempDir()
+	s := startServer(t, port, store)
+	p := newPublisher(t, port)
+
+	p.Snapshot(snapshotOf(80))
+	readStream(t, port, 1)
+
+	stop(s)
+	p.Changes([]state.Change{openedChange(8080)})
+	startServer(t, port, store)
+
+	msgs := readStream(t, port, 3)
+	if msgs[2].subject != "asm."+testHost+".snapshot" {
+		t.Fatalf("message 3 subject = %q", msgs[2].subject)
+	}
+	var resnap asmv1.Snapshot
+	mustUnmarshal(t, msgs[2].data, &resnap)
+	if resnap.Seq != 3 || len(resnap.Listeners) != 2 ||
+		resnap.Listeners[0].Listener.Port != 80 || resnap.Listeners[1].Listener.Port != 8080 {
+		t.Fatalf("resnapshot = %v, want listeners 80 and 8080 at seq 3", &resnap)
+	}
+}
+
+func TestPermanentPublishErrorIsDroppedAndNextMessageArrives(t *testing.T) {
+	port := freePort(t)
+	startServerWith(t, &server.Options{Port: port, StoreDir: t.TempDir(), MaxPayload: 2048})
+	p := newPublisher(t, port)
+
+	huge := openedChange(9000)
+	huge.Procs = []model.Process{{Exe: string(make([]byte, 4096))}}
+	p.Changes([]state.Change{huge, openedChange(9001)})
+
+	msgs := readStream(t, port, 1)
+	var ev asmv1.ListenerEvent
+	mustUnmarshal(t, msgs[0].data, &ev)
+	if ev.Seq != 2 || ev.Listener.Port != 9001 {
+		t.Fatalf("event = %v, want the second message with seq 2 (gap marks the dropped one)", &ev)
+	}
+	if got := p.q.Dropped(); got != 1 {
+		t.Fatalf("Dropped = %d, want 1", got)
+	}
+}
+
+func TestStreamManagementDeniedStillPublishes(t *testing.T) {
+	port := freePort(t)
+	startServerWith(t, &server.Options{
+		Port: port, StoreDir: t.TempDir(),
+		Users: []*server.User{
+			{Username: "admin", Password: "pw"},
+			{Username: "agent", Password: "pw", Permissions: &server.Permissions{
+				Publish:   &server.SubjectPermission{Allow: []string{"asm.>"}},
+				Subscribe: &server.SubjectPermission{Allow: []string{"_INBOX.>"}},
+			}},
+		},
+	})
+
+	admin, err := nats.Connect("nats://admin:pw@127.0.0.1:" + itoa(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	js, err := jetstream.New(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.CreateStream(context.Background(), jetstream.StreamConfig{
+		Name: streamName, Subjects: []string{"asm.>"}, Storage: jetstream.FileStorage,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := New(context.Background(), Config{URL: "nats://agent:pw@127.0.0.1:" + itoa(port), HostID: testHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	p.Snapshot(snapshotOf())
+	p.Changes([]state.Change{openedChange(8080)})
+
+	tryAdmin := func() ([]got, bool) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return tryRead(ctx, js, 2)
+	}
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		if msgs, ok := tryAdmin(); ok {
+			if s := seqOf(t, msgs[1]); s != 2 {
+				t.Fatalf("second message seq = %d", s)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("messages did not arrive with stream management denied")
 }

@@ -66,3 +66,14 @@ func (q *queue) Dropped() uint64 {
 	defer q.mu.Unlock()
 	return q.dropped
 }
+
+// discard removes the head as undeliverable and counts it as dropped.
+func (q *queue) discard(seq uint64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) > 0 && q.items[0].seq == seq {
+		q.items[0] = outMsg{}
+		q.items = q.items[1:]
+		q.dropped++
+	}
+}

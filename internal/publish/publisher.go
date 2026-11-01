@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,8 +57,10 @@ type Publisher struct {
 
 	mu       sync.Mutex // orders seq assignment with queue.push
 	seq      uint64
-	lastSnap []state.Listener
+	current  map[model.ListenerKey]state.Listener // listeners as of the last enqueued message
 	haveSnap bool
+
+	perms permTracker
 
 	reconnected atomic.Bool
 	wake        chan struct{}
@@ -85,12 +89,13 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	}
 
 	p := &Publisher{
-		hostID: cfg.HostID,
-		runID:  ulid.Make().String(),
-		q:      newQueue(cfg.QueueMax),
-		wake:   make(chan struct{}, 1),
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
+		hostID:  cfg.HostID,
+		current: make(map[model.ListenerKey]state.Listener),
+		runID:   ulid.Make().String(),
+		q:       newQueue(cfg.QueueMax),
+		wake:    make(chan struct{}, 1),
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 
 	opts := []nats.Option{
@@ -104,6 +109,13 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 		nats.ReconnectHandler(func(*nats.Conn) {
 			p.reconnected.Store(true)
 			p.signal()
+		}),
+		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+			if errors.Is(err, nats.ErrPermissionViolation) {
+				p.perms.record(err)
+				return
+			}
+			slog.Warn("nats async error", "err", err)
 		}),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			slog.Warn("nats disconnected", "err", err)
@@ -157,6 +169,7 @@ func (p *Publisher) Changes(changes []state.Change) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, c := range changes {
+		p.applyLocked(c)
 		p.enqueueChange(c)
 	}
 }
@@ -165,9 +178,12 @@ func (p *Publisher) Changes(changes []state.Change) {
 func (p *Publisher) Snapshot(listeners []state.Listener) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.lastSnap = append([]state.Listener(nil), listeners...)
+	p.current = make(map[model.ListenerKey]state.Listener, len(listeners))
+	for _, l := range listeners {
+		p.current[l.Key] = copyListener(l)
+	}
 	p.haveSnap = true
-	p.enqueueSnapshot(p.lastSnap)
+	p.enqueueSnapshot(listeners)
 }
 
 // Heartbeat enqueues a liveness message carrying the drop counters.
@@ -262,14 +278,36 @@ func (p *Publisher) enqueueLocked(suffix, id string, seq uint64, msg proto.Messa
 	p.q.push(outMsg{subject: "asm." + p.hostID + "." + suffix, id: id, seq: seq, data: data})
 }
 
-// resnapshot queues a fresh copy of the last snapshot after a reconnect, so a consumer
-// that missed events while the link was down can resynchronise.
+// applyLocked folds a change into the current listener set.
+func (p *Publisher) applyLocked(c state.Change) {
+	if c.Kind == model.Closed {
+		delete(p.current, c.Key)
+		return
+	}
+	p.current[c.Key] = copyListener(state.Listener{Key: c.Key, Procs: c.Procs})
+}
+
+func copyListener(l state.Listener) state.Listener {
+	return state.Listener{Key: l.Key, Procs: slices.Clone(l.Procs)}
+}
+
+// resnapshot queues a snapshot of the current listener set (the last snapshot plus every
+// change since) after a reconnect, so a consumer that missed events while the link was
+// down can resynchronise without a stale snapshot undoing a later change.
 func (p *Publisher) resnapshot() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.haveSnap {
-		p.enqueueSnapshot(p.lastSnap)
+	if !p.haveSnap {
+		return
 	}
+	listeners := make([]state.Listener, 0, len(p.current))
+	for _, l := range p.current {
+		listeners = append(listeners, l)
+	}
+	slices.SortFunc(listeners, func(a, b state.Listener) int {
+		return strings.Compare(a.Key.String(), b.Key.String())
+	})
+	p.enqueueSnapshot(listeners)
 }
 
 // run is the single sender goroutine. A message that fails stays at the head and is
@@ -306,6 +344,13 @@ func (p *Publisher) run() {
 		}
 
 		err := p.sendOne(m, &streamReady)
+		var perm *permanentError
+		if errors.As(err, &perm) {
+			slog.Error("dropping message that can never be published",
+				"subject", m.subject, "seq", m.seq, "event_id", m.id, "err", perm.err)
+			p.q.discard(m.seq)
+			continue
+		}
 		if err == nil {
 			p.q.pop(m.seq)
 			if failing {
@@ -336,16 +381,97 @@ func (p *Publisher) sendOne(m outMsg, streamReady *bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 	defer cancel()
 	if !*streamReady {
+		mark := p.perms.count()
 		if err := p.ensureStream(ctx); err != nil {
-			return fmt.Errorf("ensure stream: %w", err)
+			if !p.ensureRefused(err, mark) {
+				return fmt.Errorf("ensure stream: %w", err)
+			}
+			slog.Error("cannot create or update stream; assuming an operator manages it",
+				"stream", streamName, "err", err)
 		}
 		*streamReady = true
 	}
+	mark := p.perms.count()
 	msg := &nats.Msg{Subject: m.subject, Data: m.data}
 	if _, err := p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(m.id)); err != nil {
-		return fmt.Errorf("publish %s: %w", m.subject, err)
+		err = fmt.Errorf("publish %s: %w", m.subject, err)
+		if p.publishNeverSucceeds(err, m.subject, mark) {
+			return &permanentError{err}
+		}
+		return err
 	}
 	return nil
+}
+
+// permanentError marks a failure that retrying cannot fix.
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+// publishNeverSucceeds reports whether err means this exact message can never be
+// accepted (too large, bad subject, not permitted, over the stream's message limit).
+// Timeouts, no responders and disconnects are transient and return false.
+func (p *Publisher) publishNeverSucceeds(err error, subject string, permMark uint64) bool {
+	if errors.Is(err, nats.ErrMaxPayload) || errors.Is(err, nats.ErrBadSubject) {
+		return true
+	}
+	var api *jetstream.APIError
+	if errors.As(err, &api) && api.ErrorCode == jetstream.JSErrCodeStreamMessageExceedsMaximum {
+		return true
+	}
+	// The server reports a denied publish only through an async -ERR; the request itself
+	// then just times out.
+	return p.perms.denied(permMark, subject)
+}
+
+// ensureRefused reports whether a stream ensure failed in a way that retrying cannot fix:
+// the user may not manage streams, or the existing stream's config is incompatible.
+func (p *Publisher) ensureRefused(err error, permMark uint64) bool {
+	var api *jetstream.APIError
+	if errors.As(err, &api) {
+		return api.ErrorCode != jetstream.JSErrCodeJetStreamNotEnabled
+	}
+	return p.perms.denied(permMark, "$JS.API.STREAM.")
+}
+
+// permTracker remembers permission violations that the server reports asynchronously.
+type permTracker struct {
+	mu   sync.Mutex
+	n    uint64
+	errs []string
+}
+
+func (t *permTracker) record(err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.n++
+	t.errs = append(t.errs, err.Error())
+	if len(t.errs) > 16 {
+		t.errs = t.errs[1:]
+	}
+}
+
+func (t *permTracker) count() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.n
+}
+
+// denied reports whether a violation mentioning subject was recorded after mark.
+func (t *permTracker) denied(mark uint64, subject string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	fresh := int(t.n - mark)
+	if fresh > len(t.errs) {
+		fresh = len(t.errs)
+	}
+	for _, e := range t.errs[len(t.errs)-fresh:] {
+		if strings.Contains(e, subject) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Publisher) ensureStream(ctx context.Context) error {

@@ -17,7 +17,9 @@ type queue struct {
 	items   []outMsg
 	max     int
 	dropped uint64
-	ready   chan struct{} // capacity 1; signalled by push
+	// overflowed counts only the drops caused by a full queue (a subset of dropped).
+	overflowed uint64
+	ready      chan struct{} // capacity 1; signalled by push
 }
 
 func newQueue(max int) *queue {
@@ -30,6 +32,7 @@ func (q *queue) push(m outMsg) {
 		q.items[0] = outMsg{}
 		q.items = q.items[1:]
 		q.dropped++
+		q.overflowed++
 	}
 	q.items = append(q.items, m)
 	q.mu.Unlock()
@@ -60,11 +63,26 @@ func (q *queue) pop(seq uint64) {
 	}
 }
 
+// Len is the number of queued entries.
+func (q *queue) Len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.items)
+}
+
 // Dropped counts entries discarded because the queue was full.
 func (q *queue) Dropped() uint64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.dropped
+}
+
+// Overflowed counts entries discarded because the queue was full, excluding
+// messages discarded as undeliverable.
+func (q *queue) Overflowed() uint64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.overflowed
 }
 
 // discard removes the head as undeliverable and counts it as dropped.

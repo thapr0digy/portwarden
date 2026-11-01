@@ -59,6 +59,12 @@ type Publisher struct {
 	seq      uint64
 	current  map[model.ListenerKey]state.Listener // listeners as of the last enqueued message
 	haveSnap bool
+	// snapOverflowMark is q.Overflowed() just after the last snapshot was queued. A
+	// higher count means a snapshot or change after it was lost to overflow.
+	snapOverflowMark uint64
+
+	// usingExistingLogged is touched only by the sender goroutine.
+	usingExistingLogged bool
 
 	perms permTracker
 
@@ -75,6 +81,9 @@ type Publisher struct {
 func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	if cfg.URL == "" || cfg.HostID == "" {
 		return nil, errors.New("publish: URL and HostID are required")
+	}
+	if strings.ContainsAny(cfg.HostID, ".*> \t\r\n") {
+		return nil, fmt.Errorf("publish: HostID %q is not a single subject token", cfg.HostID)
 	}
 	if cfg.QueueMax <= 0 {
 		cfg.QueueMax = defaultQueueMax
@@ -106,13 +115,23 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 		// buffer and its drop counter is true.
 		nats.ReconnectBufSize(-1),
 		nats.ReconnectWait(reconnectWait),
+		// Reply inboxes (request replies and JetStream publish acks) live under
+		// _INBOX_<host>.>, so a host user's subscribe permission can be limited to its
+		// own inboxes instead of _INBOX.>, which would let it read every consumer's
+		// deliveries.
+		nats.CustomInboxPrefix(InboxPrefix(cfg.HostID)),
+		// With RetryOnFailedConnect the first successful connect runs ConnectedCB,
+		// later ones ReconnectedCB.
+		nats.ConnectHandler(func(*nats.Conn) { p.signal() }),
 		nats.ReconnectHandler(func(*nats.Conn) {
 			p.reconnected.Store(true)
 			p.signal()
 		}),
 		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
 			if errors.Is(err, nats.ErrPermissionViolation) {
-				p.perms.record(err)
+				if !p.perms.record(err) {
+					slog.Warn("nats permission violation", "subject", violationSubject(err), "err", err)
+				}
 				return
 			}
 			slog.Warn("nats async error", "err", err)
@@ -152,6 +171,9 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	}()
 	return p, nil
 }
+
+// InboxPrefix is the reply-inbox prefix the agent uses for hostID: _INBOX_<hostID>.
+func InboxPrefix(hostID string) string { return "_INBOX_" + hostID }
 
 func readable(path string) error {
 	if path == "" {
@@ -266,6 +288,8 @@ func (p *Publisher) enqueueSnapshot(listeners []state.Listener) {
 		TakenAt:   timestamppb.Now(),
 		Listeners: states,
 	})
+	// Read after the push: a drop the push itself caused is older than this snapshot.
+	p.snapOverflowMark = p.q.Overflowed()
 }
 
 func (p *Publisher) enqueueLocked(suffix, id string, seq uint64, msg proto.Message) {
@@ -297,9 +321,30 @@ func copyListener(l state.Listener) state.Listener {
 func (p *Publisher) resnapshot() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.haveSnap {
-		return
+	if p.haveSnap {
+		p.resnapshotLocked()
 	}
+}
+
+// resnapshotAfterOverflow queues a resnapshot when messages queued after the last
+// snapshot (or that snapshot itself) were dropped for overflow, once the queue has
+// drained; queuing the snapshot moves the mark, so one drop episode yields one
+// snapshot.
+func (p *Publisher) resnapshotAfterOverflow() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Every push holds p.mu, so the queue is still empty here only if no message was
+	// queued since the caller looked.
+	if !p.haveSnap || p.q.Len() > 0 || p.q.Overflowed() == p.snapOverflowMark {
+		return false
+	}
+	slog.Info("queue overflowed; queuing a fresh snapshot",
+		"dropped_since_last_snapshot", p.q.Overflowed()-p.snapOverflowMark)
+	p.resnapshotLocked()
+	return true
+}
+
+func (p *Publisher) resnapshotLocked() {
 	listeners := make([]state.Listener, 0, len(p.current))
 	for _, l := range p.current {
 		listeners = append(listeners, l)
@@ -334,6 +379,9 @@ func (p *Publisher) run() {
 		if !ok {
 			if stopping {
 				return
+			}
+			if p.resnapshotAfterOverflow() {
+				continue
 			}
 			select {
 			case <-p.q.ready:
@@ -381,19 +429,23 @@ func (p *Publisher) sendOne(m outMsg, streamReady *bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 	defer cancel()
 	if !*streamReady {
-		mark := p.perms.count()
-		if err := p.ensureStream(ctx); err != nil {
+		mark := p.perms.expect(streamAPIPrefix)
+		err := p.ensureStream(ctx)
+		p.perms.expect("")
+		if err != nil {
 			if !p.ensureRefused(err, mark) {
 				return fmt.Errorf("ensure stream: %w", err)
 			}
-			slog.Error("cannot create or update stream; assuming an operator manages it",
+			slog.Error("cannot look up or create stream; assuming an operator manages it",
 				"stream", streamName, "err", err)
 		}
 		*streamReady = true
 	}
-	mark := p.perms.count()
+	mark := p.perms.expect(m.subject)
 	msg := &nats.Msg{Subject: m.subject, Data: m.data}
-	if _, err := p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(m.id)); err != nil {
+	_, err := p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(m.id))
+	p.perms.expect("")
+	if err != nil {
 		err = fmt.Errorf("publish %s: %w", m.subject, err)
 		if errors.Is(err, jetstream.ErrNoStreamResponse) {
 			*streamReady = false // stream vanished; re-ensure before the retry
@@ -428,11 +480,13 @@ func (p *Publisher) publishNeverSucceeds(err error, subject string, permMark uin
 	return p.perms.denied(permMark, subject)
 }
 
+const streamAPIPrefix = "$JS.API.STREAM."
+
 // ensureRefused reports whether a stream ensure failed in a way that retrying cannot fix:
-// the user may not manage streams, or the existing stream's config is incompatible.
+// the user may not look up or create streams, or the server refuses the agent's config.
 // Every other error (no leader, insufficient resources, timeouts) is transient.
 func (p *Publisher) ensureRefused(err error, permMark uint64) bool {
-	return configRefused(err) || p.perms.denied(permMark, "$JS.API.STREAM.")
+	return configRefused(err) || p.perms.denied(permMark, streamAPIPrefix)
 }
 
 // Error codes from nats-server v2.15.2 server/jetstream_errors_generated.go.
@@ -443,8 +497,8 @@ const (
 )
 
 // configRefused reports whether err is the server refusing our stream definition for
-// good: an existing stream with a different configuration (JSErrCodeStreamNameInUse),
-// an invalid or overlapping configuration, or an explicit authorization failure.
+// good: an invalid or overlapping configuration, a name-in-use refusal (ensureStream
+// already treats that one as an existing stream), or an explicit authorization failure.
 func configRefused(err error) bool {
 	var api *jetstream.APIError
 	if !errors.As(err, &api) {
@@ -459,12 +513,24 @@ func configRefused(err error) bool {
 
 // permTracker remembers permission violations that the server reports asynchronously.
 type permTracker struct {
-	mu   sync.Mutex
-	n    uint64
-	errs []string
+	mu      sync.Mutex
+	n       uint64
+	errs    []string
+	pending string // subject (or prefix) of the request in flight; "" when none
 }
 
-func (t *permTracker) record(err error) {
+// expect sets the subject of the request about to be sent ("" when it is done) and
+// returns the violation count to pass to denied.
+func (t *permTracker) expect(subject string) uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pending = subject
+	return t.n
+}
+
+// record stores a violation and reports whether it concerns the request in flight,
+// whose caller reports the failure itself.
+func (t *permTracker) record(err error) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.n++
@@ -472,12 +538,28 @@ func (t *permTracker) record(err error) {
 	if len(t.errs) > 16 {
 		t.errs = t.errs[1:]
 	}
+	return t.pending != "" && strings.Contains(err.Error(), t.pending)
 }
 
 func (t *permTracker) count() uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.n
+}
+
+// violationSubject extracts the quoted subject from a server permissions violation
+// ("Permissions Violation for Subscription to \"_INBOX_x.*\""), or "" if there is none.
+func violationSubject(err error) string {
+	msg := err.Error()
+	end := strings.LastIndex(msg, `"`)
+	if end <= 0 {
+		return ""
+	}
+	start := strings.LastIndex(msg[:end], `"`)
+	if start < 0 {
+		return ""
+	}
+	return msg[start+1 : end]
 }
 
 // denied reports whether a violation mentioning subject was recorded after mark.
@@ -496,15 +578,41 @@ func (t *permTracker) denied(mark uint64, subject string) bool {
 	return false
 }
 
+// ensureStream creates ASM_EVENTS with the agent's definition only when it does not
+// exist. An existing stream is used as it is: an operator's retention, replicas or limits
+// are never changed.
 func (p *Publisher) ensureStream(ctx context.Context) error {
-	_, err := p.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+	_, err := p.js.Stream(ctx, streamName)
+	if err == nil {
+		p.logUsingExisting()
+		return nil
+	}
+	if !errors.Is(err, jetstream.ErrStreamNotFound) {
+		return err
+	}
+	_, err = p.js.CreateStream(ctx, jetstream.StreamConfig{
 		Name:       streamName,
 		Subjects:   []string{"asm.>"},
 		Storage:    jetstream.FileStorage,
 		MaxAge:     streamMaxAge,
 		Duplicates: dedupeWindow,
 	})
+	if errors.Is(err, jetstream.ErrStreamNameAlreadyInUse) {
+		// Someone else created it between the lookup and the create.
+		p.logUsingExisting()
+		return nil
+	}
+	if err == nil {
+		slog.Info("created stream", "stream", streamName, "max_age", streamMaxAge)
+	}
 	return err
+}
+
+func (p *Publisher) logUsingExisting() {
+	if !p.usingExistingLogged {
+		p.usingExistingLogged = true
+		slog.Info("using existing stream as-is; its configuration is not changed", "stream", streamName)
+	}
 }
 
 func isClosed(c <-chan struct{}) bool {

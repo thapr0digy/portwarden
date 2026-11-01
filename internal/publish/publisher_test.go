@@ -9,6 +9,9 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -403,7 +406,7 @@ func TestStreamManagementDeniedStillPublishes(t *testing.T) {
 			{Username: "admin", Password: "pw"},
 			{Username: "agent", Password: "pw", Permissions: &server.Permissions{
 				Publish:   &server.SubjectPermission{Allow: []string{"asm.>"}},
-				Subscribe: &server.SubjectPermission{Allow: []string{"_INBOX.>"}},
+				Subscribe: &server.SubjectPermission{Allow: []string{InboxPrefix(testHost) + ".>"}},
 			}},
 		},
 	})
@@ -512,5 +515,356 @@ func TestStreamDeletedWhilePublishingIsReensured(t *testing.T) {
 	mustUnmarshal(t, msgs[0].data, &ev)
 	if ev.Seq != 2 || ev.Listener.Port != 8080 {
 		t.Fatalf("event = %v, want seq 2 port 8080 after the stream was recreated", &ev)
+	}
+}
+
+// assertStreamCount waits briefly for stragglers, then checks the stream holds exactly n.
+func assertStreamCount(t *testing.T, port, n int) {
+	t.Helper()
+	time.Sleep(5 * reconnectWait)
+	nc, err := nats.Connect(natsURL(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	st, err := js.Stream(ctx, streamName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := st.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.State.Msgs != uint64(n) {
+		t.Fatalf("stream holds %d messages, want exactly %d", info.State.Msgs, n)
+	}
+}
+
+func TestExistingStreamConfigIsNotChanged(t *testing.T) {
+	port := freePort(t)
+	store := t.TempDir()
+	serverOpts := func() *server.Options {
+		return &server.Options{
+			Port: port, StoreDir: store,
+			Users: []*server.User{{Username: "admin", Password: "pw"}},
+		}
+	}
+	s := startServerWith(t, serverOpts())
+	url := "nats://admin:pw@127.0.0.1:" + itoa(port)
+	ctx := context.Background()
+	operatorCfg := jetstream.StreamConfig{
+		Name: streamName, Subjects: []string{"asm.>"}, Storage: jetstream.FileStorage,
+		MaxAge: 30 * 24 * time.Hour, Duplicates: 5 * time.Minute, Replicas: 1,
+		MaxMsgs: 123_456, MaxBytes: 64 << 20, MaxMsgsPerSubject: 1000,
+		Description: "managed by the operator",
+	}
+	withAdmin(t, url, func(js jetstream.JetStream) {
+		if _, err := js.CreateStream(ctx, operatorCfg); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var before jetstream.StreamConfig
+	withAdmin(t, url, func(js jetstream.JetStream) { before = streamConfig(t, js) })
+
+	p, err := New(ctx, Config{URL: url, HostID: testHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	p.Snapshot(snapshotOf(80))
+	p.Changes([]state.Change{openedChange(8080)})
+	withAdmin(t, url, func(js jetstream.JetStream) { waitForMsgs(t, js, 2) })
+
+	// A reconnect re-runs the stream check; it must not modify the stream either.
+	stop(s)
+	startServerWith(t, serverOpts())
+	p.Changes([]state.Change{closedChange(8080)})
+	withAdmin(t, url, func(js jetstream.JetStream) {
+		waitForMsgs(t, js, 4) // the change and the reconnect resnapshot
+		after := streamConfig(t, js)
+		if after.MaxAge != before.MaxAge || after.Duplicates != before.Duplicates ||
+			after.MaxMsgs != before.MaxMsgs || after.MaxBytes != before.MaxBytes ||
+			after.MaxMsgsPerSubject != before.MaxMsgsPerSubject || after.Replicas != before.Replicas ||
+			after.Description != before.Description {
+			t.Fatalf("stream config changed:\nbefore %+v\nafter  %+v", before, after)
+		}
+		if after.MaxAge != operatorCfg.MaxAge {
+			t.Fatalf("MaxAge = %v, want the operator's %v", after.MaxAge, operatorCfg.MaxAge)
+		}
+	})
+}
+
+func withAdmin(t *testing.T, url string, f func(jetstream.JetStream)) {
+	t.Helper()
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f(js)
+}
+
+func TestMissingStreamIsCreatedWithAgentConfig(t *testing.T) {
+	port := freePort(t)
+	startServer(t, port, t.TempDir())
+	p := newPublisher(t, port)
+	p.Snapshot(snapshotOf())
+	readStream(t, port, 1)
+
+	nc, err := nats.Connect(natsURL(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := streamConfig(t, js)
+	if cfg.MaxAge != streamMaxAge || cfg.Duplicates != dedupeWindow || !slices.Equal(cfg.Subjects, []string{"asm.>"}) {
+		t.Fatalf("created stream config = %+v", cfg)
+	}
+}
+
+func streamConfig(t *testing.T, js jetstream.JetStream) jetstream.StreamConfig {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	st, err := js.Stream(ctx, streamName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := st.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Config
+}
+
+func waitForMsgs(t *testing.T, js jetstream.JetStream, n int) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, ok := tryRead(ctx, js, n)
+		cancel()
+		if ok {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("stream did not reach %d messages", n)
+}
+
+func TestReplyInboxesUseHostPrefix(t *testing.T) {
+	port := freePort(t)
+	startServer(t, port, t.TempDir())
+	p := newPublisher(t, port)
+	if got, want := p.nc.NewRespInbox(), InboxPrefix(testHost)+"."; !strings.HasPrefix(got, want) {
+		t.Fatalf("resp inbox = %q, want prefix %q", got, want)
+	}
+	if got, want := p.nc.NewInbox(), InboxPrefix(testHost)+"."; !strings.HasPrefix(got, want) {
+		t.Fatalf("inbox = %q, want prefix %q", got, want)
+	}
+}
+
+func TestNewRejectsHostIDThatIsNotOneToken(t *testing.T) {
+	for _, id := range []string{"a.b", "a*", "a>", "a b"} {
+		if _, err := New(context.Background(), Config{URL: "nats://127.0.0.1:1", HostID: id}); err == nil {
+			t.Errorf("HostID %q: want error", id)
+		}
+	}
+}
+
+func TestSnapshotDroppedBeforeFirstConnectIsResent(t *testing.T) {
+	port := freePort(t)
+	p, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, QueueMax: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+
+	p.Snapshot(snapshotOf(80)) // seq 1, dropped by the third change
+	p.Changes([]state.Change{openedChange(8080), openedChange(8081), openedChange(8082)})
+	startServer(t, port, t.TempDir())
+
+	msgs := readStream(t, port, 4)
+	want := []string{"listener.opened", "listener.opened", "listener.opened", "snapshot"}
+	for i, g := range msgs {
+		if g.subject != "asm."+testHost+"."+want[i] {
+			t.Errorf("message %d subject = %q, want %q", i, g.subject, want[i])
+		}
+		if s := seqOf(t, g); s != uint64(i+2) {
+			t.Errorf("message %d seq = %d, want %d", i, s, i+2)
+		}
+	}
+	var snap asmv1.Snapshot
+	mustUnmarshal(t, msgs[3].data, &snap)
+	var ports []uint32
+	for _, l := range snap.Listeners {
+		ports = append(ports, l.Listener.Port)
+	}
+	if !slices.Equal(ports, []uint32{80, 8080, 8081, 8082}) {
+		t.Fatalf("resnapshot ports = %v, want [80 8080 8081 8082]", ports)
+	}
+	assertStreamCount(t, port, 4) // one resnapshot per drop episode, not a loop
+}
+
+func TestDropWhileConnectedTriggersOneResnapshot(t *testing.T) {
+	port := freePort(t)
+	startServer(t, port, t.TempDir())
+	p, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, QueueMax: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	p.Snapshot(snapshotOf(80))
+	readStream(t, port, 1)
+
+	// Changes holds p.mu for the whole batch, so the sender cannot drain in between:
+	// three pushes into a queue of two drop at least one.
+	p.Changes([]state.Change{openedChange(8080), openedChange(8081), openedChange(8082)})
+	if p.q.Overflowed() == 0 {
+		t.Skip("sender drained the queue during the batch; no overflow to test")
+	}
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		nc, _ := nats.Connect(natsURL(port))
+		js, _ := jetstream.New(nc)
+		st, err := js.Stream(ctx, streamName)
+		var last uint64
+		if err == nil {
+			if info, err := st.Info(ctx); err == nil {
+				last = info.State.LastSeq
+			}
+		}
+		if last > 0 {
+			if raw, err := st.GetMsg(ctx, last); err == nil && raw.Subject == "asm."+testHost+".snapshot" && last > 1 {
+				var snap asmv1.Snapshot
+				mustUnmarshal(t, raw.Data, &snap)
+				cancel()
+				nc.Close()
+				if len(snap.Listeners) != 4 {
+					t.Fatalf("resnapshot has %d listeners, want 4", len(snap.Listeners))
+				}
+				assertStreamCount(t, port, int(last))
+				return
+			}
+		}
+		cancel()
+		nc.Close()
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("no resnapshot after an overflow while connected")
+}
+
+func TestNoResnapshotWithoutDrops(t *testing.T) {
+	port := freePort(t)
+	p, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, QueueMax: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	p.Snapshot(snapshotOf(80))
+	p.Changes([]state.Change{openedChange(8080), closedChange(8080)})
+	startServer(t, port, t.TempDir())
+	readStream(t, port, 3)
+	p.Heartbeat(0, 0)
+	readStream(t, port, 4)
+	assertStreamCount(t, port, 4)
+}
+
+// captureLogs routes slog to a buffer for the test's duration.
+type logCapture struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (c *logCapture) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(b)
+}
+
+func (c *logCapture) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
+func captureLogs(t *testing.T) *logCapture {
+	t.Helper()
+	c := &logCapture{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(c, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return c
+}
+
+func TestUnmatchedPermissionViolationIsLogged(t *testing.T) {
+	logs := captureLogs(t)
+	port := freePort(t)
+	startServerWith(t, &server.Options{
+		Port: port, StoreDir: t.TempDir(),
+		Users: []*server.User{
+			{Username: "admin", Password: "pw"},
+			// Missing its inbox permission: publish acks can never reach it.
+			{Username: "agent", Password: "pw", Permissions: &server.Permissions{
+				Publish:   &server.SubjectPermission{Allow: []string{"asm.>"}},
+				Subscribe: &server.SubjectPermission{Allow: []string{"nothing"}},
+			}},
+		},
+	})
+	p, err := New(context.Background(), Config{URL: "nats://agent:pw@127.0.0.1:" + itoa(port), HostID: testHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	p.Snapshot(snapshotOf())
+
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		out := logs.String()
+		if strings.Contains(out, "level=WARN") && strings.Contains(out, `msg="nats permission violation"`) &&
+			strings.Contains(out, "subject="+InboxPrefix(testHost)+".") {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("no Warn for the inbox subscription violation; logs:\n%s", logs.String())
+}
+
+func TestPermTrackerMatchesPendingRequest(t *testing.T) {
+	var tr permTracker
+	viol := func(subj string) error {
+		return fmt.Errorf("%w: Permissions Violation for Publish to %q", nats.ErrPermissionViolation, subj)
+	}
+	if tr.record(viol("asm.x.snapshot")) {
+		t.Error("nothing pending: must not match")
+	}
+	tr.expect("asm.x.snapshot")
+	if !tr.record(viol("asm.x.snapshot")) {
+		t.Error("pending publish: must match")
+	}
+	if tr.record(viol("_INBOX_x.abc.*")) {
+		t.Error("inbox violation during a publish must not match")
+	}
+	tr.expect("")
+	if got := violationSubject(viol("_INBOX_x.abc.*")); got != "_INBOX_x.abc.*" {
+		t.Errorf("violationSubject = %q", got)
+	}
+	if got := violationSubject(errors.New("no quotes")); got != "" {
+		t.Errorf("violationSubject = %q, want empty", got)
 	}
 }

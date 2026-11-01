@@ -8,7 +8,7 @@ sudo mkdir -p /etc/nats /var/lib/nats
 sudo install -m 0644 deploy/nats-server.conf /etc/nats/nats-server.conf
 sudo tee /etc/systemd/system/nats-server.service >/dev/null <<'UNIT'
 [Unit]
-Description=NATS server (Listener Watch dev)
+Description=NATS server (Portwarden dev)
 After=network.target
 
 [Service]

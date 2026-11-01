@@ -1,11 +1,11 @@
-# Dev VM for Listener Watch (Lima 2.x). Start with `make vm`.
+# Dev VM for Portwarden (Lima 2.x). Start with `make vm`.
 base: template:_images/ubuntu-24.04
 cpus: 4
 memory: 4GiB
 disk: 30GiB
 mounts:
   # mountPoint defaults to the host path, so `cd <repo>` works in `limactl shell`.
-  - location: "{{.Home}}/projects/listener-watch"
+  - location: "{{.Home}}/projects/portwarden"
     writable: true
 provision:
   - mode: system
@@ -13,5 +13,5 @@ provision:
       #!/bin/bash
       set -eux
       # Lima exposes each mount as LIMA_CIDATA_MOUNTS_<n>_MOUNTPOINT.
-      repo=$(env | sed -n 's/^LIMA_CIDATA_MOUNTS_[0-9]*_MOUNTPOINT=//p' | grep '/listener-watch$' | head -1)
+      repo=$(env | sed -n 's/^LIMA_CIDATA_MOUNTS_[0-9]*_MOUNTPOINT=//p' | grep '/portwarden$' | head -1)
       exec "$repo/dev/provision.sh"

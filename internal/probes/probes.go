@@ -18,7 +18,7 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 	"golang.org/x/sys/unix"
 
-	"github.com/thapr0digy/listener-watch/internal/model"
+	"github.com/thapr0digy/portwarden/internal/model"
 )
 
 // Event kinds and counter slots, as defined in bpf/listen.bpf.c.

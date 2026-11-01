@@ -1,4 +1,4 @@
-// lw-watch prints the ASM_EVENTS stream, one line per message, for humans and for
+// portwarden-watch prints the ASM_EVENTS stream, one line per message, for humans and for
 // dev/e2e.sh. It is read-only: an ordered consumer leaves no state on the server.
 package main
 
@@ -26,7 +26,7 @@ type options struct {
 
 func parseFlags(args []string) (options, error) {
 	var o options
-	fs := flag.NewFlagSet("lw-watch", flag.ContinueOnError)
+	fs := flag.NewFlagSet("portwarden-watch", flag.ContinueOnError)
 	fs.StringVar(&o.natsURL, "nats-url", "nats://127.0.0.1:4222", "NATS server URL")
 	fs.StringVar(&o.host, "host", "*", "host id (contents of /etc/machine-id) to watch, or * for all hosts")
 	fs.DurationVar(&o.since, "since", 10*time.Minute, "replay messages from this long ago (0s = only new messages)")
@@ -48,19 +48,19 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)
 		}
-		fmt.Fprintln(os.Stderr, "lw-watch:", err)
+		fmt.Fprintln(os.Stderr, "portwarden-watch:", err)
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	if err := run(ctx, opts); err != nil {
-		fmt.Fprintln(os.Stderr, "lw-watch:", err)
+		fmt.Fprintln(os.Stderr, "portwarden-watch:", err)
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, opts options) error {
-	nc, err := nats.Connect(opts.natsURL, nats.Name("lw-watch"))
+	nc, err := nats.Connect(opts.natsURL, nats.Name("portwarden-watch"))
 	if err != nil {
 		return fmt.Errorf("connect %s: %w", opts.natsURL, err)
 	}
@@ -87,7 +87,7 @@ func run(ctx context.Context, opts options) error {
 	cc, err := cons.Consume(func(m jetstream.Msg) {
 		p, err := parseMessage(m.Subject(), m.Data())
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "lw-watch:", err)
+			fmt.Fprintln(os.Stderr, "portwarden-watch:", err)
 			return
 		}
 		if gap := gaps.check(p.run, p.seq); gap != "" {

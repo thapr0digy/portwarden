@@ -8,7 +8,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	asmv1 "github.com/thapr0digy/listener-watch/gen/asm/v1"
+	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
 )
 
 const hostID = "0123456789abcdef0123456789abcdef"

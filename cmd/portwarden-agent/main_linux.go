@@ -1,6 +1,6 @@
 //go:build linux
 
-// Command lw-agent reports the host's TCP listening sockets to NATS JetStream.
+// Command portwarden-agent reports the host's TCP listening sockets to NATS JetStream.
 package main
 
 import (
@@ -17,13 +17,13 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/thapr0digy/listener-watch/internal/agent"
-	"github.com/thapr0digy/listener-watch/internal/baseline"
-	"github.com/thapr0digy/listener-watch/internal/hostid"
-	"github.com/thapr0digy/listener-watch/internal/preflight"
-	"github.com/thapr0digy/listener-watch/internal/probes"
-	"github.com/thapr0digy/listener-watch/internal/publish"
-	"github.com/thapr0digy/listener-watch/internal/state"
+	"github.com/thapr0digy/portwarden/internal/agent"
+	"github.com/thapr0digy/portwarden/internal/baseline"
+	"github.com/thapr0digy/portwarden/internal/hostid"
+	"github.com/thapr0digy/portwarden/internal/preflight"
+	"github.com/thapr0digy/portwarden/internal/probes"
+	"github.com/thapr0digy/portwarden/internal/publish"
+	"github.com/thapr0digy/portwarden/internal/state"
 )
 
 type options struct {
@@ -33,7 +33,7 @@ type options struct {
 
 func parseFlags(args []string) (options, error) {
 	var o options
-	fs := flag.NewFlagSet("lw-agent", flag.ContinueOnError)
+	fs := flag.NewFlagSet("portwarden-agent", flag.ContinueOnError)
 	fs.StringVar(&o.natsURL, "nats-url", "nats://127.0.0.1:4222", "NATS server URL")
 	fs.StringVar(&o.natsCreds, "nats-creds", "", "NATS credentials file")
 	fs.StringVar(&o.tlsCA, "tls-ca", "", "CA certificate for the NATS server")
@@ -58,11 +58,11 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)
 		}
-		fmt.Fprintln(os.Stderr, "lw-agent:", err)
+		fmt.Fprintln(os.Stderr, "portwarden-agent:", err)
 		os.Exit(2)
 	}
 	if err := run(opts, log); err != nil {
-		log.Error("lw-agent failed", "error", err.Error())
+		log.Error("portwarden-agent failed", "error", err.Error())
 		os.Exit(1)
 	}
 }

@@ -5,7 +5,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/thapr0digy/listener-watch/internal/model"
+	"github.com/thapr0digy/portwarden/internal/model"
 )
 
 // Change is a listener-level transition produced by Table.Apply.

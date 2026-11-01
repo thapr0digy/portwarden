@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end check, run inside the VM as the dev user with sudo (make e2e).
-#   1. latency: listen() on :8099 -> an OPENED line from lw-watch, must be <= 1000 ms;
+#   1. latency: listen() on :8099 -> an OPENED line from portwarden-watch, must be <= 1000 ms;
 #      closing it must produce CLOSED within 5 s.
 #   2. efficiency: with kernel.bpf_stats_enabled=1, 10 000 real TCP connections accepted
 #      by a python http.server must not run any of the agent's BPF programs.
 # Self-contained: it builds its own binaries, runs its own nats-server on a private port
-# and store, stops the lw-agent systemd unit while it runs (it would share the BPF
+# and store, stops the portwarden-agent systemd unit while it runs (it would share the BPF
 # programs' run counters) and puts everything back on exit.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -39,12 +39,12 @@ cleanup() {
 	trap - EXIT
 	for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
 	if [ -n "$agent_pid" ]; then
-		sudo pkill -TERM -f "$work/lw-agent" 2>/dev/null || true
+		sudo pkill -TERM -f "$work/portwarden-agent" 2>/dev/null || true
 		wait "$agent_pid" 2>/dev/null || true
 	fi
 	for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
 	[ -n "$old_bpf_stats" ] && sudo sysctl -q kernel.bpf_stats_enabled="$old_bpf_stats" || true
-	$unit_was_active && sudo systemctl start lw-agent || true
+	$unit_was_active && sudo systemctl start portwarden-agent || true
 	rm -rf "$work"
 	exit "$status"
 }
@@ -72,7 +72,7 @@ seen() { [ "$(grep -c -- "$1" "$work/watch.log" || true)" -ge "$2" ]; }
 # later or renames is picked up without editing this script.
 agent_prog_ids() {
 	local pid
-	pid=$(pgrep -f "^$work/lw-agent ") || fail "lw-agent process not found"
+	pid=$(pgrep -f "^$work/portwarden-agent ") || fail "portwarden-agent process not found"
 	sudo sh -c "cat /proc/$pid/fdinfo/* 2>/dev/null" | awk '/^prog_id:/ {print $2}' | sort -un
 }
 
@@ -97,26 +97,26 @@ ss -Hltn "sport = :$SERVER_PORT" | grep -q . && fail "port $SERVER_PORT is alrea
 mkdir -p "$work/www"
 
 log "building"
-go build -o "$work/lw-agent" ./cmd/lw-agent
-go build -o "$work/lw-watch" ./cmd/lw-watch
+go build -o "$work/portwarden-agent" ./cmd/portwarden-agent
+go build -o "$work/portwarden-watch" ./cmd/portwarden-watch
 
-systemctl is-active --quiet lw-agent && unit_was_active=true
-$unit_was_active && sudo systemctl stop lw-agent
+systemctl is-active --quiet portwarden-agent && unit_was_active=true
+$unit_was_active && sudo systemctl stop portwarden-agent
 
 nats-server -js -a 127.0.0.1 -p "$NATS_PORT" -sd "$work/js" >"$work/nats.log" 2>&1 &
 pids+=($!)
 wait_for "nats-server" 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$NATS_PORT" 2>/dev/null
 
-sudo "$work/lw-agent" --nats-url "$nats_url" --heartbeat 1s >"$work/agent.log" 2>&1 &
+sudo "$work/portwarden-agent" --nats-url "$nats_url" --heartbeat 1s >"$work/agent.log" 2>&1 &
 agent_pid=$!
-agent_alive() { kill -0 "$agent_pid" 2>/dev/null || fail "lw-agent exited early"; }
+agent_alive() { kill -0 "$agent_pid" 2>/dev/null || fail "portwarden-agent exited early"; }
 stream_ready() { agent_alive; nats --server "$nats_url" stream info ASM_EVENTS >/dev/null 2>&1; }
 wait_for "stream ASM_EVENTS" 15 stream_ready
 
-"$work/lw-watch" --nats-url "$nats_url" --since 0s >"$work/watch.log" 2>&1 &
+"$work/portwarden-watch" --nats-url "$nats_url" --since 0s >"$work/watch.log" 2>&1 &
 pids+=($!)
 # A heartbeat arriving proves the consumer is live before any listener is opened.
-wait_for "first heartbeat in lw-watch" 10 seen HEARTBEAT 1
+wait_for "first heartbeat in portwarden-watch" 10 seen HEARTBEAT 1
 
 log "latency: listen on :$SERVER_PORT"
 t0=$(now_ns)
@@ -168,5 +168,5 @@ else
 fi
 [ "$runs" -eq 0 ] || fail "BPF programs ran $runs times during the connection load"
 
-! grep -q '^GAP ' "$work/watch.log" || fail "lw-watch reported a GAP"
+! grep -q '^GAP ' "$work/watch.log" || fail "portwarden-watch reported a GAP"
 log "ok"

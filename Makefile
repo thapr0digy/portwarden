@@ -1,5 +1,5 @@
-# Kernel-touching targets run inside the Lima VM named "lw" (see dev/lima.yaml).
-VM := lw
+# Kernel-touching targets run inside the Lima VM named "portwarden" (see dev/lima.yaml).
+VM := portwarden
 REPO := $(CURDIR)
 
 .PHONY: vm generate test itest e2e install-agent
@@ -21,6 +21,6 @@ itest:
 e2e:
 	limactl shell $(VM) bash -lc 'cd $(REPO) && dev/e2e.sh'
 
-# Builds, installs and enables the lw-agent systemd unit in the VM (dev/install-agent.sh).
+# Builds, installs and enables the portwarden-agent systemd unit in the VM (dev/install-agent.sh).
 install-agent:
 	limactl shell $(VM) bash -lc 'cd $(REPO) && dev/install-agent.sh'

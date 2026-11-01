@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/thapr0digy/listener-watch/internal/model"
+	"github.com/thapr0digy/portwarden/internal/model"
 )
 
 // Snapshot returns one baseline Opened observation per TCP listener in the host

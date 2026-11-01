@@ -20,9 +20,9 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
-	asmv1 "github.com/thapr0digy/listener-watch/gen/asm/v1"
-	"github.com/thapr0digy/listener-watch/internal/model"
-	"github.com/thapr0digy/listener-watch/internal/state"
+	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
+	"github.com/thapr0digy/portwarden/internal/model"
+	"github.com/thapr0digy/portwarden/internal/state"
 )
 
 const (

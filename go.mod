@@ -1,4 +1,4 @@
-module github.com/thapr0digy/listener-watch
+module github.com/thapr0digy/portwarden
 
 go 1.26.3
 

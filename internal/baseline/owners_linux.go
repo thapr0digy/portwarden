@@ -12,8 +12,8 @@ import (
 
 	"github.com/cilium/ebpf/link"
 
-	"github.com/thapr0digy/listener-watch/internal/model"
-	"github.com/thapr0digy/listener-watch/internal/probes"
+	"github.com/thapr0digy/portwarden/internal/model"
+	"github.com/thapr0digy/portwarden/internal/probes"
 )
 
 // ownerRecord mirrors struct owner in bpf/owners.bpf.c, the record the iterator writes

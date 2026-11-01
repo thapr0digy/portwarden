@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/thapr0digy/listener-watch/internal/model"
-	"github.com/thapr0digy/listener-watch/internal/state"
+	"github.com/thapr0digy/portwarden/internal/model"
+	"github.com/thapr0digy/portwarden/internal/state"
 )
 
 // EventSource delivers live observations from the kernel probes.

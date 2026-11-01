@@ -1,4 +1,4 @@
-# Listener Watch
+# Portwarden
 
 A Go agent with C eBPF programs that reports TCP listening sockets (host network namespace) to NATS JetStream.
 M1 scope: TCP only, host netns only. Kernel floor 6.8 (Ubuntu 24.04+).
@@ -13,7 +13,7 @@ Kernel-touching work happens in a Lima VM named `lw` (Ubuntu 24.04), which mount
 | `make generate` | In the VM: `buf generate` then `go generate ./...` (protobuf and bpf2go) |
 | `make test` | `go test ./...` (macOS or Linux, no root) |
 | `make itest` | In the VM: `dev/itest.sh` builds each package's `-tags integration` test binary as the VM user, then runs only the binaries as root (real kernel), so the Go caches stay user-owned. Extra args go to each binary: `limactl shell lw bash -lc 'cd $PWD && dev/itest.sh -test.run TestSnapshot'` |
-| `make e2e` | In the VM: `dev/e2e.sh` builds both binaries, runs its own nats-server (port 4333) and agent (the `lw-agent` unit is stopped meanwhile and restarted after), prints `opened latency: <n> ms` (must be <= 1000) and `bpf runs during load: <n>` (must be 0 over 10 000 real connections with `kernel.bpf_stats_enabled=1`), exits non-zero on any miss |
+| `make e2e` | In the VM: `dev/e2e.sh` builds both binaries, runs its own nats-server (port 4333) and agent (the `portwarden-agent` unit is stopped meanwhile and restarted after), prints `opened latency: <n> ms` (must be <= 1000) and `bpf runs during load: <n>` (must be 0 over 10 000 real connections with `kernel.bpf_stats_enabled=1`), exits non-zero on any miss |
 
 `gen/asm/v1/events.pb.go` is committed, so `go build ./...` works on macOS without `buf`.
 `bpf/vmlinux.h` is produced in the VM with `bpftool btf dump file /sys/kernel/btf/vmlinux format c`.
@@ -53,9 +53,9 @@ Edge cases:
 - Order: a cookie-assigning dump, then owners, then the dump that is reported. A socket that appears after the owners were read is reported without an owner (the live probe has its `opened` with the owner).
 - MPTCP (Go's default for listeners): the fd holds the MPTCP socket, but inet_diag and the probe see its first TCP subflow, so the iterator reports the subflow's cookie. On 6.8 it can only read that cookie (via `bpf_rdonly_cast`), not assign it, and the kernel assigns cookies lazily; the first dump assigns them. `SO_COOKIE` on an MPTCP fd returns the MPTCP socket's own cookie, not the subflow's.
 
-## Running the agent (`lw-agent`)
+## Running the agent (`portwarden-agent`)
 
-`go build ./cmd/lw-agent` (Linux only; other platforms print "linux only" and exit 1).
+`go build ./cmd/portwarden-agent` (Linux only; other platforms print "linux only" and exit 1).
 
 | Flag | Default | |
 | --- | --- | --- |
@@ -67,9 +67,9 @@ Edge cases:
 
 Logs are JSON (`log/slog`) on stderr. The agent exits non-zero, with the reason, when the kernel is older than 6.8, `/sys/kernel/btf/vmlinux` is missing, lockdown is `confidentiality`, a BPF program fails to load or attach (the verifier log is included), or the probe reader stops. On SIGTERM it stops the probes, flushes the queue for up to 2 s and exits 0. The startup checks live in `internal/preflight`.
 
-## Watching the stream (`lw-watch`)
+## Watching the stream (`portwarden-watch`)
 
-`go run ./cmd/lw-watch [--nats-url nats://127.0.0.1:4222] [--host <machine-id>|*] [--since 10m]` prints one line per message from `ASM_EVENTS` (ordered consumer on `asm.<host>.>`, replaying from now minus `--since`; `--since 0s` is new messages only; `--host` defaults to `*`, all hosts). The host column is the first 8 characters of `host_id`.
+`go run ./cmd/portwarden-watch [--nats-url nats://127.0.0.1:4222] [--host <machine-id>|*] [--since 10m]` prints one line per message from `ASM_EVENTS` (ordered consumer on `asm.<host>.>`, replaying from now minus `--since`; `--since 0s` is new messages only; `--host` defaults to `*`, all hosts). The host column is the first 8 characters of `host_id`.
 
 ```
 2026-10-30T14:02:11.418Z 0123abcd seq=42 OPENED tcp 0.0.0.0:8443 pid=4410 /opt/app/bin/server
@@ -82,9 +82,9 @@ Only the first process is shown (`(+N more)` for further holders); `HEARTBEAT dr
 
 ### systemd
 
-`deploy/lw-agent.service` runs it as the static `lw-agent` user with only `CAP_BPF CAP_PERFMON CAP_SYS_PTRACE` (`CAP_SYS_PTRACE` is only for reading `/proc/<pid>/exe` of other users' processes), `NoNewPrivileges`, `ProtectSystem=strict` and `ProtectHome`. It is `WantedBy=sysinit.target` with `DefaultDependencies=no`, so it starts before the network; the publisher queues until NATS is reachable. `ProtectKernelTunables` is deliberately off: it hides `/proc/kallsyms`.
+`deploy/portwarden-agent.service` runs it as the static `portwarden-agent` user with only `CAP_BPF CAP_PERFMON CAP_SYS_PTRACE` (`CAP_SYS_PTRACE` is only for reading `/proc/<pid>/exe` of other users' processes), `NoNewPrivileges`, `ProtectSystem=strict` and `ProtectHome`. It is `WantedBy=sysinit.target` with `DefaultDependencies=no`, so it starts before the network; the publisher queues until NATS is reachable. `ProtectKernelTunables` is deliberately off: it hides `/proc/kallsyms`.
 
-In the VM, `make install-agent` (`dev/install-agent.sh`) builds the binary, creates the user, installs the binary to `/usr/local/bin` and the unit, then enables and restarts it. `dev/install-nats.sh` installs `deploy/nats-server.conf` and runs nats-server as a service so there is a broker across reboots. Check with `sudo journalctl -u lw-agent` (look for `snapshot queued`: the snapshot is queued for NATS, not necessarily delivered yet; `nats publishing resumed` or a stream message confirms delivery) and `nats stream info ASM_EVENTS`.
+In the VM, `make install-agent` (`dev/install-agent.sh`) builds the binary, creates the user, installs the binary to `/usr/local/bin` and the unit, then enables and restarts it. `dev/install-nats.sh` installs `deploy/nats-server.conf` and runs nats-server as a service so there is a broker across reboots. Check with `sudo journalctl -u portwarden-agent` (look for `snapshot queued`: the snapshot is queued for NATS, not necessarily delivered yet; `nats publishing resumed` or a stream message confirms delivery) and `nats stream info ASM_EVENTS`.
 
 Stream: on connect (and after each reconnect) the agent looks up `ASM_EVENTS` and creates it (file storage, `asm.>`, 7-day max age, 2-minute dedupe window) only if it does not exist. An existing stream is used as it is: its retention, replicas and limits are never changed.
 

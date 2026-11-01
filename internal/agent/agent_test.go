@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thapr0digy/listener-watch/internal/model"
-	"github.com/thapr0digy/listener-watch/internal/state"
+	"github.com/thapr0digy/portwarden/internal/model"
+	"github.com/thapr0digy/portwarden/internal/state"
 )
 
 var t0 = time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)

@@ -664,7 +664,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x06Source\x12\x16\n" +
 	"\x12SOURCE_UNSPECIFIED\x10\x00\x12\b\n" +
 	"\x04EBPF\x10\x01\x12\f\n" +
-	"\bBASELINE\x10\x02B7Z5github.com/thapr0digy/listener-watch/gen/asm/v1;asmv1b\x06proto3"
+	"\bBASELINE\x10\x02B3Z1github.com/thapr0digy/portwarden/gen/asm/v1;asmv1b\x06proto3"
 
 var (
 	file_asm_v1_events_proto_rawDescOnce sync.Once

@@ -22,9 +22,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	asmv1 "github.com/thapr0digy/listener-watch/gen/asm/v1"
-	"github.com/thapr0digy/listener-watch/internal/model"
-	"github.com/thapr0digy/listener-watch/internal/state"
+	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
+	"github.com/thapr0digy/portwarden/internal/model"
+	"github.com/thapr0digy/portwarden/internal/state"
 )
 
 const (
@@ -108,7 +108,7 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	}
 
 	opts := []nats.Option{
-		nats.Name("listener-watch"),
+		nats.Name("portwarden"),
 		nats.MaxReconnects(-1),
 		nats.RetryOnFailedConnect(true),
 		// Turn off nats.go's own reconnect buffer so the bounded queue is the only

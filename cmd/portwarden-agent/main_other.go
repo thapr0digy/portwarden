@@ -8,6 +8,6 @@ import (
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, "lw-agent: linux only")
+	fmt.Fprintln(os.Stderr, "portwarden-agent: linux only")
 	os.Exit(1)
 }

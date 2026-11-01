@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thapr0digy/listener-watch/internal/model"
+	"github.com/thapr0digy/portwarden/internal/model"
 )
 
 var t0 = time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)

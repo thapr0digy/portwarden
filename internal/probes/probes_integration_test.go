@@ -14,7 +14,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/thapr0digy/listener-watch/internal/model"
+	"github.com/thapr0digy/portwarden/internal/model"
 )
 
 const eventWait = 500 * time.Millisecond

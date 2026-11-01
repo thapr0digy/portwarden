@@ -3,7 +3,7 @@ package baseline
 import (
 	"time"
 
-	"github.com/thapr0digy/listener-watch/internal/model"
+	"github.com/thapr0digy/portwarden/internal/model"
 )
 
 // join turns the dumped listeners into baseline Opened observations: one per socket

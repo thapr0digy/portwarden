@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thapr0digy/listener-watch/internal/model"
+	"github.com/thapr0digy/portwarden/internal/model"
 )
 
 func TestSnapshotKeepsOwnerlessListener(t *testing.T) {

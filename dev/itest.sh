@@ -9,17 +9,26 @@ cd "$(dirname "$0")/.."
 bin=$(mktemp -d)
 trap 'rm -rf "$bin"' EXIT
 
+# Captured first so that set -e catches a load error (a broken integration-tagged file).
+pkgs=$(go list -tags integration -f '{{.ImportPath}} {{.Dir}}' ./...)
+if [ -z "$pkgs" ]; then
+	echo "itest: go list found no packages" >&2
+	exit 1
+fi
+
 status=0
 while read -r pkg dir; do
 	test_bin="$bin/${pkg//\//_}.test"
 	go test -c -tags integration -o "$test_bin" "$pkg"
 	[ -f "$test_bin" ] || continue # package has no tests
-	# Run from the package directory, as `go test` does, so testdata/ resolves.
-	if (cd "$dir" && sudo "$test_bin" "$@"); then
+	# Run from the package directory, as `go test` does, so testdata/ resolves. Only PATH
+	# is passed through (tests may run tools such as nats-server from it); the binaries
+	# no longer invoke go, so root never touches the user's Go caches.
+	if (cd "$dir" && sudo env PATH="$PATH" "$test_bin" "$@"); then
 		echo "ok   $pkg"
 	else
 		echo "FAIL $pkg"
 		status=1
 	fi
-done < <(go list -tags integration -f '{{.ImportPath}} {{.Dir}}' ./...)
+done <<<"$pkgs"
 exit "$status"

@@ -473,7 +473,7 @@ func TestConfigRefusedClassification(t *testing.T) {
 		}
 	}
 	var p Publisher
-	if !p.ensureRefused(errors.New("timeout"), 0) == false {
+	if p.ensureRefused(errors.New("timeout"), 0) {
 		t.Error("plain error must not be refused without a recorded permission violation")
 	}
 	p.perms.record(fmt.Errorf("%w: Permissions Violation for Publish to \"$JS.API.STREAM.UPDATE.ASM_EVENTS\"", nats.ErrPermissionViolation))

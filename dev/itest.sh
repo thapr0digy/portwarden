@@ -21,9 +21,10 @@ while read -r pkg dir; do
 	test_bin="$bin/${pkg//\//_}.test"
 	go test -c -tags integration -o "$test_bin" "$pkg"
 	[ -f "$test_bin" ] || continue # package has no tests
-	# Run from the package directory, as `go test` does, so testdata/ resolves. Only PATH
-	# is passed through (tests may run tools such as nats-server from it); the binaries
-	# no longer invoke go, so root never touches the user's Go caches.
+	# Run from the package directory, as `go test` does, so testdata/ resolves. Only the
+	# user's PATH is passed through (tests may run tools such as nats-server from it);
+	# sudo still resets HOME to /root and drops GOCACHE, so root never writes the user's
+	# Go caches.
 	if (cd "$dir" && sudo env PATH="$PATH" "$test_bin" "$@"); then
 		echo "ok   $pkg"
 	else

@@ -1,0 +1,15 @@
+# Dev VM for Listener Watch (Lima 2.x). Start with `make vm`.
+base: template:_images/ubuntu-24.04
+cpus: 4
+memory: 4GiB
+disk: 30GiB
+mounts:
+  - location: "~/projects/listener-watch"
+    mountPoint: "/Users/pr0digy/projects/listener-watch"
+    writable: true
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      /Users/pr0digy/projects/listener-watch/dev/provision.sh

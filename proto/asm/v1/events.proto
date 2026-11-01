@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package asm.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/thapr0digy/listener-watch/gen/asm/v1;asmv1";
+
+enum Kind {
+  KIND_UNSPECIFIED = 0;
+  OPENED = 1;
+  CLOSED = 2;
+}
+
+enum Source {
+  SOURCE_UNSPECIFIED = 0;
+  EBPF = 1;
+  BASELINE = 2;
+}
+
+message Listener {
+  uint32 netns = 1;
+  string proto = 2;
+  string addr = 3;
+  uint32 port = 4;
+  string key = 5;
+}
+
+message Process {
+  uint32 pid = 1;
+  uint32 uid = 2;
+  string comm = 3;
+  string exe = 4;
+}
+
+message ListenerEvent {
+  string event_id = 1;
+  string host_id = 2;
+  string run_id = 3;
+  uint64 seq = 4;
+  google.protobuf.Timestamp observed_at = 5;
+  Kind kind = 6;
+  Source source = 7;
+  Listener listener = 8;
+  repeated Process processes = 9;
+}
+
+message ListenerState {
+  Listener listener = 1;
+  repeated Process processes = 2;
+}
+
+message Snapshot {
+  string event_id = 1;
+  string host_id = 2;
+  string run_id = 3;
+  uint64 seq = 4;
+  google.protobuf.Timestamp taken_at = 5;
+  repeated ListenerState listeners = 6;
+}
+
+message Heartbeat {
+  string event_id = 1;
+  string host_id = 2;
+  string run_id = 3;
+  uint64 seq = 4;
+  google.protobuf.Timestamp at = 5;
+  uint64 ringbuf_drops = 6;
+  uint64 queue_drops = 7;
+  uint64 dropped_foreign_netns = 8;
+}

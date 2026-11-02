@@ -429,3 +429,14 @@ func TestReconcileOpenCancelsPending(t *testing.T) {
 		t.Fatalf("pending survived: %+v", got)
 	}
 }
+
+func TestLiveCookieUnderNewKeyIsNotOwnerChanged(t *testing.T) {
+	tb := New(0)
+	bound := model.NewKey(4026531840, "udp", netip.MustParseAddr("0.0.0.0"), 5353)
+	connected := model.NewKey(4026531840, "udp", netip.MustParseAddr("10.0.0.1"), 5353)
+	tb.Apply(open(1, bound, 10))
+	// The same socket re-observed under another address (bound to 0.0.0.0, then connect()ed).
+	if got := tb.Apply(open(1, connected, 10)); len(got) != 0 {
+		t.Fatalf("re-observed cookie emitted %+v", got)
+	}
+}

@@ -78,8 +78,9 @@ func (t *Table) Apply(o model.Observation) []Change {
 }
 
 func (t *Table) open(o model.Observation) []Change {
-	before := t.procsOf(o.Key)
 	if stored, live := t.sockets[o.Cookie]; live {
+		// The socket stays under its stored key even if re-observed under another.
+		before := t.procsOf(stored.Key)
 		// A baseline taken in a race can miss the owner that the kernel event carries.
 		if stored.Proc.IsZero() {
 			stored.Proc = o.Proc
@@ -90,6 +91,7 @@ func (t *Table) open(o model.Observation) []Change {
 		}
 		return t.ownerDelta(stored.Key, before, o.At, o.Source)
 	}
+	before := t.procsOf(o.Key)
 	t.addSocket(o)
 	if len(t.byKey[o.Key]) > 1 {
 		return t.ownerDelta(o.Key, before, o.At, o.Source)

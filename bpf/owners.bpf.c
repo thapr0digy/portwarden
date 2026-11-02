@@ -1,34 +1,69 @@
 // SPDX-License-Identifier: (BSD-2-Clause OR GPL-2.0-only)
 //
-// Listener owners for the baseline snapshot: a task_file iterator that walks every open
-// file of every process once and writes one record per TCP listening socket it holds.
-// Userspace joins the records to the inet_diag dump by socket cookie. The iterator
-// visits a thread group's shared file table once (threads that share their leader's
-// files are skipped), so each process is seen once per file descriptor.
+// Socket owners for the baseline snapshot: a task_file iterator that walks every open
+// file of every process once and writes one record per TCP listening socket, or UDP
+// socket bound to an explicit port, that it holds, in any network namespace. Each record
+// carries the socket's full key (netns, proto, address, port), so userspace keys sockets
+// outside the host netns from the records alone and joins host ones to the inet_diag and
+// iter/udp dumps by socket cookie. The iterator visits a thread group's shared file table
+// once (threads that share their leader's files are skipped), so each process is seen
+// once per file descriptor.
 //
 // An MPTCP listener (Go enables MPTCP for listeners by default) listens through its
 // first TCP subflow, which is the socket inet_diag lists and the listen probe reports,
-// so its record carries that subflow's cookie. On 6.8 the subflow is reachable only
-// through bpf_rdonly_cast (bpf_skc_to_mptcp_sock takes no BTF pointer), which yields a
-// pointer bpf_get_socket_cookie refuses, so the cookie is read from the socket instead
-// of assigned: it is set once inet_diag has listed the subflow or the probe has seen
-// its listen(), and Snapshot dumps the listeners before running this iterator.
+// so its record carries that subflow's cookie and address. On 6.8 the subflow is
+// reachable only through bpf_rdonly_cast (bpf_skc_to_mptcp_sock takes no BTF pointer),
+// which yields a pointer bpf_get_socket_cookie refuses, so the cookie is read from the
+// socket instead of assigned: it is set once inet_diag has listed the subflow or the
+// probe has seen its listen(), and Snapshot dumps the listeners before running this
+// iterator. That dump covers only the host netns, so an MPTCP listener elsewhere that
+// neither has seen is skipped.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
-#include <bpf/bpf_core_read.h> // bpf_core_type_id_kernel only
+#include <bpf/bpf_core_read.h>
 
 extern void *bpf_rdonly_cast(const void *obj__ign, __u32 btf_id__k) __ksym;
 
 #define AF_INET 2
 #define AF_INET6 10
 
+// include/net/sock.h; a macro, so not in vmlinux.h.
+#define SOCK_BINDPORT_LOCK 8
+
 struct owner {
 	__u64 cookie;
+	__u64 cgroup_id;
 	__u32 tgid;
 	__u32 uid;
+	__u32 netns;
+	__u16 family;
+	__u8 proto; // IPPROTO_TCP (an MPTCP listener's subflow too) or IPPROTO_UDP
+	__u16 port; // host byte order
+	__u8 addr[16];
 	char comm[16];
 };
+
+// Puts struct owner in the object's BTF, so bpf2go can generate it for the layout test.
+const struct owner *unused_owner __attribute__((unused));
+
+// Copies the socket's netns, family, bound port and bound address into rec.
+static __always_inline void fill_key(struct owner *rec, struct sock *sk)
+{
+	int i;
+
+	rec->netns = sk->__sk_common.skc_net.net->ns.inum;
+	rec->family = sk->__sk_common.skc_family;
+	rec->port = sk->__sk_common.skc_num;
+	if (rec->family == AF_INET6) {
+		for (i = 0; i < 16; i++)
+			rec->addr[i] = sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr8[i];
+	} else {
+		__be32 v4 = sk->__sk_common.skc_rcv_saddr;
+
+		__builtin_memcpy(rec->addr, &v4, sizeof(v4));
+	}
+}
 
 SEC("iter/task_file")
 int owners(struct bpf_iter__task_file *ctx)
@@ -53,10 +88,19 @@ int owners(struct bpf_iter__task_file *ctx)
 	family = sk->__sk_common.skc_family;
 	if (family != AF_INET && family != AF_INET6)
 		return 0;
-	if (sk->__sk_common.skc_state != TCP_LISTEN)
-		return 0;
-	if (sk->sk_protocol == IPPROTO_TCP) {
+
+	if (sk->sk_protocol == IPPROTO_UDP) {
+		if (!(BPF_CORE_READ_BITFIELD(sk, sk_userlocks) & SOCK_BINDPORT_LOCK))
+			return 0; // unbound, autobound or bound to port 0: a client
 		rec.cookie = bpf_get_socket_cookie(sk);
+		rec.proto = IPPROTO_UDP;
+		fill_key(&rec, sk);
+	} else if (sk->__sk_common.skc_state != TCP_LISTEN) {
+		return 0;
+	} else if (sk->sk_protocol == IPPROTO_TCP) {
+		rec.cookie = bpf_get_socket_cookie(sk);
+		rec.proto = IPPROTO_TCP;
+		fill_key(&rec, sk);
 	} else if (sk->sk_protocol == IPPROTO_MPTCP) {
 		struct mptcp_sock *msk = bpf_rdonly_cast(sk, bpf_core_type_id_kernel(struct mptcp_sock));
 		struct sock *subflow = msk->first;
@@ -66,10 +110,13 @@ int owners(struct bpf_iter__task_file *ctx)
 		rec.cookie = subflow->__sk_common.skc_cookie.counter;
 		if (!rec.cookie)
 			return 0; // not yet listed nor probed: nothing could join it
+		rec.proto = IPPROTO_TCP;
+		fill_key(&rec, subflow);
 	} else {
 		return 0;
 	}
 
+	rec.cgroup_id = task->cgroups->dfl_cgrp->kn->id;
 	rec.tgid = task->tgid;
 	rec.uid = task->cred->uid.val; // real uid, as bpf_get_current_uid_gid reports it
 	for (i = 0; i < sizeof(rec.comm); i++)

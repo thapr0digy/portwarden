@@ -8,15 +8,33 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
+
+type ownersOwner struct {
+	_        structs.HostLayout
+	Cookie   uint64
+	CgroupId uint64
+	Tgid     uint32
+	Uid      uint32
+	Netns    uint32
+	Family   uint16
+	Proto    uint8
+	_        [1]byte
+	Port     uint16
+	Addr     [16]uint8
+	Comm     [16]int8
+	_        [6]byte
+}
 
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	ownersProgOwners = "owners"
+	ownersProgOwners     = "owners"
+	ownersVarUnusedOwner = "unused_owner"
 )
 
 // loadOwners returns the embedded CollectionSpec for owners.
@@ -74,6 +92,7 @@ type ownersMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type ownersVariableSpecs struct {
+	UnusedOwner *ebpf.VariableSpec `ebpf:"unused_owner"`
 }
 
 // ownersObjects contains all objects after they have been loaded into the kernel.
@@ -106,6 +125,7 @@ func (m *ownersMaps) Close() error {
 //
 // It can be passed to loadOwnersObjects or ebpf.CollectionSpec.LoadAndAssign.
 type ownersVariables struct {
+	UnusedOwner *ebpf.Variable `ebpf:"unused_owner"`
 }
 
 // ownersPrograms contains all programs after they have been loaded into the kernel.

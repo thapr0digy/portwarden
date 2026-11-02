@@ -1,6 +1,7 @@
-// Package baseline takes the one-time snapshot of TCP listeners in the host network
-// namespace at agent start: a listen-only inet_diag dump for the sockets, and a BPF
-// task_file iterator for the processes that own them.
+// Package baseline takes the snapshot of TCP listeners and bound UDP sockets at agent
+// start: a listen-only inet_diag dump and a BPF iter/udp pass for the host network
+// namespace's sockets, and a BPF task_file iterator for the processes that own sockets
+// in any namespace.
 package baseline
 
 import (

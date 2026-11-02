@@ -106,7 +106,7 @@ func run(opts options, log *slog.Logger) error {
 		heartbeatLoop(ctx, opts.heartbeat, pr, pub)
 	}()
 
-	runErr := agent.Run(ctx, pr, baseline.Snapshot, loggingSink{pub, log})
+	runErr := agent.Run(ctx, pr, baseline.Snapshot, loggingSink{pub, log}, agent.Options{})
 	stop() // end the heartbeat loop even if Run returned on its own
 	beats.Wait()
 

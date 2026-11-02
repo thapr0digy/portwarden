@@ -1,19 +1,21 @@
 # Portwarden
 
-A Go agent with C eBPF programs that reports TCP listening sockets (host network namespace) to NATS JetStream.
-M1 scope: TCP only, host netns only. Kernel floor 6.8 (Ubuntu 24.04+).
+A Go agent with C eBPF programs that reports listening TCP sockets and explicitly bound UDP sockets, in every network namespace (host and containers), to NATS JetStream, with the program, systemd unit and container that hold each one.
+Kernel floor 6.8 (Ubuntu 24.04+).
+
+M2 decisions (where the design left room): container network namespaces are reported, each listener carrying its netns (the foreign-netns filter is gone, and the heartbeat's `dropped_foreign_netns` stays only as a deprecated field, always 0); there are no exec or exit tracepoints, so each event carries the cgroup id read in the hook, which still yields unit and container after the process is gone, while exe, cmdline and sha256 come from `/proc` when the process is still there; UDP opens use `fexit/udp_lib_get_port` with a nonzero requested port rather than a cgroup bind program, so client autobinds and `bind(:0)` are not listeners and no `CAP_NET_ADMIN` is needed; a restart is an `owner_changed`, because a close is held for a grace window (`--close-grace`, 2 s) and a reopen of the same key inside it replaces the owners; a recheck every 5 minutes (`--recheck`, and early when ring-buffer drops rise) reconciles a fresh dump and publishes the periodic snapshot; and a size-capped disk spool (64 MiB under `/var/lib/portwarden/spool`, oldest segment dropped when full) replaces the memory queue, so messages survive NATS outages and agent restarts with their original timestamps.
 
 ## Development
 
-Kernel-touching work happens in a Lima VM named `lw` (Ubuntu 24.04), which mounts this repo writable at the same path.
+Kernel-touching work happens in a Lima VM named `portwarden` (Ubuntu 24.04), which mounts this repo writable at the same path.
 
 | Command | What it does |
 | --- | --- |
-| `make vm` | Create and start the VM (`limactl start --name=lw dev/lima.yaml`); provisions the toolchain |
+| `make vm` | Create and start the VM (`limactl start --name=portwarden dev/lima.yaml`); provisions the toolchain |
 | `make generate` | In the VM: `buf generate` then `go generate ./...` (protobuf and bpf2go) |
 | `make test` | `go test ./...` (macOS or Linux, no root) |
-| `make itest` | In the VM: `dev/itest.sh` builds each package's `-tags integration` test binary as the VM user, then runs only the binaries as root (real kernel), so the Go caches stay user-owned. Extra args go to each binary: `limactl shell lw bash -lc 'cd $PWD && dev/itest.sh -test.run TestSnapshot'` |
-| `make e2e` | In the VM: `dev/e2e.sh` builds both binaries, runs its own nats-server (port 4333) and agent (the `portwarden-agent` unit is stopped meanwhile and restarted after), prints `opened latency: <n> ms` (must be <= 1000) and `bpf runs during load: <n>` (must be 0 over 10 000 real connections with `kernel.bpf_stats_enabled=1`), exits non-zero on any miss |
+| `make itest` | In the VM: `dev/itest.sh` builds each package's `-tags integration` test binary as the VM user, then runs only the binaries as root (real kernel), so the Go caches stay user-owned. Extra args go to each binary: `limactl shell portwarden bash -lc 'cd $PWD && dev/itest.sh -test.run TestSnapshot'` |
+| `make e2e` | In the VM: `dev/e2e.sh` builds both binaries, runs its own nats-server (port 4333) and agent (`--recheck 10s`, its own `--spool-dir` under the e2e work dir; the `portwarden-agent` unit is stopped meanwhile and restarted after) and checks, exiting non-zero on any miss: `opened latency` and `udp opened latency` (TCP listen on :8099, UDP bind on :8098, each must be <= 1000 ms); a `systemctl restart` of a transient unit on :8097 gives one `OWNER_CHANGED` and no `CLOSED` within 3 s; a listener in a fresh netns (`unshare -n`) carries a foreign `netns=`; after a recheck, :22 (Ubuntu's `ssh.socket`) shows `unit=ssh.service sock=ssh.socket` (it starts or stops `ssh.service` to change the holders and restores it on exit; SKIP when `ssh.socket` is not active); `bpf runs during load: <n>` (on_listen + on_stop, must be 0 over 10 000 real connections with `kernel.bpf_stats_enabled=1`); 1000 UDP client sockets run `on_udp_bind`/`on_udp_unhash` (`average ns per run` printed) but give no UDP event; a listener opened while nats-server is down survives an agent restart in the spool and reaches a fresh watcher with its original time |
 
 `gen/asm/v1/events.pb.go` is committed, so `go build ./...` works on macOS without `buf`.
 `bpf/vmlinux.h` is produced in the VM with `bpftool btf dump file /sys/kernel/btf/vmlinux format c`.
@@ -87,13 +89,15 @@ Logs are JSON (`log/slog`) on stderr. The agent exits non-zero, with the reason,
 `go run ./cmd/portwarden-watch [--nats-url nats://127.0.0.1:4222] [--host <machine-id>|*] [--since 10m]` prints one line per message from `ASM_EVENTS` (ordered consumer on `asm.<host>.>`, replaying from now minus `--since`; `--since 0s` is new messages only; `--host` defaults to `*`, all hosts). The host column is the first 8 characters of `host_id`.
 
 ```
-2026-10-30T14:02:11.418Z 0123abcd seq=42 OPENED tcp 0.0.0.0:8443 pid=4410 /opt/app/bin/server
-2026-10-30T14:02:12.001Z 0123abcd seq=43 SNAPSHOT n=12
-2026-10-30T14:02:41.001Z 0123abcd seq=44 HEARTBEAT drops=0/0/0
-GAP run=01J... expected=45 got=47
+2026-10-30T14:02:11.418Z 0123abcd seq=42 OPENED tcp 0.0.0.0:8443 pid=4410 /opt/app/bin/server unit=app.service
+2026-10-30T14:02:11.902Z 0123abcd seq=43 OPENED udp 10.0.0.5:5353 pid=3120 /usr/bin/mdns netns=4026532301 ctr=docker:0123456789ab
+2026-10-30T14:02:12.001Z 0123abcd seq=44 SNAPSHOT n=12 tcp=9 udp=3
+2026-10-30T14:02:20.310Z 0123abcd seq=45 OWNER_CHANGED tcp 0.0.0.0:22 pid=1 /usr/lib/systemd/systemd unit=ssh.service sock=ssh.socket was=1/systemd,812/sshd
+2026-10-30T14:02:41.001Z 0123abcd seq=46 HEARTBEAT drops=0/0
+GAP run=01J... expected=47 got=49
 ```
 
-Only the first process is shown (`(+N more)` for further holders); `HEARTBEAT drops=` is ringbuf/queue/foreign-netns (the last is deprecated and always 0). A `GAP` line means `seq` skipped within one `run_id`.
+Only the first process is shown (`(+N more)` for further holders), followed by its context: `netns=` only for a listener outside the host netns (compared with 4026531840, the initial netns inode on the supported kernels, since the stream does not carry each host's own), then `unit=`, `sock=` (the systemd socket unit of a socket-activated listener) and `ctr=<runtime>:<first 12 characters of the id>`, each omitted when empty. `OWNER_CHANGED` adds `was=<pid>/<comm>,…`, the holders before the change. `SNAPSHOT` counts the listeners in total and per protocol. `HEARTBEAT drops=` is ringbuf/queue (queue: messages the spool dropped when full). A `GAP` line means `seq` skipped within one `run_id`.
 
 ### systemd
 

@@ -26,10 +26,6 @@ type Sink interface {
 	Snapshot([]state.Listener)
 }
 
-// Run starts probe-first: it buffers events from src, takes the baseline, publishes
-// it as one Snapshot (no Opened changes), replays the buffered events in arrival
-// order, then forwards live changes until ctx is cancelled or src closes.
-// It returns nil on cancellation or a closed source, and the snapshot error otherwise.
 // Options tunes the agent beyond M1. The zero value behaves as M1: no
 // enrichment, no close grace, no recheck and no drop polling.
 type Options struct {

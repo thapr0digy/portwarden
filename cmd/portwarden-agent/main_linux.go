@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	hashMaxBytes     = 256 << 20 // executables larger than this are not hashed
+	hashMaxBytes     = 64 << 20 // executables larger than this are not hashed (bounds inline hashing)
 	socketUnitTTL    = 30 * time.Second
 	socketUnitPrime  = 2 * time.Second // bounds the startup socket unit list
 	recheckSettle    = 250 * time.Millisecond

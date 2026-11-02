@@ -428,11 +428,11 @@ func (p *Publisher) run() {
 		if errors.As(err, &perm) {
 			slog.Error("dropping message that can never be published",
 				"subject", m.Subject, "seq", m.Seq, "event_id", m.ID, "err", perm.err)
-			p.q.Discard(m.Seq)
+			p.q.Discard(m.ID)
 			continue
 		}
 		if err == nil {
-			p.q.Pop(m.Seq)
+			p.q.Pop(m.ID)
 			if failing {
 				slog.Info("nats publishing resumed")
 				failing = false

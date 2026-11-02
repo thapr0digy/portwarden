@@ -32,7 +32,7 @@ func drain(s *Spool) []uint64 {
 			return seqs
 		}
 		seqs = append(seqs, m.Seq)
-		s.Pop(m.Seq)
+		s.Pop(m.ID)
 	}
 }
 
@@ -77,8 +77,8 @@ func TestReopenResumesUnsent(t *testing.T) {
 	for i := uint64(1); i <= 5; i++ {
 		s.Push(msg(i))
 	}
-	s.Pop(1)
-	s.Pop(2)
+	s.Pop("ev-1")
+	s.Pop("ev-2")
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestOverflowCountsOnlyUnsent(t *testing.T) {
 	s := open(t, dir, rs*4+8, rs*2+2) // two records per segment, room for two segments
 	s.Push(msg(1))
 	s.Push(msg(2))
-	s.Pop(1) // the first segment now holds one unsent record
+	s.Pop("ev-1") // the first segment now holds one unsent record
 	s.Push(msg(3))
 	s.Push(msg(4))
 	s.Push(msg(5)) // third segment pushes the first one out
@@ -184,16 +184,16 @@ func TestOverflowCountsOnlyUnsent(t *testing.T) {
 	}
 }
 
-func TestPopIgnoresStaleSeq(t *testing.T) {
+func TestPopIgnoresStaleID(t *testing.T) {
 	s := open(t, t.TempDir(), 1<<20, 1<<20)
 	s.Push(msg(1))
 	s.Push(msg(2))
-	s.Pop(2)
+	s.Pop("ev-2")
 	if h, _ := s.Head(); h.Seq != 1 {
 		t.Fatalf("head = %d, want 1", h.Seq)
 	}
-	s.Pop(1)
-	s.Pop(1)
+	s.Pop("ev-1")
+	s.Pop("ev-1")
 	if h, _ := s.Head(); h.Seq != 2 || s.Len() != 1 {
 		t.Fatalf("head = %d Len=%d", h.Seq, s.Len())
 	}
@@ -202,8 +202,8 @@ func TestPopIgnoresStaleSeq(t *testing.T) {
 func TestDiscardCountsDropped(t *testing.T) {
 	s := open(t, t.TempDir(), 1<<20, 1<<20)
 	s.Push(msg(1))
-	s.Discard(9)
-	s.Discard(1)
+	s.Discard("ev-9")
+	s.Discard("ev-1")
 	if s.Dropped() != 1 || s.Overflowed() != 0 || s.Len() != 0 {
 		t.Fatalf("Dropped=%d Overflowed=%d Len=%d", s.Dropped(), s.Overflowed(), s.Len())
 	}
@@ -297,7 +297,7 @@ func TestConcurrentUse(t *testing.T) {
 			for i := 0; i < 50; i++ {
 				s.Push(msg(uint64(w*100 + i + 1)))
 				if h, ok := s.Head(); ok {
-					s.Pop(h.Seq)
+					s.Pop(h.ID)
 				}
 				_ = s.Len()
 			}
@@ -315,7 +315,7 @@ func TestRollAfterFullDrainLogsNoError(t *testing.T) {
 	dir := t.TempDir()
 	s := open(t, dir, 1<<20, 1) // every record rolls to a new segment
 	s.Push(msg(1))
-	s.Pop(1) // fully consumed, but the last segment is kept
+	s.Pop("ev-1") // fully consumed, but the last segment is kept
 	s.Push(msg(2))
 	if h, ok := s.Head(); !ok || h.Seq != 2 {
 		t.Fatalf("head = %+v %v", h, ok)
@@ -337,8 +337,8 @@ func TestReplayPersistsNormalizedCursor(t *testing.T) {
 	for i := uint64(1); i <= 3; i++ {
 		s.Push(msg(i))
 	}
-	s.Pop(1)
-	s.Pop(2)
+	s.Pop("ev-1")
+	s.Pop("ev-2")
 	_ = s.Close()
 	rec1, _ := encodeRecord(msg(1))
 	if err := os.Truncate(segFiles(t, dir)[0], int64(len(rec1))+3); err != nil {
@@ -351,5 +351,29 @@ func TestReplayPersistsNormalizedCursor(t *testing.T) {
 	s = open(t, dir, 1<<20, 1<<20)
 	if h, ok := s.Head(); !ok || h.Seq != 4 {
 		t.Fatalf("head = %+v %v, want seq 4", h, ok)
+	}
+}
+
+func TestPopAfterEvictionSparesCollidingSeq(t *testing.T) {
+	for _, dir := range []string{"", t.TempDir()} {
+		rec, _ := encodeRecord(msg(5))
+		rs := int64(len(rec))
+		maxBytes := int64(1 << 10) // memory: room for one message
+		if dir != "" {
+			maxBytes = rs + 8 // disk: room for one record
+		}
+		s := open(t, dir, maxBytes, rs+2) // one record per segment
+		old := Msg{Subject: "asm.h.listener.opened", ID: "old-run-5", Seq: 5, Data: []byte("old")}
+		s.Push(old)
+		inFlight, _ := s.Head()
+		// Seq restarts each run: a new run's message can carry the same seq.
+		s.Push(Msg{Subject: old.Subject, ID: "new-run-5", Seq: 5, Data: []byte("old")})
+		if s.Overflowed() != 1 {
+			t.Fatalf("dir %q: Overflowed = %d, want 1", dir, s.Overflowed())
+		}
+		s.Pop(inFlight.ID)
+		if h, ok := s.Head(); !ok || h.ID != "new-run-5" {
+			t.Fatalf("dir %q: head = %+v %v, want the unsent new-run message", dir, h, ok)
+		}
 	}
 }

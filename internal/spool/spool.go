@@ -433,26 +433,28 @@ func readRecordAt(path string, off int64) (Msg, int, error) {
 	return decodeRecord(buf)
 }
 
-// Pop removes the head only if it still has the given seq; it may have been
-// dropped for overflow while the sender was publishing it.
-func (s *Spool) Pop(seq uint64) {
+// Pop removes the head only if it is still the message with the given ID; it
+// may have been dropped for overflow while the sender was publishing it. The ID,
+// not the seq, is matched because seq restarts with each run of the agent.
+func (s *Spool) Pop(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.removeHead(seq)
+	s.removeHead(id)
 }
 
-// Discard removes the head as undeliverable and counts it as dropped.
-func (s *Spool) Discard(seq uint64) {
+// Discard removes the head as undeliverable, if it is still the message with
+// the given ID, and counts it as dropped.
+func (s *Spool) Discard(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.removeHead(seq) {
+	if s.removeHead(id) {
 		s.dropped++
 	}
 }
 
-func (s *Spool) removeHead(seq uint64) bool {
+func (s *Spool) removeHead(id string) bool {
 	m, ok := s.headLocked()
-	if !ok || m.Seq != seq {
+	if !ok || m.ID != id {
 		return false
 	}
 	if s.disk == 0 {

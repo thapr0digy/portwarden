@@ -148,9 +148,9 @@ func checkOwnListener(t *testing.T, ln *net.TCPListener, port uint16) {
 	}
 }
 
-// An MPTCP listener's subflow has no cookie until something asks for one, and the owners
-// iterator can only read it (bpf/owners.bpf.c). In the VM's host netns Lima's guest agent
-// lists listeners and so assigns cookies; a fresh netns is listed by nobody else.
+// Snapshot keys its dumps with the calling thread's netns: run from a thread in another
+// netns, an MPTCP listener there is listed by the dump (whose first pass assigns the
+// subflow's cookie) and joined to its owner exactly once, not again as a foreign record.
 func TestSnapshotOwnsUnlistedMPTCPListener(t *testing.T) {
 	var port uint16
 	var obs []model.Observation
@@ -516,5 +516,48 @@ func TestSnapshotHasKernelUDPSocket(t *testing.T) {
 		if o.Key.NetNS != netns || !o.Key.Addr.IsUnspecified() || !o.Proc.IsZero() || o.Cookie == 0 {
 			t.Errorf("observation = %+v, want host udp 0.0.0.0:4789 or [::]:4789 with a cookie and no process", o)
 		}
+	}
+}
+
+// The production case for a container: an MPTCP listener (Go's default) in another netns
+// that no dump from that netns and no probe has seen, so its subflow has no cookie. The
+// owners iterator cannot assign the subflow's cookie (bpf/owners.bpf.c), so Snapshot, run
+// from the host netns, reports the listener under the MPTCP socket's own cookie.
+func TestSnapshotHasUnlistedContainerMPTCPListener(t *testing.T) {
+	var netns uint32
+	var ln *net.TCPListener
+	err := inFreshNetns(func() error {
+		var st unix.Stat_t
+		if err := unix.Stat("/proc/thread-self/ns/net", &st); err != nil {
+			return err
+		}
+		netns = uint32(st.Ino)
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return err
+		}
+		t.Cleanup(func() { _ = l.Close() })
+		ln = l.(*net.TCPListener)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isMPTCP(t, ln) {
+		t.Fatal("listener in the fresh netns is not MPTCP")
+	}
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+
+	own := ownObservations(snapshot(t))
+	want := model.NewKey(netns, model.ProtoTCP, netip.MustParseAddr("127.0.0.1"), port)
+	if len(own) != 1 || own[0].Key != want {
+		t.Fatalf("snapshot observations owned by this process = %+v, want one keyed %v", own, want)
+	}
+	// Read after the snapshot, so the iterator itself must have assigned the cookie.
+	if msk := listenerCookie(t, ln); own[0].Cookie == 0 || own[0].Cookie != msk {
+		t.Errorf("Cookie = %#x, want the MPTCP socket's SO_COOKIE %#x", own[0].Cookie, msk)
+	}
+	if own[0].Proc.CgroupID == 0 || own[0].Proc.Comm == "" {
+		t.Errorf("Proc = %+v, want comm and a cgroup id", own[0].Proc)
 	}
 }

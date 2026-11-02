@@ -17,7 +17,7 @@
 // socket instead of assigned: it is set once inet_diag has listed the subflow or the
 // probe has seen its listen(), and Snapshot dumps the listeners before running this
 // iterator. That dump covers only the host netns, so an MPTCP listener elsewhere that
-// neither has seen is skipped.
+// neither has seen is reported under the MPTCP socket's own cookie (see the branch).
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -108,8 +108,14 @@ int owners(struct bpf_iter__task_file *ctx)
 		if (!subflow)
 			return 0;
 		rec.cookie = subflow->__sk_common.skc_cookie.counter;
+		// Not yet listed nor probed: a listener in a netns the host dump can't see,
+		// opened while no probe ran. Report it under the MPTCP socket's own cookie, which
+		// can be assigned here and comes from the same global counter, so it never
+		// collides with a subflow's. The live probe reports the subflow's cookie, so this
+		// listener's close (or restart) is not matched to it and the next recheck closes
+		// it (a restart shows as closed + opened, not owner_changed).
 		if (!rec.cookie)
-			return 0; // not yet listed nor probed: nothing could join it
+			rec.cookie = bpf_get_socket_cookie(sk);
 		rec.proto = IPPROTO_TCP;
 		fill_key(&rec, subflow);
 	} else {

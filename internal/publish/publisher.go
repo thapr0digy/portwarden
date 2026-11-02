@@ -629,8 +629,11 @@ func isClosed(c <-chan struct{}) bool {
 }
 
 func sourceToProto(s model.Source) asmv1.Source {
-	if s == model.SourceBaseline {
+	switch s {
+	case model.SourceBaseline:
 		return asmv1.Source_BASELINE
+	case model.SourceReconcile:
+		return asmv1.Source_RECONCILE
 	}
 	return asmv1.Source_EBPF
 }
@@ -648,7 +651,19 @@ func listenerToProto(k model.ListenerKey) *asmv1.Listener {
 func processesToProto(procs []model.Process) []*asmv1.Process {
 	out := make([]*asmv1.Process, 0, len(procs))
 	for _, p := range procs {
-		out = append(out, &asmv1.Process{Pid: p.PID, Uid: p.UID, Comm: p.Comm, Exe: p.Exe})
+		out = append(out, processToProto(p))
+	}
+	return out
+}
+
+func processToProto(p model.Process) *asmv1.Process {
+	out := &asmv1.Process{
+		Pid: p.PID, Uid: p.UID, Comm: p.Comm, Exe: p.Exe,
+		Cmdline: p.Cmdline, Sha256: p.SHA256,
+		Unit: p.Unit, SocketUnit: p.SocketUnit, CgroupId: p.CgroupID,
+	}
+	if p.Container != (model.Container{}) {
+		out.Container = &asmv1.Container{Runtime: p.Container.Runtime, Id: p.Container.ID}
 	}
 	return out
 }

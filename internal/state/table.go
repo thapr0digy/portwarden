@@ -61,10 +61,10 @@ func (t *Table) Apply(o model.Observation) []Change {
 func (t *Table) open(o model.Observation) []Change {
 	if stored, live := t.sockets[o.Cookie]; live {
 		// A baseline taken in a race can miss the owner that the kernel event carries.
-		if stored.Proc == (model.Process{}) {
+		if stored.Proc.IsZero() {
 			stored.Proc = o.Proc
 			t.sockets[o.Cookie] = stored
-		} else if o.Source == model.SourceBaseline && stored.Source == model.SourceBaseline && o.Proc != (model.Process{}) {
+		} else if o.Source == model.SourceBaseline && stored.Source == model.SourceBaseline && !o.Proc.IsZero() {
 			// The baseline reports one observation per holder of a socket.
 			t.coOwners[o.Cookie] = append(t.coOwners[o.Cookie], o.Proc)
 		}
@@ -107,7 +107,7 @@ func (t *Table) Snapshot() []Listener {
 	for key, cookies := range t.byKey {
 		byPID := make(map[uint32]model.Process)
 		for cookie := range cookies {
-			if p := t.sockets[cookie].Proc; p != (model.Process{}) {
+			if p := t.sockets[cookie].Proc; !p.IsZero() {
 				byPID[p.PID] = p
 			}
 			for _, p := range t.coOwners[cookie] {
@@ -134,7 +134,7 @@ func (t *Table) Snapshot() []Listener {
 }
 
 func procsOf(o model.Observation) []model.Process {
-	if o.Proc == (model.Process{}) {
+	if o.Proc.IsZero() {
 		return []model.Process{}
 	}
 	return []model.Process{o.Proc}

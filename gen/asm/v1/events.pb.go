@@ -28,6 +28,7 @@ const (
 	Kind_KIND_UNSPECIFIED Kind = 0
 	Kind_OPENED           Kind = 1
 	Kind_CLOSED           Kind = 2
+	Kind_OWNER_CHANGED    Kind = 3
 )
 
 // Enum value maps for Kind.
@@ -36,11 +37,13 @@ var (
 		0: "KIND_UNSPECIFIED",
 		1: "OPENED",
 		2: "CLOSED",
+		3: "OWNER_CHANGED",
 	}
 	Kind_value = map[string]int32{
 		"KIND_UNSPECIFIED": 0,
 		"OPENED":           1,
 		"CLOSED":           2,
+		"OWNER_CHANGED":    3,
 	}
 )
 
@@ -77,6 +80,7 @@ const (
 	Source_SOURCE_UNSPECIFIED Source = 0
 	Source_EBPF               Source = 1
 	Source_BASELINE           Source = 2
+	Source_RECONCILE          Source = 3
 )
 
 // Enum value maps for Source.
@@ -85,11 +89,13 @@ var (
 		0: "SOURCE_UNSPECIFIED",
 		1: "EBPF",
 		2: "BASELINE",
+		3: "RECONCILE",
 	}
 	Source_value = map[string]int32{
 		"SOURCE_UNSPECIFIED": 0,
 		"EBPF":               1,
 		"BASELINE":           2,
+		"RECONCILE":          3,
 	}
 )
 
@@ -196,19 +202,77 @@ func (x *Listener) GetKey() string {
 	return ""
 }
 
+type Container struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Runtime       string                 `protobuf:"bytes,1,opt,name=runtime,proto3" json:"runtime,omitempty"`
+	Id            string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Container) Reset() {
+	*x = Container{}
+	mi := &file_asm_v1_events_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Container) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Container) ProtoMessage() {}
+
+func (x *Container) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Container.ProtoReflect.Descriptor instead.
+func (*Container) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *Container) GetRuntime() string {
+	if x != nil {
+		return x.Runtime
+	}
+	return ""
+}
+
+func (x *Container) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
 type Process struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Pid           uint32                 `protobuf:"varint,1,opt,name=pid,proto3" json:"pid,omitempty"`
 	Uid           uint32                 `protobuf:"varint,2,opt,name=uid,proto3" json:"uid,omitempty"`
 	Comm          string                 `protobuf:"bytes,3,opt,name=comm,proto3" json:"comm,omitempty"`
 	Exe           string                 `protobuf:"bytes,4,opt,name=exe,proto3" json:"exe,omitempty"`
+	Cmdline       []string               `protobuf:"bytes,5,rep,name=cmdline,proto3" json:"cmdline,omitempty"`
+	Sha256        string                 `protobuf:"bytes,6,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	Unit          string                 `protobuf:"bytes,7,opt,name=unit,proto3" json:"unit,omitempty"`
+	SocketUnit    string                 `protobuf:"bytes,8,opt,name=socket_unit,json=socketUnit,proto3" json:"socket_unit,omitempty"`
+	Container     *Container             `protobuf:"bytes,9,opt,name=container,proto3" json:"container,omitempty"`
+	CgroupId      uint64                 `protobuf:"varint,10,opt,name=cgroup_id,json=cgroupId,proto3" json:"cgroup_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Process) Reset() {
 	*x = Process{}
-	mi := &file_asm_v1_events_proto_msgTypes[1]
+	mi := &file_asm_v1_events_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -220,7 +284,7 @@ func (x *Process) String() string {
 func (*Process) ProtoMessage() {}
 
 func (x *Process) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[1]
+	mi := &file_asm_v1_events_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -233,7 +297,7 @@ func (x *Process) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Process.ProtoReflect.Descriptor instead.
 func (*Process) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{1}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Process) GetPid() uint32 {
@@ -264,24 +328,68 @@ func (x *Process) GetExe() string {
 	return ""
 }
 
+func (x *Process) GetCmdline() []string {
+	if x != nil {
+		return x.Cmdline
+	}
+	return nil
+}
+
+func (x *Process) GetSha256() string {
+	if x != nil {
+		return x.Sha256
+	}
+	return ""
+}
+
+func (x *Process) GetUnit() string {
+	if x != nil {
+		return x.Unit
+	}
+	return ""
+}
+
+func (x *Process) GetSocketUnit() string {
+	if x != nil {
+		return x.SocketUnit
+	}
+	return ""
+}
+
+func (x *Process) GetContainer() *Container {
+	if x != nil {
+		return x.Container
+	}
+	return nil
+}
+
+func (x *Process) GetCgroupId() uint64 {
+	if x != nil {
+		return x.CgroupId
+	}
+	return 0
+}
+
 type ListenerEvent struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
-	HostId        string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
-	RunId         string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	Seq           uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
-	ObservedAt    *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
-	Kind          Kind                   `protobuf:"varint,6,opt,name=kind,proto3,enum=asm.v1.Kind" json:"kind,omitempty"`
-	Source        Source                 `protobuf:"varint,7,opt,name=source,proto3,enum=asm.v1.Source" json:"source,omitempty"`
-	Listener      *Listener              `protobuf:"bytes,8,opt,name=listener,proto3" json:"listener,omitempty"`
-	Processes     []*Process             `protobuf:"bytes,9,rep,name=processes,proto3" json:"processes,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	EventId    string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	HostId     string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	RunId      string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	Seq        uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
+	ObservedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	Kind       Kind                   `protobuf:"varint,6,opt,name=kind,proto3,enum=asm.v1.Kind" json:"kind,omitempty"`
+	Source     Source                 `protobuf:"varint,7,opt,name=source,proto3,enum=asm.v1.Source" json:"source,omitempty"`
+	Listener   *Listener              `protobuf:"bytes,8,opt,name=listener,proto3" json:"listener,omitempty"`
+	Processes  []*Process             `protobuf:"bytes,9,rep,name=processes,proto3" json:"processes,omitempty"`
+	// Set only on OWNER_CHANGED: the owners before the change.
+	PreviousProcesses []*Process `protobuf:"bytes,10,rep,name=previous_processes,json=previousProcesses,proto3" json:"previous_processes,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ListenerEvent) Reset() {
 	*x = ListenerEvent{}
-	mi := &file_asm_v1_events_proto_msgTypes[2]
+	mi := &file_asm_v1_events_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -293,7 +401,7 @@ func (x *ListenerEvent) String() string {
 func (*ListenerEvent) ProtoMessage() {}
 
 func (x *ListenerEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[2]
+	mi := &file_asm_v1_events_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -306,7 +414,7 @@ func (x *ListenerEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListenerEvent.ProtoReflect.Descriptor instead.
 func (*ListenerEvent) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{2}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ListenerEvent) GetEventId() string {
@@ -372,6 +480,13 @@ func (x *ListenerEvent) GetProcesses() []*Process {
 	return nil
 }
 
+func (x *ListenerEvent) GetPreviousProcesses() []*Process {
+	if x != nil {
+		return x.PreviousProcesses
+	}
+	return nil
+}
+
 type ListenerState struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Listener      *Listener              `protobuf:"bytes,1,opt,name=listener,proto3" json:"listener,omitempty"`
@@ -382,7 +497,7 @@ type ListenerState struct {
 
 func (x *ListenerState) Reset() {
 	*x = ListenerState{}
-	mi := &file_asm_v1_events_proto_msgTypes[3]
+	mi := &file_asm_v1_events_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -394,7 +509,7 @@ func (x *ListenerState) String() string {
 func (*ListenerState) ProtoMessage() {}
 
 func (x *ListenerState) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[3]
+	mi := &file_asm_v1_events_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -407,7 +522,7 @@ func (x *ListenerState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListenerState.ProtoReflect.Descriptor instead.
 func (*ListenerState) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{3}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ListenerState) GetListener() *Listener {
@@ -438,7 +553,7 @@ type Snapshot struct {
 
 func (x *Snapshot) Reset() {
 	*x = Snapshot{}
-	mi := &file_asm_v1_events_proto_msgTypes[4]
+	mi := &file_asm_v1_events_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -450,7 +565,7 @@ func (x *Snapshot) String() string {
 func (*Snapshot) ProtoMessage() {}
 
 func (x *Snapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[4]
+	mi := &file_asm_v1_events_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -463,7 +578,7 @@ func (x *Snapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Snapshot.ProtoReflect.Descriptor instead.
 func (*Snapshot) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{4}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Snapshot) GetEventId() string {
@@ -509,22 +624,23 @@ func (x *Snapshot) GetListeners() []*ListenerState {
 }
 
 type Heartbeat struct {
-	state               protoimpl.MessageState `protogen:"open.v1"`
-	EventId             string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
-	HostId              string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
-	RunId               string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	Seq                 uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
-	At                  *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=at,proto3" json:"at,omitempty"`
-	RingbufDrops        uint64                 `protobuf:"varint,6,opt,name=ringbuf_drops,json=ringbufDrops,proto3" json:"ringbuf_drops,omitempty"`
-	QueueDrops          uint64                 `protobuf:"varint,7,opt,name=queue_drops,json=queueDrops,proto3" json:"queue_drops,omitempty"`
-	DroppedForeignNetns uint64                 `protobuf:"varint,8,opt,name=dropped_foreign_netns,json=droppedForeignNetns,proto3" json:"dropped_foreign_netns,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	EventId      string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	HostId       string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	RunId        string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	Seq          uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
+	At           *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=at,proto3" json:"at,omitempty"`
+	RingbufDrops uint64                 `protobuf:"varint,6,opt,name=ringbuf_drops,json=ringbufDrops,proto3" json:"ringbuf_drops,omitempty"`
+	QueueDrops   uint64                 `protobuf:"varint,7,opt,name=queue_drops,json=queueDrops,proto3" json:"queue_drops,omitempty"`
+	// Deprecated: Marked as deprecated in asm/v1/events.proto.
+	DroppedForeignNetns uint64 `protobuf:"varint,8,opt,name=dropped_foreign_netns,json=droppedForeignNetns,proto3" json:"dropped_foreign_netns,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_asm_v1_events_proto_msgTypes[5]
+	mi := &file_asm_v1_events_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -536,7 +652,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[5]
+	mi := &file_asm_v1_events_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -549,7 +665,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{5}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Heartbeat) GetEventId() string {
@@ -601,6 +717,7 @@ func (x *Heartbeat) GetQueueDrops() uint64 {
 	return 0
 }
 
+// Deprecated: Marked as deprecated in asm/v1/events.proto.
 func (x *Heartbeat) GetDroppedForeignNetns() uint64 {
 	if x != nil {
 		return x.DroppedForeignNetns
@@ -618,12 +735,23 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x05proto\x18\x02 \x01(\tR\x05proto\x12\x12\n" +
 	"\x04addr\x18\x03 \x01(\tR\x04addr\x12\x12\n" +
 	"\x04port\x18\x04 \x01(\rR\x04port\x12\x10\n" +
-	"\x03key\x18\x05 \x01(\tR\x03key\"S\n" +
+	"\x03key\x18\x05 \x01(\tR\x03key\"5\n" +
+	"\tContainer\x12\x18\n" +
+	"\aruntime\x18\x01 \x01(\tR\aruntime\x12\x0e\n" +
+	"\x02id\x18\x02 \x01(\tR\x02id\"\x88\x02\n" +
 	"\aProcess\x12\x10\n" +
 	"\x03pid\x18\x01 \x01(\rR\x03pid\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x12\n" +
 	"\x04comm\x18\x03 \x01(\tR\x04comm\x12\x10\n" +
-	"\x03exe\x18\x04 \x01(\tR\x03exe\"\xd0\x02\n" +
+	"\x03exe\x18\x04 \x01(\tR\x03exe\x12\x18\n" +
+	"\acmdline\x18\x05 \x03(\tR\acmdline\x12\x16\n" +
+	"\x06sha256\x18\x06 \x01(\tR\x06sha256\x12\x12\n" +
+	"\x04unit\x18\a \x01(\tR\x04unit\x12\x1f\n" +
+	"\vsocket_unit\x18\b \x01(\tR\n" +
+	"socketUnit\x12/\n" +
+	"\tcontainer\x18\t \x01(\v2\x11.asm.v1.ContainerR\tcontainer\x12\x1b\n" +
+	"\tcgroup_id\x18\n" +
+	" \x01(\x04R\bcgroupId\"\x90\x03\n" +
 	"\rListenerEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -634,7 +762,9 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x04kind\x18\x06 \x01(\x0e2\f.asm.v1.KindR\x04kind\x12&\n" +
 	"\x06source\x18\a \x01(\x0e2\x0e.asm.v1.SourceR\x06source\x12,\n" +
 	"\blistener\x18\b \x01(\v2\x10.asm.v1.ListenerR\blistener\x12-\n" +
-	"\tprocesses\x18\t \x03(\v2\x0f.asm.v1.ProcessR\tprocesses\"l\n" +
+	"\tprocesses\x18\t \x03(\v2\x0f.asm.v1.ProcessR\tprocesses\x12>\n" +
+	"\x12previous_processes\x18\n" +
+	" \x03(\v2\x0f.asm.v1.ProcessR\x11previousProcesses\"l\n" +
 	"\rListenerState\x12,\n" +
 	"\blistener\x18\x01 \x01(\v2\x10.asm.v1.ListenerR\blistener\x12-\n" +
 	"\tprocesses\x18\x02 \x03(\v2\x0f.asm.v1.ProcessR\tprocesses\"\xd3\x01\n" +
@@ -644,7 +774,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x06run_id\x18\x03 \x01(\tR\x05runId\x12\x10\n" +
 	"\x03seq\x18\x04 \x01(\x04R\x03seq\x125\n" +
 	"\btaken_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\atakenAt\x123\n" +
-	"\tlisteners\x18\x06 \x03(\v2\x15.asm.v1.ListenerStateR\tlisteners\"\x8e\x02\n" +
+	"\tlisteners\x18\x06 \x03(\v2\x15.asm.v1.ListenerStateR\tlisteners\"\x92\x02\n" +
 	"\tHeartbeat\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -653,18 +783,20 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x02at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12#\n" +
 	"\rringbuf_drops\x18\x06 \x01(\x04R\fringbufDrops\x12\x1f\n" +
 	"\vqueue_drops\x18\a \x01(\x04R\n" +
-	"queueDrops\x122\n" +
-	"\x15dropped_foreign_netns\x18\b \x01(\x04R\x13droppedForeignNetns*4\n" +
+	"queueDrops\x126\n" +
+	"\x15dropped_foreign_netns\x18\b \x01(\x04B\x02\x18\x01R\x13droppedForeignNetns*G\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
 	"\x06OPENED\x10\x01\x12\n" +
 	"\n" +
-	"\x06CLOSED\x10\x02*8\n" +
+	"\x06CLOSED\x10\x02\x12\x11\n" +
+	"\rOWNER_CHANGED\x10\x03*G\n" +
 	"\x06Source\x12\x16\n" +
 	"\x12SOURCE_UNSPECIFIED\x10\x00\x12\b\n" +
 	"\x04EBPF\x10\x01\x12\f\n" +
-	"\bBASELINE\x10\x02B3Z1github.com/thapr0digy/portwarden/gen/asm/v1;asmv1b\x06proto3"
+	"\bBASELINE\x10\x02\x12\r\n" +
+	"\tRECONCILE\x10\x03B3Z1github.com/thapr0digy/portwarden/gen/asm/v1;asmv1b\x06proto3"
 
 var (
 	file_asm_v1_events_proto_rawDescOnce sync.Once
@@ -679,34 +811,37 @@ func file_asm_v1_events_proto_rawDescGZIP() []byte {
 }
 
 var file_asm_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_asm_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_asm_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_asm_v1_events_proto_goTypes = []any{
 	(Kind)(0),                     // 0: asm.v1.Kind
 	(Source)(0),                   // 1: asm.v1.Source
 	(*Listener)(nil),              // 2: asm.v1.Listener
-	(*Process)(nil),               // 3: asm.v1.Process
-	(*ListenerEvent)(nil),         // 4: asm.v1.ListenerEvent
-	(*ListenerState)(nil),         // 5: asm.v1.ListenerState
-	(*Snapshot)(nil),              // 6: asm.v1.Snapshot
-	(*Heartbeat)(nil),             // 7: asm.v1.Heartbeat
-	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
+	(*Container)(nil),             // 3: asm.v1.Container
+	(*Process)(nil),               // 4: asm.v1.Process
+	(*ListenerEvent)(nil),         // 5: asm.v1.ListenerEvent
+	(*ListenerState)(nil),         // 6: asm.v1.ListenerState
+	(*Snapshot)(nil),              // 7: asm.v1.Snapshot
+	(*Heartbeat)(nil),             // 8: asm.v1.Heartbeat
+	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
 }
 var file_asm_v1_events_proto_depIdxs = []int32{
-	8,  // 0: asm.v1.ListenerEvent.observed_at:type_name -> google.protobuf.Timestamp
-	0,  // 1: asm.v1.ListenerEvent.kind:type_name -> asm.v1.Kind
-	1,  // 2: asm.v1.ListenerEvent.source:type_name -> asm.v1.Source
-	2,  // 3: asm.v1.ListenerEvent.listener:type_name -> asm.v1.Listener
-	3,  // 4: asm.v1.ListenerEvent.processes:type_name -> asm.v1.Process
-	2,  // 5: asm.v1.ListenerState.listener:type_name -> asm.v1.Listener
-	3,  // 6: asm.v1.ListenerState.processes:type_name -> asm.v1.Process
-	8,  // 7: asm.v1.Snapshot.taken_at:type_name -> google.protobuf.Timestamp
-	5,  // 8: asm.v1.Snapshot.listeners:type_name -> asm.v1.ListenerState
-	8,  // 9: asm.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
-	10, // [10:10] is the sub-list for method output_type
-	10, // [10:10] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	3,  // 0: asm.v1.Process.container:type_name -> asm.v1.Container
+	9,  // 1: asm.v1.ListenerEvent.observed_at:type_name -> google.protobuf.Timestamp
+	0,  // 2: asm.v1.ListenerEvent.kind:type_name -> asm.v1.Kind
+	1,  // 3: asm.v1.ListenerEvent.source:type_name -> asm.v1.Source
+	2,  // 4: asm.v1.ListenerEvent.listener:type_name -> asm.v1.Listener
+	4,  // 5: asm.v1.ListenerEvent.processes:type_name -> asm.v1.Process
+	4,  // 6: asm.v1.ListenerEvent.previous_processes:type_name -> asm.v1.Process
+	2,  // 7: asm.v1.ListenerState.listener:type_name -> asm.v1.Listener
+	4,  // 8: asm.v1.ListenerState.processes:type_name -> asm.v1.Process
+	9,  // 9: asm.v1.Snapshot.taken_at:type_name -> google.protobuf.Timestamp
+	6,  // 10: asm.v1.Snapshot.listeners:type_name -> asm.v1.ListenerState
+	9,  // 11: asm.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
+	12, // [12:12] is the sub-list for method output_type
+	12, // [12:12] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_asm_v1_events_proto_init() }
@@ -720,7 +855,7 @@ func file_asm_v1_events_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_asm_v1_events_proto_rawDesc), len(file_asm_v1_events_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

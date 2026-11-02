@@ -28,8 +28,14 @@ func TestSnapshotKeepsOwnerlessListener(t *testing.T) {
 		t.Fatalf("got %d observations, want %d: %+v", len(got), len(want), got)
 	}
 	for i := range want {
-		if got[i] != want[i] {
+		if !sameObservation(got[i], want[i]) {
 			t.Errorf("observation %d = %+v, want %+v", i, got[i], want[i])
 		}
 	}
+}
+
+// sameObservation compares field by field, since Process holds a slice and is not comparable.
+func sameObservation(a, b model.Observation) bool {
+	return a.Kind == b.Kind && a.Cookie == b.Cookie && a.Key == b.Key &&
+		a.Proc.Equal(b.Proc) && a.At.Equal(b.At) && a.Source == b.Source
 }

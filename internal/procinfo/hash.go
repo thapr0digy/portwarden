@@ -12,11 +12,12 @@ import (
 // maxHashCache bounds the hash cache; on overflow an arbitrary entry is dropped.
 const maxHashCache = 4096
 
-// fileID identifies one version of an executable file.
+// fileID identifies one version of an executable file. ctime is part of it
+// because mtime can be set back by the file's owner; ctime cannot.
 type fileID struct {
-	dev, ino uint64
-	size     int64
-	mtime    time.Time
+	dev, ino     uint64
+	size         int64
+	mtime, ctime time.Time
 }
 
 func idOf(fi os.FileInfo) (fileID, bool) {
@@ -24,14 +25,23 @@ func idOf(fi os.FileInfo) (fileID, bool) {
 	if !ok {
 		return fileID{}, false
 	}
-	return fileID{dev: uint64(st.Dev), ino: uint64(st.Ino), size: fi.Size(), mtime: fi.ModTime()}, true
+	return fileID{
+		dev: uint64(st.Dev), ino: uint64(st.Ino), size: fi.Size(),
+		mtime: fi.ModTime(), ctime: ctimeOf(st),
+	}, true
 }
 
 // hashExe returns the sha256 of the file behind exePath (a /proc/<pid>/exe link,
 // which names the file actually executed even if it was replaced on disk).
-// It returns "" when the file is unreadable or larger than hashMax.
+// It returns "" when the file is unreadable or larger than hashMax. The cache
+// key comes from the opened file, so it names the bytes that are hashed.
 func (r *Resolver) hashExe(exePath string) string {
-	fi, err := os.Stat(exePath)
+	f, err := r.open(exePath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil || !fi.Mode().IsRegular() || fi.Size() > r.hashMax {
 		return ""
 	}
@@ -45,14 +55,10 @@ func (r *Resolver) hashExe(exePath string) string {
 	if hit {
 		return sum
 	}
-	f, err := r.open(exePath)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, io.LimitReader(f, r.hashMax+1)); err != nil {
-		return ""
+	n, err := io.Copy(h, io.LimitReader(f, r.hashMax+1))
+	if err != nil || n > r.hashMax {
+		return "" // unreadable, or grew past hashMax after the Stat
 	}
 	sum = hex.EncodeToString(h.Sum(nil))
 

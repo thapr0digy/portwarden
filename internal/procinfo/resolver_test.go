@@ -90,20 +90,16 @@ func TestHashCachedByFileIdentity(t *testing.T) {
 	proc := t.TempDir()
 	fakeProc(t, proc, 42, "binary-bytes")
 	r := NewResolver(proc, t.TempDir(), 1<<20)
-	opens := 0
-	r.open = func(name string) (*os.File, error) {
-		opens++
-		return os.Open(name)
-	}
 
-	first := r.Enrich(model.Process{PID: 42})
-	second := r.Enrich(model.Process{PID: 42})
-
-	if first.SHA256 == "" || first.SHA256 != second.SHA256 {
-		t.Fatalf("hashes differ: %q vs %q", first.SHA256, second.SHA256)
+	if first := r.Enrich(model.Process{PID: 42}); first.SHA256 == "" || len(r.hashes) != 1 {
+		t.Fatalf("SHA256 = %q, cached %d", first.SHA256, len(r.hashes))
 	}
-	if opens != 1 {
-		t.Errorf("opens = %d, want 1", opens)
+	// An unchanged file is served from the cache, not hashed again.
+	for id := range r.hashes {
+		r.hashes[id] = "cached"
+	}
+	if second := r.Enrich(model.Process{PID: 42}); second.SHA256 != "cached" {
+		t.Errorf("SHA256 = %q, want the cached value", second.SHA256)
 	}
 }
 
@@ -156,5 +152,32 @@ func TestCgroupIDRewalkRateLimited(t *testing.T) {
 	now = now.Add(11 * time.Second)
 	if got := r.Enrich(model.Process{PID: 1, CgroupID: id}); got.Unit != "late.service" {
 		t.Errorf("Unit after window = %q", got.Unit)
+	}
+}
+
+func TestHashCacheMissesOnInPlaceRewrite(t *testing.T) {
+	proc := t.TempDir()
+	target := fakeProc(t, proc, 42, "binary-AAAA")
+	r := NewResolver(proc, t.TempDir(), 1<<20)
+	first := r.Enrich(model.Process{PID: 42})
+	fi, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mtime := fi.ModTime()
+
+	time.Sleep(20 * time.Millisecond) // past coarse ctime granularity
+	// Same inode, same size, mtime put back: only ctime tells the versions apart.
+	if err := os.WriteFile(target, []byte("binary-BBBB"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(target, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	second := r.Enrich(model.Process{PID: 42})
+
+	sum := sha256.Sum256([]byte("binary-BBBB"))
+	if second.SHA256 != hex.EncodeToString(sum[:]) || second.SHA256 == first.SHA256 {
+		t.Fatalf("SHA256 after rewrite = %q, want hash of new content (first %q)", second.SHA256, first.SHA256)
 	}
 }

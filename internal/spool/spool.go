@@ -9,10 +9,16 @@
 // Order guarantee: Head/Pop deliver all on-disk records (oldest first), then the
 // memory tail (oldest first). New messages always go behind everything queued.
 //
+// Dropped is a lower bound: a bad record ends its segment and counts as one
+// drop however many records followed it. In memory (memory-only mode or after a
+// write error) at most maxBytes>>10 messages are held, one at least; the oldest
+// is dropped beyond that.
+//
 // A Spool is safe for concurrent use.
 package spool
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"os"
@@ -133,6 +139,8 @@ func (s *Spool) replay() error {
 	s.nextIndex = curIdx + 1
 	if len(s.segs) > 0 {
 		s.nextIndex = max(s.nextIndex, s.segs[len(s.segs)-1].index+1)
+		// Persist the normalized position: a truncation may have put it below the old cursor.
+		s.writeCursor()
 	}
 	return nil
 }
@@ -372,6 +380,10 @@ func (s *Spool) Head() (Msg, bool) {
 }
 
 func (s *Spool) headLocked() (Msg, bool) {
+	// A fully consumed or empty oldest segment is just done, not an error.
+	for len(s.segs) > 1 && s.consumed >= s.segs[0].n {
+		s.removeFirst()
+	}
 	for s.disk > 0 {
 		if s.head == nil && !s.loadHead() {
 			continue // unreadable segment dropped; try the next
@@ -384,25 +396,41 @@ func (s *Spool) headLocked() (Msg, bool) {
 	return Msg{}, false
 }
 
-// loadHead reads the head record of segs[0]. If it cannot be read the rest of
-// that segment is dropped and false is returned.
+// loadHead reads the head record of segs[0] (header, then payload, at curOff).
+// If it cannot be read the rest of that segment is dropped and false is returned.
 func (s *Spool) loadHead() bool {
 	seg := s.segs[0]
-	b, err := os.ReadFile(s.segPath(seg.index))
-	if err == nil && s.curOff < int64(len(b)) {
-		var m Msg
-		var n int
-		if m, n, err = decodeRecord(b[s.curOff:]); err == nil {
-			s.head, s.headLen = &m, int64(n)
-			return true
-		}
-	} else if err == nil {
-		err = errTorn
+	m, n, err := readRecordAt(s.segPath(seg.index), s.curOff)
+	if err == nil {
+		s.head, s.headLen = &m, int64(n)
+		return true
 	}
 	lost := s.removeFirst()
 	slog.Error("spool: unreadable segment, dropping its unsent records", "segment", segName(seg.index), "lost", lost, "err", err)
 	s.dropped += uint64(lost)
 	return false
+}
+
+// readRecordAt reads one record at off without loading the whole segment.
+func readRecordAt(path string, off int64) (Msg, int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Msg{}, 0, err
+	}
+	defer f.Close()
+	buf := make([]byte, headerLen)
+	if _, err := f.ReadAt(buf, off); err != nil {
+		return Msg{}, 0, errTorn
+	}
+	n := int(binary.LittleEndian.Uint32(buf[0:4]))
+	if n < payloadMin || n > maxPayload {
+		return Msg{}, 0, errCorrupt
+	}
+	buf = append(buf, make([]byte, n)...)
+	if _, err := f.ReadAt(buf[headerLen:], off+headerLen); err != nil {
+		return Msg{}, 0, errTorn
+	}
+	return decodeRecord(buf)
 }
 
 // Pop removes the head only if it still has the given seq; it may have been

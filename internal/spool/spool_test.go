@@ -1,7 +1,9 @@
 package spool
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -302,4 +304,52 @@ func TestConcurrentUse(t *testing.T) {
 		}(w)
 	}
 	wg.Wait()
+}
+
+func TestRollAfterFullDrainLogsNoError(t *testing.T) {
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(old)
+
+	dir := t.TempDir()
+	s := open(t, dir, 1<<20, 1) // every record rolls to a new segment
+	s.Push(msg(1))
+	s.Pop(1) // fully consumed, but the last segment is kept
+	s.Push(msg(2))
+	if h, ok := s.Head(); !ok || h.Seq != 2 {
+		t.Fatalf("head = %+v %v", h, ok)
+	}
+	if got := drain(s); fmt.Sprint(got) != "[2]" {
+		t.Fatalf("got %v", got)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("unexpected log output: %s", logs.String())
+	}
+	if n := len(segFiles(t, dir)); n > 1 {
+		t.Fatalf("%d segments left", n)
+	}
+}
+
+func TestReplayPersistsNormalizedCursor(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir, 1<<20, 1<<20)
+	for i := uint64(1); i <= 3; i++ {
+		s.Push(msg(i))
+	}
+	s.Pop(1)
+	s.Pop(2)
+	_ = s.Close()
+	rec1, _ := encodeRecord(msg(1))
+	if err := os.Truncate(segFiles(t, dir)[0], int64(len(rec1))+3); err != nil {
+		t.Fatal(err)
+	}
+
+	s, _ = Open(dir, 1<<20, 1<<20) // truncates below the old cursor offset
+	s.Push(msg(4))
+	_ = s.Close() // crash before any Pop
+	s = open(t, dir, 1<<20, 1<<20)
+	if h, ok := s.Head(); !ok || h.Seq != 4 {
+		t.Fatalf("head = %+v %v, want seq 4", h, ok)
+	}
 }

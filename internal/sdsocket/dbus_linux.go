@@ -33,7 +33,7 @@ type dbusLister struct{}
 func NewDBusLister() Lister { return dbusLister{} }
 
 func (dbusLister) SocketUnits(ctx context.Context) ([]Unit, error) {
-	conn, err := dbus.ConnectSystemBus()
+	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx)) // ctx expiry closes the connection, unblocking auth
 	if err != nil {
 		return nil, fmt.Errorf("connect system bus: %w", err)
 	}

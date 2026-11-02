@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -615,5 +616,58 @@ func TestOpenV4MappedKeysAsIPv4(t *testing.T) {
 	}
 	if o.Key.String() != model.NewKey(hostNetNS(t), "tcp", netip.MustParseAddr("127.0.0.1"), port).String() {
 		t.Errorf("Key string = %q", o.Key.String())
+	}
+}
+
+// onNamedWorkerThread runs f on a locked thread other than the thread-group leader,
+// renamed to name. A goroutine that lands on the leader keeps it locked and hands
+// over to a new goroutine, which then runs on another thread; the renamed thread is
+// discarded when its goroutine exits locked, so the name does not outlive f.
+func onNamedWorkerThread(name string, f func() error) error {
+	done := make(chan error, 1)
+	var run func()
+	run = func() {
+		runtime.LockOSThread()
+		if unix.Gettid() == unix.Getpid() {
+			handedOver := make(chan struct{})
+			go func() { run(); close(handedOver) }()
+			<-handedOver
+			runtime.UnlockOSThread()
+			return
+		}
+		b := append([]byte(name), 0)
+		if err := unix.Prctl(unix.PR_SET_NAME, uintptr(unsafe.Pointer(&b[0])), 0, 0, 0); err != nil {
+			done <- fmt.Errorf("PR_SET_NAME: %w", err)
+			return
+		}
+		done <- f()
+	}
+	go run()
+	return <-done
+}
+
+func TestNamedThreadListenerReportsLeaderComm(t *testing.T) {
+	p := startProbes(t)
+	raw, err := os.ReadFile("/proc/self/comm") // the thread-group leader's
+	if err != nil {
+		t.Fatal(err)
+	}
+	leader := strings.TrimSuffix(string(raw), "\n")
+	const worker = "pw-named-worker"
+
+	fd := tcp4Socket(t)
+	err = onNamedWorkerThread(worker, func() error {
+		if err := unix.Bind(fd, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+			return err
+		}
+		return unix.Listen(fd, 16)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	o := waitFor(t, p, openedOnPort(boundPort(t, fd)))
+	if o.Proc.Comm != leader {
+		t.Fatalf("Comm = %q, want the leader's %q (not the thread's %q)", o.Proc.Comm, leader, worker[:15])
 	}
 }

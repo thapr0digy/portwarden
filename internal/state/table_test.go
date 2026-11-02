@@ -440,3 +440,60 @@ func TestLiveCookieUnderNewKeyIsNotOwnerChanged(t *testing.T) {
 		t.Fatalf("re-observed cookie emitted %+v", got)
 	}
 }
+
+// retitled returns p with the non-identity fields changed: a uid drop, a new
+// comm and a rewritten command line.
+func retitled(p model.Process) model.Process {
+	p.UID, p.Comm, p.Cmdline = 33, "nginx: worker", []string{"nginx: worker process"}
+	return p
+}
+
+func TestNonIdentityChangeIsSilentButStored(t *testing.T) {
+	k := key("0.0.0.0", 8080)
+
+	t.Run("reconcile", func(t *testing.T) {
+		tb := New(0)
+		tb.Apply(open(1, k, 5))
+		d := dumpObs(1, k, 5)
+		d.Proc = retitled(d.Proc)
+		if got := tb.Reconcile([]model.Observation{d}, nil, t0); len(got) != 0 {
+			t.Fatalf("got %+v", got)
+		}
+		if snap := tb.Snapshot(); len(snap) != 1 || !snap[0].Procs[0].Equal(d.Proc) {
+			t.Fatalf("snapshot = %+v, want the new holder", snap)
+		}
+	})
+	t.Run("reopen within grace", func(t *testing.T) {
+		tb := New(grace)
+		tb.Apply(open(1, k, 5))
+		tb.Apply(closeObs(1, k))
+		o := open(2, k, 5)
+		o.Proc = retitled(o.Proc)
+		if got := tb.Apply(o); len(got) != 0 {
+			t.Fatalf("got %+v", got)
+		}
+		if snap := tb.Snapshot(); len(snap) != 1 || !snap[0].Procs[0].Equal(o.Proc) {
+			t.Fatalf("snapshot = %+v, want the new holder", snap)
+		}
+	})
+}
+
+func TestIdentityChangeIsOwnerChanged(t *testing.T) {
+	k := key("0.0.0.0", 22)
+	for name, change := range map[string]func(*model.Process){
+		"unit":        func(p *model.Process) { p.Unit = "ssh.service" },
+		"socket unit": func(p *model.Process) { p.SocketUnit = "ssh.socket" },
+		"exe":         func(p *model.Process) { p.Exe = "/usr/sbin/sshd" },
+		"sha256":      func(p *model.Process) { p.SHA256 = "ab" },
+		"container":   func(p *model.Process) { p.Container = model.Container{Runtime: "docker", ID: "c"} },
+		"cgroup":      func(p *model.Process) { p.CgroupID = 9 },
+	} {
+		tb := New(0)
+		tb.Apply(open(1, k, 1))
+		d := dumpObs(1, k, 1)
+		change(&d.Proc)
+		if got := tb.Reconcile([]model.Observation{d}, nil, t0); len(got) != 1 || got[0].Kind != model.OwnerChanged {
+			t.Errorf("%s: got %+v", name, got)
+		}
+	}
+}

@@ -66,6 +66,16 @@ func (p Process) Equal(q Process) bool {
 		p.Container == q.Container && p.CgroupID == q.CgroupID
 }
 
+// SameIdentity compares the fields that say who holds a socket: PID, Exe,
+// SHA256, Unit, SocketUnit, Container and CgroupID. UID, Comm and Cmdline are
+// left out because a process can change them itself (a privilege drop, a
+// retitle) without becoming a different owner.
+func (p Process) SameIdentity(q Process) bool {
+	return p.PID == q.PID && p.Exe == q.Exe && p.SHA256 == q.SHA256 &&
+		p.Unit == q.Unit && p.SocketUnit == q.SocketUnit &&
+		p.Container == q.Container && p.CgroupID == q.CgroupID
+}
+
 // Kind is the type of a listener observation.
 type Kind int
 

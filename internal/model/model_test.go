@@ -53,3 +53,17 @@ func TestProcessEqualComparesCmdline(t *testing.T) {
 		t.Error("nil and empty cmdline should be equal")
 	}
 }
+
+func TestProcessSameIdentityIgnoresUIDCommCmdline(t *testing.T) {
+	base := Process{PID: 1, UID: 0, Comm: "nginx", Cmdline: []string{"nginx"}, Unit: "nginx.service"}
+	retitled := base
+	retitled.UID, retitled.Comm, retitled.Cmdline = 33, "nginx: worker", []string{"nginx: worker process"}
+	if !base.SameIdentity(retitled) {
+		t.Error("uid, comm and cmdline must not change identity")
+	}
+	moved := base
+	moved.SocketUnit = "nginx.socket"
+	if base.SameIdentity(moved) {
+		t.Error("a socket unit difference must change identity")
+	}
+}

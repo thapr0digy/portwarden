@@ -64,7 +64,7 @@ func New(closeGrace time.Duration) *Table {
 // Apply records an observation and returns the listener-level changes it causes.
 // A listener opens when its first socket appears and closes when its last goes
 // (after the close grace); a change to the set of processes holding an open
-// listener yields OwnerChanged. A Closed observation is matched by cookie alone:
+// listener yields OwnerChanged (see sameProcs). A Closed observation is matched by cookie alone:
 // the Change carries the Key and process stored when the socket opened, since the
 // kernel reports only the cookie.
 func (t *Table) Apply(o model.Observation) []Change {
@@ -310,8 +310,11 @@ func (t *Table) procsOf(k model.ListenerKey) []model.Process {
 	return procs
 }
 
+// sameProcs reports whether two holder sets have the same owners. Only identity
+// fields count: a change of UID, Comm or Cmdline alone is stored silently and
+// shows in snapshots and later events.
 func sameProcs(a, b []model.Process) bool {
-	return slices.EqualFunc(a, b, model.Process.Equal)
+	return slices.EqualFunc(a, b, model.Process.SameIdentity)
 }
 
 // Snapshot returns the open listeners sorted by key, each with its processes

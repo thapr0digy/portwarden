@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: (BSD-2-Clause OR GPL-2.0-only)
 //
 // Listener open/close probes for every network namespace; each event carries the
-// socket's netns inode and the calling task's cgroup id.
+// socket's netns inode, the calling task's cgroup id and its thread-group leader's comm.
 // TCP:
 //   open:  fexit/inet_csk_listen_start, after the kernel has assigned the port, only on success.
 //   close: fentry/inet_csk_listen_stop, which v6.8 calls only when a listener is torn down
@@ -97,7 +97,8 @@ static __always_inline struct event *reserve_event(struct sock *sk, __u8 proto, 
 	e->netns = sk->__sk_common.skc_net.net->ns.inum;
 	e->kind = kind;
 	e->proto = proto;
-	bpf_get_current_comm(e->comm, sizeof(e->comm));
+	// The process's name, not the calling thread's: a thread can rename itself.
+	bpf_probe_read_kernel_str(e->comm, sizeof(e->comm), bpf_get_current_task_btf()->group_leader->comm);
 	return e;
 }
 

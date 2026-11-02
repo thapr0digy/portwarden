@@ -38,7 +38,7 @@ func Run(ctx context.Context, src EventSource, snap Snapshotter, sink Sink) erro
 	}
 	buffered := buf.stop()
 
-	table := state.New()
+	table := state.New(0)
 	for _, o := range baseline {
 		table.Apply(o)
 	}

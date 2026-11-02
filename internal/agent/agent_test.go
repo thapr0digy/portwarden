@@ -204,16 +204,21 @@ func TestSnapshotErrorReturned(t *testing.T) {
 }
 
 // The baseline can hold a listener with no owner (MPTCP race) while the kernel
-// event for the same cookie carries it. No Opened change, and the owner is kept:
-// a later Closed carries pid 42.
+// event for the same cookie carries it. The filled-in owner is published as an
+// OwnerChanged, and a later Closed carries pid 42.
 func TestOwnerFromEventFillsBaselineGap(t *testing.T) {
 	h := start(t, []model.Observation{obs(model.Opened, 7, 8080, 0, model.SourceBaseline)}, nil)
 	h.send(obs(model.Opened, 7, 8080, 42, model.SourceEBPF))
 	close(h.release)
 	h.snapshot()
 
-	h.send(obs(model.Closed, 7, 8080, 0, model.SourceEBPF))
 	got := h.change()
+	if len(got) != 1 || got[0].Kind != model.OwnerChanged || len(got[0].Procs) != 1 || got[0].Procs[0].PID != 42 {
+		t.Fatalf("changes = %+v, want one OwnerChanged to pid 42", got)
+	}
+
+	h.send(obs(model.Closed, 7, 8080, 0, model.SourceEBPF))
+	got = h.change()
 	if len(got) != 1 || got[0].Kind != model.Closed || len(got[0].Procs) != 1 || got[0].Procs[0].PID != 42 {
 		t.Fatalf("changes = %+v, want one Closed carrying pid 42", got)
 	}

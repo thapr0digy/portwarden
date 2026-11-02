@@ -560,3 +560,86 @@ func TestFailedDropsRecheckRetried(t *testing.T) {
 	h.snapshot()
 	h.stop()
 }
+
+// A socket unit that systemd opened after the matcher's last list (at boot, the
+// D-Bus bus is not up yet) is learned later; the next recheck must deliver it as an
+// OwnerChanged, and the table must then hold the enriched owner.
+func TestRecheckDeliversLateSocketUnit(t *testing.T) {
+	var unitKnown atomic.Bool
+	enrich := func(o model.Observation) model.Observation {
+		if o.Proc.PID == 1 && unitKnown.Load() {
+			o.Proc.SocketUnit, o.Proc.Unit = "ssh.socket", "ssh.service"
+		}
+		return o
+	}
+	h := startWith(t, []model.Observation{obs(model.Opened, 1, 22, 1, model.SourceBaseline)}, nil,
+		Options{Recheck: 10 * time.Millisecond, Enrich: enrich})
+	close(h.release)
+	if snap := h.snapshot(); len(snap) != 1 || snap[0].Procs[0].SocketUnit != "" {
+		t.Fatalf("baseline snapshot = %+v, want port 22 without a socket unit", snap)
+	}
+
+	unitKnown.Store(true)
+	h.recheck()
+	h.reply([]model.Observation{obs(model.Opened, 1, 22, 1, model.SourceBaseline)}, nil)
+
+	got := h.change()
+	if len(got) != 1 || got[0].Kind != model.OwnerChanged || got[0].Key != key(22) ||
+		got[0].Source != model.SourceReconcile {
+		t.Fatalf("changes = %+v, want one reconcile OwnerChanged on 22", got)
+	}
+	if p := got[0].Procs; len(p) != 1 || p[0].PID != 1 || p[0].SocketUnit != "ssh.socket" || p[0].Unit != "ssh.service" {
+		t.Fatalf("Procs = %+v, want pid 1 with ssh.socket / ssh.service", p)
+	}
+	if p := got[0].PrevProcs; len(p) != 1 || p[0].PID != 1 || p[0].SocketUnit != "" || p[0].Unit != "" {
+		t.Fatalf("PrevProcs = %+v, want pid 1 without a unit", p)
+	}
+	if snap := h.snapshot(); len(snap) != 1 || snap[0].Procs[0].SocketUnit != "ssh.socket" {
+		t.Fatalf("recheck snapshot = %+v, want the enriched owner", snap)
+	}
+
+	// A further recheck with the same answer is quiet.
+	h.recheck()
+	h.reply([]model.Observation{obs(model.Opened, 1, 22, 1, model.SourceBaseline)}, nil)
+	h.snapshot()
+	if rest := h.stop(); len(rest) != 0 {
+		t.Fatalf("extra changes after a steady recheck: %+v", rest)
+	}
+}
+
+// The same with the activated service holding the socket too (systemd and sshd).
+func TestRecheckDeliversLateSocketUnitWithCoOwner(t *testing.T) {
+	var unitKnown atomic.Bool
+	enrich := func(o model.Observation) model.Observation {
+		if o.Proc.PID == 1 && unitKnown.Load() {
+			o.Proc.SocketUnit, o.Proc.Unit = "ssh.socket", "ssh.service"
+		}
+		return o
+	}
+	holders := func() []model.Observation {
+		return []model.Observation{
+			obs(model.Opened, 1, 22, 500, model.SourceBaseline),
+			obs(model.Opened, 1, 22, 1, model.SourceBaseline),
+		}
+	}
+	h := startWith(t, holders(), nil, Options{Recheck: 10 * time.Millisecond, Enrich: enrich})
+	close(h.release)
+	h.snapshot()
+
+	unitKnown.Store(true)
+	h.recheck()
+	h.reply(holders(), nil)
+
+	got := h.change()
+	if len(got) != 1 || got[0].Kind != model.OwnerChanged {
+		t.Fatalf("changes = %+v, want one OwnerChanged", got)
+	}
+	p := got[0].Procs
+	if len(p) != 2 || p[0].PID != 1 || p[0].SocketUnit != "ssh.socket" || p[1].PID != 500 || p[1].SocketUnit != "" {
+		t.Fatalf("Procs = %+v, want pid 1 with ssh.socket and pid 500 unchanged", p)
+	}
+	if prev := got[0].PrevProcs; len(prev) != 2 || prev[0].SocketUnit != "" {
+		t.Fatalf("PrevProcs = %+v, want both holders without a socket unit", prev)
+	}
+	h.stop()
+}

@@ -76,7 +76,7 @@ Edge cases:
 | `--close-grace` | `2s` | a closed listener is reported only if it is not reopened within this delay (a quick restart is an `owner_changed`); `0s` reports at once |
 | `--recheck` | `5m` | interval between full listener dumps reconciled against the state (`source=reconcile`); `0s` disables |
 
-Process context: every holder is enriched from `/proc` (`exe`, `cmdline`, `sha256` of executables up to 256 MiB, systemd `unit` and `container` from the cgroup). A host-netns listener held by PID 1 (socket activation) gets the owning socket unit as `socket_unit` and its service as `unit`; the socket units are listed over D-Bus once at startup (bounded by 2 s, before the baseline) and refreshed every 30 s or on a miss.
+Process context: every holder is enriched from `/proc` (`exe`, `cmdline`, `sha256` of executables up to 256 MiB, systemd `unit` and `container` from the cgroup). A host-netns listener held by PID 1 (socket activation) gets the owning socket unit as `socket_unit` and its service as `unit`. Socket units are listed over D-Bus (a 2 s attempt before the baseline; afterwards a lookup that misses, or finds the list older than 30 s, starts a background refresh, at most one every 5 s, and is answered from the old list). A listener that systemd opened after the last list, including at boot, when the agent starts before the system bus, gets its `socket_unit`/`unit` at the next recheck (≤ 5 min), as an `owner_changed`.
 
 Spool: messages are queued in the spool (`internal/spool`, 4 MiB segment files, fsynced) and sent in order; on a restart, messages the last run did not send go out first, with their original `run_id`, `seq` and timestamps. Past `--spool-max` the oldest segment is dropped and counted in the heartbeat's `queue_drops`.
 

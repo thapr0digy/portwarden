@@ -7,7 +7,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 bin=$(mktemp -d)
-trap 'rm -rf "$bin"' EXIT
+# An installed portwarden-agent's probes would act on the tests' sockets (they assign MPTCP
+# subflow cookies, for one), so the unit is stopped for the run and restarted on exit.
+unit_was_active=false
+cleanup() {
+	local status=$?
+	rm -rf "$bin"
+	if $unit_was_active; then
+		sudo systemctl start portwarden-agent || { echo "itest: could not restart portwarden-agent" >&2; status=1; }
+	fi
+	exit "$status"
+}
+trap cleanup EXIT
+if systemctl is-active --quiet portwarden-agent; then
+	unit_was_active=true
+	sudo systemctl stop portwarden-agent
+	echo "itest: stopped portwarden-agent for the run"
+fi
 
 # Captured first so that set -e catches a load error (a broken integration-tagged file).
 pkgs=$(go list -tags integration -f '{{.ImportPath}} {{.Dir}}' ./...)

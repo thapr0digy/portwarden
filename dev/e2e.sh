@@ -59,7 +59,7 @@ cleanup() {
 	trap - EXIT
 	for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
 	if [ -n "$agent_pid" ]; then
-		sudo pkill -TERM -f "$work/portwarden-agent" 2>/dev/null || true
+		sudo pkill -TERM -f "^$work/portwarden-agent " 2>/dev/null || true
 		wait "$agent_pid" 2>/dev/null || true
 	fi
 	sudo pkill -TERM -f "http.server --bind 127.0.0.1 $NETNS_PORT" 2>/dev/null || true
@@ -123,6 +123,7 @@ print_deltas() {
 	local name runs
 	for name in $(awk '{print $1}' <<<"$2"); do
 		read -r runs _ < <(run_delta "$1" "$2" "$name")
+		[ -n "$runs" ] || fail "no run counts for $name"
 		log "  $name run_cnt +$runs"
 	done
 }
@@ -132,6 +133,7 @@ print_deltas() {
 check_udp_prog() {
 	local runs ns
 	read -r runs ns < <(run_delta "$1" "$2" "$3")
+	[ -n "$runs" ] || fail "no run counts for $3"
 	[ "$runs" -ge "$UDP_CLIENTS" ] || fail "$3 ran $runs times for $UDP_CLIENTS UDP client sockets"
 	echo "$3 average ns per run: $((ns / runs)) ($runs runs)"
 }
@@ -164,7 +166,8 @@ start_agent() {
 }
 
 stop_agent() {
-	sudo pkill -TERM -f "$work/portwarden-agent"
+	# Anchored on the binary path, so it matches the agent and not its sudo wrapper.
+	sudo pkill -TERM -f "^$work/portwarden-agent " || fail "no portwarden-agent process to stop"
 	wait "$agent_pid" || fail "portwarden-agent exited non-zero on SIGTERM"
 	agent_pid=""
 }
@@ -270,15 +273,16 @@ if ! systemctl is-active --quiet ssh.socket; then
 else
 	# The baseline already holds :22 with its units; changing its holders (sshd joins
 	# systemd, or leaves) makes the next recheck report it as an OWNER_CHANGED.
+	# The restore action is set before each change, so an interrupted change is undone too.
 	if systemctl is-active --quiet ssh.service; then
-		sudo systemctl -q stop ssh.service
 		ssh_service_restore=start
+		sudo systemctl -q stop ssh.service
 	else
+		ssh_service_restore=stop
 		# A connection activates ssh.service, whose sshd inherits the listening sockets.
 		timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/22; head -c 4 <&3" >/dev/null ||
 			fail "connecting to :22 did not get an SSH banner"
 		wait_for "ssh.service to start" 10 systemctl is-active --quiet ssh.service
-		ssh_service_restore=stop
 	fi
 	ssh_pattern=" tcp 0.0.0.0:22 pid=1 .* unit=ssh.service sock=ssh.socket"
 	wait_for ":22 with unit=ssh.service sock=ssh.socket" $((RECHECK_S * 3)) seen "$ssh_pattern" 1
@@ -314,6 +318,7 @@ print_deltas "$runs_before" "$runs_after"
 # Only the TCP probes count: background UDP (resolved, NTP) may run the UDP hooks meanwhile.
 read -r listen_runs _ < <(run_delta "$runs_before" "$runs_after" on_listen)
 read -r stop_runs _ < <(run_delta "$runs_before" "$runs_after" on_stop)
+[ -n "$listen_runs" ] && [ -n "$stop_runs" ] || fail "no run counts for on_listen/on_stop"
 tcp_runs=$((listen_runs + stop_runs))
 echo "bpf runs during load: $tcp_runs (on_listen + on_stop)"
 [ "$tcp_runs" -eq 0 ] || fail "on_listen/on_stop ran $tcp_runs times during the connection load"

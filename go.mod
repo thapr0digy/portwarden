@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/cilium/ebpf v0.22.0
+	github.com/godbus/dbus/v5 v5.2.2
 	github.com/nats-io/nats-server/v2 v2.15.2
 	github.com/nats-io/nats.go v1.55.0
 	github.com/oklog/ulid/v2 v2.1.2

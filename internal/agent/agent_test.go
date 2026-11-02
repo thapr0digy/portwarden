@@ -464,6 +464,43 @@ func TestRecheckIgnoresSocketsTouchedDuringDump(t *testing.T) {
 	}
 }
 
+// With Settle, live events keep being applied for a while after the dump
+// returns: a close that the dump predates is left to the live stream, and the
+// reconcile waits out Settle.
+func TestRecheckSettleLeavesLateCloseToLiveStream(t *testing.T) {
+	const x, y = 1, 2
+	const settle = 300 * time.Millisecond
+	h := startWith(t, []model.Observation{
+		obs(model.Opened, x, 80, 10, model.SourceBaseline),
+		obs(model.Opened, y, 443, 11, model.SourceBaseline),
+	}, nil, Options{Recheck: 10 * time.Millisecond, Settle: settle})
+	close(h.release)
+	h.snapshot()
+
+	h.recheck()
+	h.reply([]model.Observation{
+		obs(model.Opened, x, 80, 10, model.SourceBaseline),
+		obs(model.Opened, y, 443, 11, model.SourceBaseline),
+	}, nil)
+	returned := time.Now()
+	time.Sleep(settle / 6) // let the loop take the dump, so the close lands inside Settle
+	h.send(obs(model.Closed, y, 443, 0, model.SourceEBPF))
+	if got := h.change(); len(got) != 1 || got[0].Kind != model.Closed || got[0].Key != key(443) || got[0].Source != model.SourceEBPF {
+		t.Fatalf("changes = %+v, want the live Closed 443", got)
+	}
+
+	snap := h.snapshot()
+	if elapsed := time.Since(returned); elapsed < settle {
+		t.Fatalf("reconciled %s after the dump returned, want at least Settle (%s)", elapsed, settle)
+	}
+	if len(snap) != 1 || snap[0].Key != key(80) {
+		t.Fatalf("recheck snapshot = %+v, want only 80", snap)
+	}
+	if rest := h.stop(); len(rest) != 0 {
+		t.Fatalf("reconcile changed the closed socket: %+v", rest)
+	}
+}
+
 func TestDropsRiseTriggersRecheck(t *testing.T) {
 	var drops atomic.Uint64
 	drops.Store(5)

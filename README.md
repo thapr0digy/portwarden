@@ -21,6 +21,7 @@ Kernel-touching work happens in a Lima VM named `lw` (Ubuntu 24.04), which mount
 ## Event schema
 
 `proto/asm/v1/events.proto` (package `asm.v1`): `ListenerEvent`, `Snapshot`, `Heartbeat`.
+Subjects: `asm.<host>.listener.opened`, `.listener.closed`, `.listener.owner_changed` (its `ListenerEvent` carries the new `processes` and the old `previous_processes`), `.snapshot`, `.heartbeat`.
 A listener's identity is `netns/proto/addr:port`, e.g. `4026531840/tcp/0.0.0.0:8080` or `4026531840/tcp/[::]:8080`;
 IPv4-mapped IPv6 addresses are unmapped first. See `internal/model`.
 
@@ -70,8 +71,16 @@ Edge cases:
 | `--tls-ca`, `--tls-cert`, `--tls-key` | | TLS for the NATS connection |
 | `--machine-id-path` | `/etc/machine-id` | host id used in subjects |
 | `--heartbeat` | `30s` | heartbeat interval |
+| `--spool-dir` | `/var/lib/portwarden/spool` | directory for unsent messages; `""` keeps them in memory only |
+| `--spool-max` | `64MiB` | spool size cap: bytes, or with a `KiB`/`MiB`/`GiB` suffix; invalid or non-positive is a startup error |
+| `--close-grace` | `2s` | a closed listener is reported only if it is not reopened within this delay (a quick restart is an `owner_changed`); `0s` reports at once |
+| `--recheck` | `5m` | interval between full listener dumps reconciled against the state (`source=reconcile`); `0s` disables |
 
-Logs are JSON (`log/slog`) on stderr. The agent exits non-zero, with the reason, when the kernel is older than 6.8, `/sys/kernel/btf/vmlinux` is missing, lockdown is `confidentiality`, a BPF program fails to load or attach (the verifier log is included), or the probe reader stops. On SIGTERM it stops the probes, flushes the queue for up to 2 s and exits 0. The startup checks live in `internal/preflight`.
+Process context: every holder is enriched from `/proc` (`exe`, `cmdline`, `sha256` of executables up to 256 MiB, systemd `unit` and `container` from the cgroup). A host-netns listener held by PID 1 (socket activation) gets the owning socket unit as `socket_unit` and its service as `unit`; the socket units are listed over D-Bus once at startup (bounded by 2 s, before the baseline) and refreshed every 30 s or on a miss.
+
+Spool: messages are queued in the spool (`internal/spool`, 4 MiB segment files, fsynced) and sent in order; on a restart, messages the last run did not send go out first, with their original `run_id`, `seq` and timestamps. Past `--spool-max` the oldest segment is dropped and counted in the heartbeat's `queue_drops`.
+
+Logs are JSON (`log/slog`) on stderr. The agent exits non-zero, with the reason, when the kernel is older than 6.8, `/sys/kernel/btf/vmlinux` is missing, lockdown is `confidentiality`, a BPF program fails to load or attach (the verifier log is included), or the probe reader stops. On SIGTERM it stops the probes, sends what it can from the spool for up to 2 s and exits 0 (the rest stays in the spool directory). The startup checks live in `internal/preflight`.
 
 ## Watching the stream (`portwarden-watch`)
 
@@ -84,11 +93,11 @@ Logs are JSON (`log/slog`) on stderr. The agent exits non-zero, with the reason,
 GAP run=01J... expected=45 got=47
 ```
 
-Only the first process is shown (`(+N more)` for further holders); `HEARTBEAT drops=` is ringbuf/queue/foreign-netns. A `GAP` line means `seq` skipped within one `run_id`.
+Only the first process is shown (`(+N more)` for further holders); `HEARTBEAT drops=` is ringbuf/queue/foreign-netns (the last is deprecated and always 0). A `GAP` line means `seq` skipped within one `run_id`.
 
 ### systemd
 
-`deploy/portwarden-agent.service` runs it as the static `portwarden-agent` user with only `CAP_BPF CAP_PERFMON CAP_SYS_PTRACE` (`CAP_SYS_PTRACE` is only for reading `/proc/<pid>/exe` of other users' processes), `NoNewPrivileges`, `ProtectSystem=strict` and `ProtectHome`. It is `WantedBy=sysinit.target` with `DefaultDependencies=no`, so it starts before the network; the publisher queues until NATS is reachable. `ProtectKernelTunables` is deliberately off: it hides `/proc/kallsyms`.
+`deploy/portwarden-agent.service` runs it as the static `portwarden-agent` user with only `CAP_BPF CAP_PERFMON CAP_SYS_PTRACE` (`CAP_SYS_PTRACE` is only for reading `/proc/<pid>/exe` of other users' processes), `NoNewPrivileges`, `ProtectSystem=strict` and `ProtectHome`. It is `WantedBy=sysinit.target` with `DefaultDependencies=no`, so it starts before the network; the publisher spools until NATS is reachable. `StateDirectory=portwarden` (mode 0700, owned by the agent user) holds the spool at `/var/lib/portwarden/spool`. `ProtectKernelTunables` is deliberately off: it hides `/proc/kallsyms`.
 
 In the VM, `make install-agent` (`dev/install-agent.sh`) builds the binary, creates the user, installs the binary to `/usr/local/bin` and the unit, then enables and restarts it. `dev/install-nats.sh` installs `deploy/nats-server.conf` and runs nats-server as a service so there is a broker across reboots. Check with `sudo journalctl -u portwarden-agent` (look for `snapshot queued`: the snapshot is queued for NATS, not necessarily delivered yet; `nats publishing resumed` or a stream message confirms delivery) and `nats stream info ASM_EVENTS`.
 
@@ -96,6 +105,6 @@ Stream: on connect (and after each reconnect) the agent looks up `ASM_EVENTS` an
 
 Per-host users should only publish `asm.<host>.>` and subscribe to `_INBOX_<host>.>` (`deploy/nats-server-auth.example.conf`; the admin creates the stream, and `$JS.API.>` is admin-level). The agent uses `_INBOX_<host>` as its reply-inbox prefix, so JetStream publish acks arrive there. Never give a host `_INBOX.>`: JetStream consumers receive message payloads on `_INBOX.<id>` subjects, so that would let any host read every consumer's deliveries. The stream lookup is refused for such a user and the agent keeps publishing. A permission violation that does not belong to the request in flight (for example a missing inbox permission, which leaves every publish waiting for an ack) is logged at Warn as `nats permission violation` with its subject.
 
-If messages are dropped because the queue is full (10 000 messages, e.g. NATS unreachable at boot), the agent queues a fresh `snapshot` once the queue has drained, as it does after a reconnect.
+If messages are dropped because the spool is full (`--spool-max`, e.g. NATS unreachable for a long time), the agent queues a fresh `snapshot` once the spool has drained, as it does after a reconnect. A resnapshot reflects every `opened`, `closed` and `owner_changed` since the last snapshot.
 
 A listener held by several processes (socket-activated sshd: systemd and sshd) lists every holder in the baseline snapshot.

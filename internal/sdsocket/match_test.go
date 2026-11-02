@@ -173,3 +173,64 @@ func TestMatcherRefreshesWhenOlderThanTTL(t *testing.T) {
 		t.Fatalf("calls after ttl = %d, want 2", got)
 	}
 }
+
+func TestPrimeMakesFirstMatchHit(t *testing.T) {
+	l := &fakeLister{units: []Unit{{Name: "ssh.socket", Service: "ssh.service", Listens: []Listen{{"Stream", "0.0.0.0:22"}}}}}
+	m := NewMatcher(l, 30*time.Second, hostNS)
+
+	m.Prime(context.Background())
+	unit, service, ok := m.Match(key(hostNS, "tcp", "0.0.0.0", 22))
+	if !ok || unit != "ssh.socket" || service != "ssh.service" {
+		t.Fatalf("first Match after Prime = %q, %q, %v", unit, service, ok)
+	}
+	m.wait()
+	if got := l.callCount(); got != 1 {
+		t.Fatalf("lister calls = %d, want 1 (a fresh hit does not refresh)", got)
+	}
+}
+
+func TestPrimeErrorLeavesMatcherWorking(t *testing.T) {
+	l := &fakeLister{err: errors.New("no bus")}
+	clock := time.Unix(1000, 0)
+	m := NewMatcher(l, 30*time.Second, hostNS)
+	m.now = func() time.Time { return clock }
+	k := key(hostNS, "tcp", "0.0.0.0", 22)
+
+	m.Prime(context.Background())
+	if _, _, ok := m.Match(k); ok {
+		t.Fatal("match after a failed Prime")
+	}
+	m.wait()
+	if got := l.callCount(); got != 1 {
+		t.Fatalf("lister calls within 5s of Prime = %d, want 1 (Prime counts as an attempt)", got)
+	}
+
+	l.set([]Unit{{Name: "ssh.socket", Service: "ssh.service", Listens: []Listen{{"Stream", "0.0.0.0:22"}}}}, nil)
+	clock = clock.Add(5 * time.Second)
+	m.Match(k)
+	m.wait()
+	if unit, _, ok := m.Match(k); !ok || unit != "ssh.socket" {
+		t.Fatalf("Match after recovery = %q, %v", unit, ok)
+	}
+}
+
+// blockingLister answers only when its context ends.
+type blockingLister struct{}
+
+func (blockingLister) SocketUnits(ctx context.Context) ([]Unit, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestPrimeIsBoundedByContext(t *testing.T) {
+	m := NewMatcher(blockingLister{}, 30*time.Second, hostNS)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() { m.Prime(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Prime did not return when its context ended")
+	}
+}

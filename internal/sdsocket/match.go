@@ -93,6 +93,20 @@ func (m *Matcher) maybeRefreshLocked() {
 	go m.refresh()
 }
 
+// Prime runs one refresh synchronously, bounded by ctx, so the first Match calls (the
+// startup snapshot's) can hit. Errors are handled as in the asynchronous refresh: logged
+// once, and the matcher keeps working. It counts as a refresh attempt for the 5 s gap.
+func (m *Matcher) Prime(ctx context.Context) {
+	m.mu.Lock()
+	m.attempted = m.now()
+	m.mu.Unlock()
+	units, err := m.lister.SocketUnits(ctx)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.storeLocked(units, err)
+}
+
 func (m *Matcher) refresh() {
 	defer m.refreshesWG.Done()
 	ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
@@ -102,6 +116,11 @@ func (m *Matcher) refresh() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.refreshing = false
+	m.storeLocked(units, err)
+}
+
+// storeLocked installs a lister result, or keeps the last good list on error.
+func (m *Matcher) storeLocked(units []Unit, err error) {
 	if err != nil {
 		if !m.errLogged {
 			slog.Warn("systemd socket unit list failed; keeping the last good list", "err", err)

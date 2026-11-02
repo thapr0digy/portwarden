@@ -1,6 +1,6 @@
 //go:build linux
 
-// Command portwarden-agent reports the host's TCP listening sockets to NATS JetStream.
+// Command portwarden-agent reports the host's TCP and UDP listening sockets to NATS JetStream.
 package main
 
 import (
@@ -22,13 +22,29 @@ import (
 	"github.com/thapr0digy/portwarden/internal/hostid"
 	"github.com/thapr0digy/portwarden/internal/preflight"
 	"github.com/thapr0digy/portwarden/internal/probes"
+	"github.com/thapr0digy/portwarden/internal/procinfo"
 	"github.com/thapr0digy/portwarden/internal/publish"
+	"github.com/thapr0digy/portwarden/internal/sdsocket"
 	"github.com/thapr0digy/portwarden/internal/state"
+)
+
+const (
+	hashMaxBytes     = 256 << 20 // executables larger than this are not hashed
+	socketUnitTTL    = 30 * time.Second
+	socketUnitPrime  = 2 * time.Second // bounds the startup socket unit list
+	recheckSettle    = 250 * time.Millisecond
+	defaultSpoolMax  = "64MiB"
+	defaultSpoolDir  = "/var/lib/portwarden/spool"
+	defaultCloseWait = 2 * time.Second
+	defaultRecheck   = 5 * time.Minute
 )
 
 type options struct {
 	natsURL, natsCreds, tlsCA, tlsCert, tlsKey, machineIDPath string
 	heartbeat                                                 time.Duration
+	spoolDir                                                  string
+	spoolMax                                                  int64
+	closeGrace, recheck                                       time.Duration
 }
 
 func parseFlags(args []string) (options, error) {
@@ -41,12 +57,27 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&o.tlsKey, "tls-key", "", "client key")
 	fs.StringVar(&o.machineIDPath, "machine-id-path", hostid.DefaultPath, "file holding the host id")
 	fs.DurationVar(&o.heartbeat, "heartbeat", 30*time.Second, "interval between heartbeat messages")
+	fs.StringVar(&o.spoolDir, "spool-dir", defaultSpoolDir, "directory for unsent messages (\"\" keeps them in memory)")
+	spoolMax := fs.String("spool-max", defaultSpoolMax, "spool size limit in bytes (KiB, MiB and GiB suffixes)")
+	fs.DurationVar(&o.closeGrace, "close-grace", defaultCloseWait, "delay before a closed listener is reported (0 reports at once)")
+	fs.DurationVar(&o.recheck, "recheck", defaultRecheck, "interval between full listener rechecks (0 disables)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
 	if o.heartbeat <= 0 {
 		return o, fmt.Errorf("--heartbeat must be positive, got %s", o.heartbeat)
 	}
+	if o.closeGrace < 0 {
+		return o, fmt.Errorf("--close-grace must not be negative, got %s", o.closeGrace)
+	}
+	if o.recheck < 0 {
+		return o, fmt.Errorf("--recheck must not be negative, got %s", o.recheck)
+	}
+	n, err := parseSize(*spoolMax)
+	if err != nil {
+		return o, fmt.Errorf("--spool-max: %w", err)
+	}
+	o.spoolMax = n
 	return o, nil
 }
 
@@ -83,6 +114,14 @@ func run(opts options, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	// Socket units are listed before the baseline, so socket-activated listeners in the
+	// startup snapshot carry their units; Match never blocks after this.
+	matcher := sdsocket.NewMatcher(sdsocket.NewDBusLister(), socketUnitTTL, uint64(hostNetNS))
+	primeCtx, cancelPrime := context.WithTimeout(ctx, socketUnitPrime)
+	matcher.Prime(primeCtx)
+	cancelPrime()
+	enrich := newEnricher(procinfo.NewResolver("/proc", "/sys/fs/cgroup", hashMaxBytes), matcher, hostNetNS)
+
 	// Probes first, so no listener is missed while the baseline is taken.
 	pr, err := probes.Start()
 	if err != nil {
@@ -91,13 +130,15 @@ func run(opts options, log *slog.Logger) error {
 	pub, err := publish.New(ctx, publish.Config{
 		URL: opts.natsURL, CredsFile: opts.natsCreds,
 		CAFile: opts.tlsCA, CertFile: opts.tlsCert, KeyFile: opts.tlsKey,
-		HostID: host,
+		HostID:   host,
+		SpoolDir: opts.spoolDir, SpoolMax: opts.spoolMax,
 	})
 	if err != nil {
 		_ = pr.Close()
 		return fmt.Errorf("publisher: %w", err)
 	}
-	log.Info("started", "host_id", host, "netns", hostNetNS, "nats_url", opts.natsURL)
+	log.Info("started", "host_id", host, "netns", hostNetNS, "nats_url", opts.natsURL,
+		"spool_dir", opts.spoolDir, "spool_max", opts.spoolMax)
 
 	var beats sync.WaitGroup
 	beats.Add(1)
@@ -106,7 +147,13 @@ func run(opts options, log *slog.Logger) error {
 		heartbeatLoop(ctx, opts.heartbeat, pr, pub)
 	}()
 
-	runErr := agent.Run(ctx, pr, baseline.Snapshot, loggingSink{pub, log}, agent.Options{})
+	runErr := agent.Run(ctx, pr, baseline.Snapshot, loggingSink{pub, log}, agent.Options{
+		Enrich:     enrich,
+		CloseGrace: opts.closeGrace,
+		Recheck:    opts.recheck,
+		Drops:      pr.Counters,
+		Settle:     recheckSettle,
+	})
 	stop() // end the heartbeat loop even if Run returned on its own
 	beats.Wait()
 
@@ -149,7 +196,7 @@ func heartbeatLoop(ctx context.Context, every time.Duration, pr *probes.Probes, 
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			pub.Heartbeat(pr.Counters(), 0)
+			pub.Heartbeat(pr.Counters())
 		}
 	}
 }

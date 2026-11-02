@@ -45,6 +45,7 @@ cleanup() {
 	for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
 	[ -n "$old_bpf_stats" ] && sudo sysctl -q kernel.bpf_stats_enabled="$old_bpf_stats" || true
 	$unit_was_active && sudo systemctl start portwarden-agent || true
+	sudo rm -rf "$work/spool" # written by the root-run agent
 	rm -rf "$work"
 	exit "$status"
 }
@@ -107,7 +108,7 @@ nats-server -js -a 127.0.0.1 -p "$NATS_PORT" -sd "$work/js" >"$work/nats.log" 2>
 pids+=($!)
 wait_for "nats-server" 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$NATS_PORT" 2>/dev/null
 
-sudo "$work/portwarden-agent" --nats-url "$nats_url" --heartbeat 1s >"$work/agent.log" 2>&1 &
+sudo "$work/portwarden-agent" --nats-url "$nats_url" --heartbeat 1s --spool-dir "$work/spool" >"$work/agent.log" 2>&1 &
 agent_pid=$!
 agent_alive() { kill -0 "$agent_pid" 2>/dev/null || fail "portwarden-agent exited early"; }
 stream_ready() { agent_alive; nats --server "$nats_url" stream info ASM_EVENTS >/dev/null 2>&1; }

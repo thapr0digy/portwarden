@@ -27,7 +27,6 @@ const (
 	kindClosed = 2
 
 	counterRingbufReserveFailed = 0
-	counterDroppedForeignNetns  = 1
 )
 
 const eventsBuffer = 4096
@@ -62,19 +61,12 @@ func WithVerifierLog(err error) error {
 	return err
 }
 
-// Start loads the programs with hostNetNS as the only accepted network namespace
-// inode, attaches them and starts draining the ring buffer into Events.
-func Start(hostNetNS uint32) (*Probes, error) {
+// Start loads the TCP and UDP listener programs, which watch every network namespace,
+// attaches them and starts draining the ring buffer into Events.
+func Start() (*Probes, error) {
 	spec, err := loadListen()
 	if err != nil {
 		return nil, err
-	}
-	hostVar, ok := spec.Variables[listenVarHostNetnsIno]
-	if !ok {
-		return nil, fmt.Errorf("variable %s missing from the BPF object", listenVarHostNetnsIno)
-	}
-	if err := hostVar.Set(hostNetNS); err != nil {
-		return nil, fmt.Errorf("set %s: %w", listenVarHostNetnsIno, err)
 	}
 
 	p := &Probes{events: make(chan model.Observation, eventsBuffer), done: make(chan struct{})}
@@ -82,11 +74,11 @@ func Start(hostNetNS uint32) (*Probes, error) {
 		return nil, fmt.Errorf("load listen programs: %w", WithVerifierLog(err))
 	}
 
-	for _, prog := range []*ebpf.Program{p.objs.OnListen, p.objs.OnStop} {
-		l, err := link.AttachTracing(link.TracingOptions{Program: prog})
+	for _, prog := range p.programs() {
+		l, err := link.AttachTracing(link.TracingOptions{Program: prog.prog})
 		if err != nil {
 			p.closeResources()
-			return nil, fmt.Errorf("attach %s: %w", prog, err)
+			return nil, fmt.Errorf("attach %s: %w", prog.name, err)
 		}
 		p.links = append(p.links, l)
 	}
@@ -113,11 +105,25 @@ func (p *Probes) Err() error {
 	return p.readErr
 }
 
+type namedProgram struct {
+	name string
+	prog *ebpf.Program
+}
+
+// programs lists the loaded programs under their names in bpf/listen.bpf.c.
+func (p *Probes) programs() []namedProgram {
+	return []namedProgram{
+		{listenProgOnListen, p.objs.OnListen},
+		{listenProgOnStop, p.objs.OnStop},
+		{listenProgOnUdpBind, p.objs.OnUdpBind},
+		{listenProgOnUdpUnhash, p.objs.OnUdpUnhash},
+	}
+}
+
 // Counters returns, summed over CPUs, the events dropped because the ring buffer
-// was full and the listen/close calls ignored because they were in another netns.
-// A failed map lookup reads as zero.
-func (p *Probes) Counters() (ringbufDrops, foreignNetns uint64) {
-	return p.counter(counterRingbufReserveFailed), p.counter(counterDroppedForeignNetns)
+// was full. A failed map lookup reads as zero.
+func (p *Probes) Counters() (ringbufDrops uint64) {
+	return p.counter(counterRingbufReserveFailed)
 }
 
 func (p *Probes) counter(index uint32) uint64 {
@@ -132,18 +138,19 @@ func (p *Probes) counter(index uint32) uint64 {
 	return total
 }
 
-// RunCounts returns how many times each program has run. The kernel only counts
-// while kernel.bpf_stats_enabled is 1.
-func (p *Probes) RunCounts() (open, close uint64, err error) {
-	openStats, err := p.objs.OnListen.Stats()
-	if err != nil {
-		return 0, 0, fmt.Errorf("stats of on_listen: %w", err)
+// RunCounts returns how many times each program has run, keyed by program name
+// (on_listen, on_stop, on_udp_bind, on_udp_unhash). The kernel only counts while
+// kernel.bpf_stats_enabled is 1.
+func (p *Probes) RunCounts() (map[string]uint64, error) {
+	counts := make(map[string]uint64)
+	for _, prog := range p.programs() {
+		stats, err := prog.prog.Stats()
+		if err != nil {
+			return nil, fmt.Errorf("stats of %s: %w", prog.name, err)
+		}
+		counts[prog.name] = stats.RunCount
 	}
-	closeStats, err := p.objs.OnStop.Stats()
-	if err != nil {
-		return 0, 0, fmt.Errorf("stats of on_stop: %w", err)
-	}
-	return openStats.RunCount, closeStats.RunCount, nil
+	return counts, nil
 }
 
 // Close detaches the programs, stops the reader and releases the kernel objects.
@@ -205,7 +212,7 @@ func decode(raw []byte) (model.Observation, error) {
 
 	obs := model.Observation{
 		Cookie: ev.Cookie,
-		Proc:   model.Process{PID: ev.Tgid, Comm: CommString(ev.Comm)},
+		Proc:   model.Process{PID: ev.Tgid, Comm: CommString(ev.Comm), CgroupID: ev.CgroupId},
 		At:     monotonicToWall(ev.TsNs),
 		Source: model.SourceEBPF,
 	}
@@ -217,14 +224,28 @@ func decode(raw []byte) (model.Observation, error) {
 		if err != nil {
 			return model.Observation{}, err
 		}
+		proto, err := protocol(ev.Proto)
+		if err != nil {
+			return model.Observation{}, err
+		}
 		obs.Kind = model.Opened
-		obs.Key = model.NewKey(ev.Netns, "tcp", addr, ev.Port)
+		obs.Key = model.NewKey(ev.Netns, proto, addr, ev.Port)
 		obs.Proc.UID = ev.Uid
 		obs.Proc.Exe = ExePath(ev.Tgid)
 	default:
 		return model.Observation{}, fmt.Errorf("unknown event kind %d", ev.Kind)
 	}
 	return obs, nil
+}
+
+func protocol(raw uint8) (string, error) {
+	switch raw {
+	case unix.IPPROTO_TCP:
+		return model.ProtoTCP, nil
+	case unix.IPPROTO_UDP:
+		return model.ProtoUDP, nil
+	}
+	return "", fmt.Errorf("unknown protocol %d", raw)
 }
 
 func address(family uint16, raw [16]uint8) (netip.Addr, error) {

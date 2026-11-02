@@ -84,7 +84,7 @@ func run(opts options, log *slog.Logger) error {
 	defer stop()
 
 	// Probes first, so no listener is missed while the baseline is taken.
-	pr, err := probes.Start(hostNetNS)
+	pr, err := probes.Start()
 	if err != nil {
 		return fmt.Errorf("start probes: %w", err)
 	}
@@ -149,7 +149,7 @@ func heartbeatLoop(ctx context.Context, every time.Duration, pr *probes.Probes, 
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			pub.Heartbeat(pr.Counters())
+			pub.Heartbeat(pr.Counters(), 0)
 		}
 	}
 }

@@ -14,18 +14,20 @@ import (
 )
 
 type listenEvent struct {
-	_      structs.HostLayout
-	Cookie uint64
-	TsNs   uint64
-	Tgid   uint32
-	Uid    uint32
-	Netns  uint32
-	Family uint16
-	Port   uint16
-	Addr   [16]uint8
-	Kind   uint8
-	Comm   [16]int8
-	_      [7]byte
+	_        structs.HostLayout
+	Cookie   uint64
+	TsNs     uint64
+	CgroupId uint64
+	Tgid     uint32
+	Uid      uint32
+	Netns    uint32
+	Family   uint16
+	Port     uint16
+	Addr     [16]uint8
+	Kind     uint8
+	Proto    uint8
+	Comm     [16]int8
+	_        [6]byte
 }
 
 // Names of all BPF objects in the ELF.
@@ -36,7 +38,8 @@ const (
 	listenMapEvents       = "events"
 	listenProgOnListen    = "on_listen"
 	listenProgOnStop      = "on_stop"
-	listenVarHostNetnsIno = "host_netns_ino"
+	listenProgOnUdpBind   = "on_udp_bind"
+	listenProgOnUdpUnhash = "on_udp_unhash"
 )
 
 // loadListen returns the embedded CollectionSpec for listen.
@@ -81,8 +84,10 @@ type listenSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type listenProgramSpecs struct {
-	OnListen *ebpf.ProgramSpec `ebpf:"on_listen"`
-	OnStop   *ebpf.ProgramSpec `ebpf:"on_stop"`
+	OnListen    *ebpf.ProgramSpec `ebpf:"on_listen"`
+	OnStop      *ebpf.ProgramSpec `ebpf:"on_stop"`
+	OnUdpBind   *ebpf.ProgramSpec `ebpf:"on_udp_bind"`
+	OnUdpUnhash *ebpf.ProgramSpec `ebpf:"on_udp_unhash"`
 }
 
 // listenMapSpecs contains maps before they are loaded into the kernel.
@@ -97,7 +102,6 @@ type listenMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type listenVariableSpecs struct {
-	HostNetnsIno *ebpf.VariableSpec `ebpf:"host_netns_ino"`
 }
 
 // listenObjects contains all objects after they have been loaded into the kernel.
@@ -135,21 +139,24 @@ func (m *listenMaps) Close() error {
 //
 // It can be passed to loadListenObjects or ebpf.CollectionSpec.LoadAndAssign.
 type listenVariables struct {
-	HostNetnsIno *ebpf.Variable `ebpf:"host_netns_ino"`
 }
 
 // listenPrograms contains all programs after they have been loaded into the kernel.
 //
 // It can be passed to loadListenObjects or ebpf.CollectionSpec.LoadAndAssign.
 type listenPrograms struct {
-	OnListen *ebpf.Program `ebpf:"on_listen"`
-	OnStop   *ebpf.Program `ebpf:"on_stop"`
+	OnListen    *ebpf.Program `ebpf:"on_listen"`
+	OnStop      *ebpf.Program `ebpf:"on_stop"`
+	OnUdpBind   *ebpf.Program `ebpf:"on_udp_bind"`
+	OnUdpUnhash *ebpf.Program `ebpf:"on_udp_unhash"`
 }
 
 func (p *listenPrograms) Close() error {
 	return _ListenClose(
 		p.OnListen,
 		p.OnStop,
+		p.OnUdpBind,
+		p.OnUdpUnhash,
 	)
 }
 

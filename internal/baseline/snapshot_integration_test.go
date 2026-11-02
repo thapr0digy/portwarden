@@ -233,11 +233,7 @@ func snapshotInFreshNetns() (uint16, []model.Observation, error) {
 }
 
 func TestSnapshotCookieMatchesEBPF(t *testing.T) {
-	netns, err := HostNetNS()
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, err := probes.Start(netns)
+	p, err := probes.Start()
 	if err != nil {
 		t.Fatalf("probes.Start: %+v", err)
 	}

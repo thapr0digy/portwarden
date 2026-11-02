@@ -3,6 +3,7 @@ package model
 
 import (
 	"net/netip"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -27,11 +28,52 @@ func (k ListenerKey) String() string {
 	return strconv.FormatUint(uint64(k.NetNS), 10) + "/" + k.Proto + "/" + hostPort
 }
 
+// Listener protocols.
+const (
+	ProtoTCP = "tcp"
+	ProtoUDP = "udp"
+)
+
+// Container identifies the container a process runs in; zero when it is not containerised.
+type Container struct {
+	Runtime, ID string
+}
+
 // Process describes a process holding a listening socket.
 type Process struct {
-	PID, UID uint32
-	Comm     string
-	Exe      string
+	PID, UID   uint32
+	Comm       string
+	Exe        string
+	Cmdline    []string
+	SHA256     string
+	Unit       string
+	SocketUnit string
+	Container  Container
+	CgroupID   uint64
+}
+
+// IsZero reports whether p carries no information (an ownerless listener).
+func (p Process) IsZero() bool {
+	return p.Equal(Process{})
+}
+
+// Equal compares every field; a nil and an empty Cmdline are equal.
+func (p Process) Equal(q Process) bool {
+	return p.PID == q.PID && p.UID == q.UID &&
+		p.Comm == q.Comm && p.Exe == q.Exe &&
+		slices.Equal(p.Cmdline, q.Cmdline) &&
+		p.SHA256 == q.SHA256 && p.Unit == q.Unit && p.SocketUnit == q.SocketUnit &&
+		p.Container == q.Container && p.CgroupID == q.CgroupID
+}
+
+// SameIdentity compares the fields that say who holds a socket: PID, Exe,
+// SHA256, Unit, SocketUnit, Container and CgroupID. UID, Comm and Cmdline are
+// left out because a process can change them itself (a privilege drop, a
+// retitle) without becoming a different owner.
+func (p Process) SameIdentity(q Process) bool {
+	return p.PID == q.PID && p.Exe == q.Exe && p.SHA256 == q.SHA256 &&
+		p.Unit == q.Unit && p.SocketUnit == q.SocketUnit &&
+		p.Container == q.Container && p.CgroupID == q.CgroupID
 }
 
 // Kind is the type of a listener observation.
@@ -40,6 +82,7 @@ type Kind int
 const (
 	Opened Kind = iota + 1
 	Closed
+	OwnerChanged
 )
 
 // Source says where an observation came from.
@@ -48,6 +91,7 @@ type Source int
 const (
 	SourceEBPF Source = iota + 1
 	SourceBaseline
+	SourceReconcile
 )
 
 // Observation is a single listener open or close, as seen by a collector.

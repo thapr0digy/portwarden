@@ -227,7 +227,7 @@ func TestSeqStrictlyIncreasesAcrossKinds(t *testing.T) {
 
 	p.Snapshot(snapshotOf(80))
 	p.Changes([]state.Change{openedChange(8080), closedChange(8080)})
-	p.Heartbeat(3, 4)
+	p.Heartbeat(3)
 
 	msgs := readStream(t, port, 4)
 	for i, g := range msgs {
@@ -243,7 +243,7 @@ func TestSeqStrictlyIncreasesAcrossKinds(t *testing.T) {
 	}
 	var hb asmv1.Heartbeat
 	mustUnmarshal(t, msgs[3].data, &hb)
-	if hb.RingbufDrops != 3 || hb.DroppedForeignNetns != 4 || hb.QueueDrops != 0 {
+	if hb.RingbufDrops != 3 || hb.DroppedForeignNetns != 0 || hb.QueueDrops != 0 {
 		t.Fatalf("heartbeat = %v", &hb)
 	}
 }
@@ -307,7 +307,7 @@ func TestStartsWithNATSDown(t *testing.T) {
 
 func TestQueueOverflowCountedInHeartbeat(t *testing.T) {
 	port := freePort(t)
-	p, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, QueueMax: 2})
+	p, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, SpoolMax: 2 << 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestQueueOverflowCountedInHeartbeat(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		p.Changes([]state.Change{openedChange(uint16(1000 + i))})
 	}
-	p.Heartbeat(0, 0) // 5th message; reports the 2 drops so far, its own push drops a 3rd
+	p.Heartbeat(0) // 5th message; reports the 2 drops so far, its own push drops a 3rd
 	startServer(t, port, t.TempDir())
 
 	msgs := readStream(t, port, 2)
@@ -688,7 +688,7 @@ func TestNewRejectsHostIDThatIsNotOneToken(t *testing.T) {
 
 func TestSnapshotDroppedBeforeFirstConnectIsResent(t *testing.T) {
 	port := freePort(t)
-	p, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, QueueMax: 3})
+	p, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, SpoolMax: 3 << 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -723,7 +723,7 @@ func TestSnapshotDroppedBeforeFirstConnectIsResent(t *testing.T) {
 func TestDropWhileConnectedTriggersOneResnapshot(t *testing.T) {
 	port := freePort(t)
 	startServer(t, port, t.TempDir())
-	p, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, QueueMax: 2})
+	p, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, SpoolMax: 2 << 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +771,7 @@ func TestDropWhileConnectedTriggersOneResnapshot(t *testing.T) {
 
 func TestNoResnapshotWithoutDrops(t *testing.T) {
 	port := freePort(t)
-	p, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, QueueMax: 10})
+	p, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, SpoolMax: 10 << 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -780,7 +780,7 @@ func TestNoResnapshotWithoutDrops(t *testing.T) {
 	p.Changes([]state.Change{openedChange(8080), closedChange(8080)})
 	startServer(t, port, t.TempDir())
 	readStream(t, port, 3)
-	p.Heartbeat(0, 0)
+	p.Heartbeat(0)
 	readStream(t, port, 4)
 	assertStreamCount(t, port, 4)
 }
@@ -866,5 +866,104 @@ func TestPermTrackerMatchesPendingRequest(t *testing.T) {
 	}
 	if got := violationSubject(errors.New("no quotes")); got != "" {
 		t.Errorf("violationSubject = %q, want empty", got)
+	}
+}
+
+func ownerChangedChange(port uint16, from, to uint32) state.Change {
+	c := openedChange(port)
+	c.Kind = model.OwnerChanged
+	c.PrevProcs = []model.Process{{PID: from, UID: 1000, Comm: "nginx", Exe: "/usr/sbin/nginx"}}
+	c.Procs = []model.Process{{PID: to, UID: 1000, Comm: "nginx", Exe: "/usr/sbin/nginx", Unit: "nginx.service"}}
+	return c
+}
+
+func TestOwnerChangedSubjectAndPrevious(t *testing.T) {
+	port := freePort(t)
+	startServer(t, port, t.TempDir())
+	p := newPublisher(t, port)
+
+	p.Snapshot(snapshotOf(80))
+	p.Changes([]state.Change{ownerChangedChange(80, 7, 8)})
+
+	msgs := readStream(t, port, 2)
+	if msgs[1].subject != "asm."+testHost+".listener.owner_changed" {
+		t.Fatalf("subject = %q", msgs[1].subject)
+	}
+	var ev asmv1.ListenerEvent
+	mustUnmarshal(t, msgs[1].data, &ev)
+	if ev.Kind != asmv1.Kind_OWNER_CHANGED || ev.Seq != 2 || ev.Listener.Port != 80 {
+		t.Fatalf("event = %v", &ev)
+	}
+	if len(ev.Processes) != 1 || ev.Processes[0].Pid != 8 || ev.Processes[0].Unit != "nginx.service" {
+		t.Fatalf("processes = %v, want pid 8", ev.Processes)
+	}
+	if len(ev.PreviousProcesses) != 1 || ev.PreviousProcesses[0].Pid != 7 {
+		t.Fatalf("previous_processes = %v, want pid 7", ev.PreviousProcesses)
+	}
+}
+
+func TestResnapshotIncludesOwnerChange(t *testing.T) {
+	port := freePort(t)
+	store := t.TempDir()
+	s := startServer(t, port, store)
+	p := newPublisher(t, port)
+
+	p.Snapshot(snapshotOf(80))
+	readStream(t, port, 1)
+
+	stop(s)
+	p.Changes([]state.Change{ownerChangedChange(80, 7, 8)})
+	startServer(t, port, store)
+
+	msgs := readStream(t, port, 3)
+	if msgs[2].subject != "asm."+testHost+".snapshot" {
+		t.Fatalf("message 3 subject = %q", msgs[2].subject)
+	}
+	var resnap asmv1.Snapshot
+	mustUnmarshal(t, msgs[2].data, &resnap)
+	if len(resnap.Listeners) != 1 || len(resnap.Listeners[0].Processes) != 1 ||
+		resnap.Listeners[0].Processes[0].Pid != 8 {
+		t.Fatalf("resnapshot = %v, want listener 80 owned by pid 8", &resnap)
+	}
+}
+
+func TestSpooledMessagesSentAfterRestart(t *testing.T) {
+	port := freePort(t)
+	dir := t.TempDir()
+
+	a, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, SpoolDir: dir, SpoolMax: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Changes([]state.Change{openedChange(8080)})
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	startServer(t, port, t.TempDir())
+	b, err := New(context.Background(), Config{URL: natsURL(port), HostID: testHost, SpoolDir: dir, SpoolMax: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { b.Close() })
+	b.Changes([]state.Change{openedChange(9090)})
+
+	msgs := readStream(t, port, 2)
+	var fromA, fromB asmv1.ListenerEvent
+	mustUnmarshal(t, msgs[0].data, &fromA)
+	mustUnmarshal(t, msgs[1].data, &fromB)
+	if fromA.Listener.Port != 8080 || fromA.RunId != a.runID || fromA.Seq != 1 ||
+		fromA.ObservedAt.AsTime().Unix() != 1700000000 {
+		t.Fatalf("first message = %v, want A's opened 8080 (run %s, seq 1)", &fromA, a.runID)
+	}
+	if fromB.Listener.Port != 9090 || fromB.RunId != b.runID || fromB.RunId == fromA.RunId {
+		t.Fatalf("second message = %v, want B's opened 9090 (run %s)", &fromB, b.runID)
+	}
+	assertStreamCount(t, port, 2)
+}
+
+func TestNewRejectsNegativeSpoolMax(t *testing.T) {
+	if _, err := New(context.Background(), Config{URL: "nats://127.0.0.1:1", HostID: testHost, SpoolMax: -1}); err == nil {
+		t.Fatal("want error for a negative SpoolMax")
 	}
 }

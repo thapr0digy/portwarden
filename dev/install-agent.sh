@@ -16,3 +16,6 @@ sudo systemctl daemon-reload
 sudo systemctl enable portwarden-agent
 sudo systemctl restart portwarden-agent
 systemctl --no-pager status portwarden-agent || true
+# The spool lives in the unit's StateDirectory: owner portwarden-agent, mode 0700.
+systemctl show portwarden-agent -p StateDirectory
+sudo ls -ld /var/lib/portwarden

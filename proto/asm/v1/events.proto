@@ -10,12 +10,14 @@ enum Kind {
   KIND_UNSPECIFIED = 0;
   OPENED = 1;
   CLOSED = 2;
+  OWNER_CHANGED = 3;
 }
 
 enum Source {
   SOURCE_UNSPECIFIED = 0;
   EBPF = 1;
   BASELINE = 2;
+  RECONCILE = 3;
 }
 
 message Listener {
@@ -26,11 +28,22 @@ message Listener {
   string key = 5;
 }
 
+message Container {
+  string runtime = 1;
+  string id = 2;
+}
+
 message Process {
   uint32 pid = 1;
   uint32 uid = 2;
   string comm = 3;
   string exe = 4;
+  repeated string cmdline = 5;
+  string sha256 = 6;
+  string unit = 7;
+  string socket_unit = 8;
+  Container container = 9;
+  uint64 cgroup_id = 10;
 }
 
 message ListenerEvent {
@@ -43,6 +56,8 @@ message ListenerEvent {
   Source source = 7;
   Listener listener = 8;
   repeated Process processes = 9;
+  // Set only on OWNER_CHANGED: the owners before the change.
+  repeated Process previous_processes = 10;
 }
 
 message ListenerState {
@@ -67,5 +82,5 @@ message Heartbeat {
   google.protobuf.Timestamp at = 5;
   uint64 ringbuf_drops = 6;
   uint64 queue_drops = 7;
-  uint64 dropped_foreign_netns = 8;
+  uint64 dropped_foreign_netns = 8 [deprecated = true];
 }

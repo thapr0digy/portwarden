@@ -1,34 +1,54 @@
 #!/usr/bin/env bash
 # End-to-end check, run inside the VM as the dev user with sudo (make e2e).
 #   1. latency: listen() on :8099 -> an OPENED line from portwarden-watch, must be <= 1000 ms;
-#      closing it must produce CLOSED within 5 s.
-#   2. efficiency: with kernel.bpf_stats_enabled=1, 10 000 real TCP connections accepted
-#      by a python http.server must not run any of the agent's BPF programs.
+#      closing it must produce CLOSED within 5 s. Same for a UDP bind() on :8098.
+#   2. restart: restarting a transient unit serving :8097 gives one OWNER_CHANGED and no
+#      CLOSED within 3 s.
+#   3. container netns: a listener in a fresh netns carries netns=<n>, not the host's.
+#   4. socket activation: once a recheck has run, :22 (ssh.socket) shows unit=ssh.service
+#      sock=ssh.socket; SKIP when ssh.socket is not active.
+#   5. efficiency: with kernel.bpf_stats_enabled=1, 10 000 real TCP connections accepted
+#      by a python http.server must not run on_listen or on_stop; 1000 UDP client sockets
+#      run on_udp_bind/on_udp_unhash (average ns per run printed) but produce no event.
+#   6. spool: with nats-server down, a listener opened on :8095 survives an agent restart in
+#      the spool and reaches a fresh watcher (--since 5m) with its original time.
 # Self-contained: it builds its own binaries, runs its own nats-server on a private port
-# and store, stops the portwarden-agent systemd unit while it runs (it would share the BPF
-# programs' run counters) and puts everything back on exit.
+# and store, runs its agent with its own spool directory, stops the portwarden-agent
+# systemd unit while it runs (it would share the BPF programs' run counters) and puts
+# everything back on exit.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NATS_PORT=4333
 SERVER_PORT=8099
+UDP_PORT=8098
+RESTART_PORT=8097
+NETNS_PORT=8096
+SPOOL_PORT=8095
+MARKER_PORT=8094
+RESTART_UNIT=pw-e2e
 CONNECTIONS=10000
+UDP_CLIENTS=1000
 MAX_LATENCY_MS=1000
 LINE_TIMEOUT_S=5
-REQUIRED_PROGS=(on_listen on_stop) # the open and close probes must be among the agent's programs
+RESTART_WINDOW_S=3
+RECHECK_S=10
+REQUIRED_PROGS=(on_listen on_stop on_udp_bind on_udp_unhash) # the probes must be among the agent's programs
 
 work=$(mktemp -d)
 nats_url="nats://127.0.0.1:$NATS_PORT"
 pids=() # background children of this script (not the sudo-run agent)
 agent_pid=""
+nats_pid=""
 unit_was_active=false
 old_bpf_stats=""
+ssh_service_restore="" # start|stop: undoes the socket-activation check's change to ssh.service
 
 log() { echo "e2e: $*"; }
 
 fail() {
 	echo "e2e: FAIL: $*" >&2
-	for f in agent nats watch; do
+	for f in agent nats watch watch-replay; do
 		[ -s "$work/$f.log" ] && { echo "--- $f.log (tail) ---" >&2; tail -n 20 "$work/$f.log" >&2; }
 	done
 	exit 1
@@ -39,12 +59,16 @@ cleanup() {
 	trap - EXIT
 	for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
 	if [ -n "$agent_pid" ]; then
-		sudo pkill -TERM -f "$work/portwarden-agent" 2>/dev/null || true
+		sudo pkill -TERM -f "^$work/portwarden-agent " 2>/dev/null || true
 		wait "$agent_pid" 2>/dev/null || true
 	fi
+	sudo pkill -TERM -f "http.server --bind 127.0.0.1 $NETNS_PORT" 2>/dev/null || true
+	sudo systemctl stop "$RESTART_UNIT" 2>/dev/null || true
 	for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
+	[ -n "$ssh_service_restore" ] && sudo systemctl -q "$ssh_service_restore" ssh.service || true
 	[ -n "$old_bpf_stats" ] && sudo sysctl -q kernel.bpf_stats_enabled="$old_bpf_stats" || true
 	$unit_was_active && sudo systemctl start portwarden-agent || true
+	sudo rm -rf "$work/spool" # written by the root-run agent
 	rm -rf "$work"
 	exit "$status"
 }
@@ -63,8 +87,14 @@ wait_for() {
 	done
 }
 
-# seen <pattern> <count>: the watch output has at least <count> matching lines.
-seen() { [ "$(grep -c -- "$1" "$work/watch.log" || true)" -ge "$2" ]; }
+# count_in <file> <extended regex>: the number of matching lines.
+count_in() { grep -cE -- "$2" "$1" || true; }
+
+# seen_in <file> <extended regex> <count>: the file has at least <count> matching lines.
+seen_in() { [ "$(count_in "$1" "$2")" -ge "$3" ]; }
+
+# seen <extended regex> <count>: the watch output has at least <count> matching lines.
+seen() { seen_in "$work/watch.log" "$1" "$2"; }
 
 # agent_prog_ids: ids of every BPF program the agent holds (through a prog or link fd),
 # read from its /proc/<pid>/fdinfo; bpftool's own "pids" field is empty here because the
@@ -82,6 +112,35 @@ agent_runs() {
 		'($ids | split("\n") | map(tonumber)) as $want | .[] | select(.id as $i | $want | index($i)) | "\(.name) \(.run_cnt // 0) \(.run_time_ns // 0)"' | sort
 }
 
+# run_delta <runs before> <runs after> <prog>: "<run_cnt delta> <run_time_ns delta>".
+run_delta() {
+	awk -v p="$3" 'NR == FNR { if ($1 == p) { r = $2; n = $3 } next } $1 == p { print $2 - r, $3 - n }' \
+		<(echo "$1") <(echo "$2")
+}
+
+# print_deltas <runs before> <runs after>: one "run_cnt +N" line per program.
+print_deltas() {
+	local name runs
+	for name in $(awk '{print $1}' <<<"$2"); do
+		read -r runs _ < <(run_delta "$1" "$2" "$name")
+		[ -n "$runs" ] || fail "no run counts for $name"
+		log "  $name run_cnt +$runs"
+	done
+}
+
+# check_udp_prog <runs before> <runs after> <prog>: the program ran at least once per
+# UDP client socket; prints its average ns per run.
+check_udp_prog() {
+	local runs ns
+	read -r runs ns < <(run_delta "$1" "$2" "$3")
+	[ -n "$runs" ] || fail "no run counts for $3"
+	[ "$runs" -ge "$UDP_CLIENTS" ] || fail "$3 ran $runs times for $UDP_CLIENTS UDP client sockets"
+	echo "$3 average ns per run: $((ns / runs)) ($runs runs)"
+}
+
+# line_ns <watch line>: the line's timestamp in ns since the epoch.
+line_ns() { date -d "${1%% *}" +%s%N; }
+
 start_server() {
 	python3 -m http.server "$SERVER_PORT" --bind 0.0.0.0 --directory "$work/www" >/dev/null 2>&1 &
 	server_pid=$!
@@ -93,7 +152,46 @@ stop_server() {
 	wait "$server_pid" 2>/dev/null || true
 }
 
-ss -Hltn "sport = :$SERVER_PORT" | grep -q . && fail "port $SERVER_PORT is already in use"
+start_nats() {
+	nats-server -js -a 127.0.0.1 -p "$NATS_PORT" -sd "$work/js" >>"$work/nats.log" 2>&1 &
+	nats_pid=$!
+	pids+=("$nats_pid")
+	wait_for "nats-server" 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$NATS_PORT" 2>/dev/null
+}
+
+start_agent() {
+	sudo "$work/portwarden-agent" --nats-url "$nats_url" --heartbeat 1s --recheck "${RECHECK_S}s" \
+		--spool-dir "$work/spool" >>"$work/agent.log" 2>&1 &
+	agent_pid=$!
+}
+
+stop_agent() {
+	# Anchored on the binary path, so it matches the agent and not its sudo wrapper.
+	sudo pkill -TERM -f "^$work/portwarden-agent " || fail "no portwarden-agent process to stop"
+	wait "$agent_pid" || fail "portwarden-agent exited non-zero on SIGTERM"
+	agent_pid=""
+}
+
+agent_alive() { kill -0 "$agent_pid" 2>/dev/null || fail "portwarden-agent exited early"; }
+stream_ready() { agent_alive; nats --server "$nats_url" stream info ASM_EVENTS >/dev/null 2>&1; }
+
+# hold_udp <port>: binds a UDP socket to 0.0.0.0:<port> in the background and holds it.
+hold_udp() {
+	python3 -c 'import signal, socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("0.0.0.0", int(sys.argv[1])))
+signal.pause()' "$1" &
+	pids+=($!)
+}
+
+for port in "$SERVER_PORT" "$RESTART_PORT" "$NETNS_PORT" "$SPOOL_PORT"; do
+	ss -Hltn "sport = :$port" | grep -q . && fail "tcp port $port is already in use"
+done
+for port in "$UDP_PORT" "$MARKER_PORT"; do
+	ss -Hlun "sport = :$port" | grep -q . && fail "udp port $port is already in use"
+done
+systemctl is-active --quiet "$RESTART_UNIT" && fail "unit $RESTART_UNIT is already running"
+sudo systemctl reset-failed "$RESTART_UNIT" 2>/dev/null || true
 mkdir -p "$work/www"
 
 log "building"
@@ -103,14 +201,8 @@ go build -o "$work/portwarden-watch" ./cmd/portwarden-watch
 systemctl is-active --quiet portwarden-agent && unit_was_active=true
 $unit_was_active && sudo systemctl stop portwarden-agent
 
-nats-server -js -a 127.0.0.1 -p "$NATS_PORT" -sd "$work/js" >"$work/nats.log" 2>&1 &
-pids+=($!)
-wait_for "nats-server" 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$NATS_PORT" 2>/dev/null
-
-sudo "$work/portwarden-agent" --nats-url "$nats_url" --heartbeat 1s >"$work/agent.log" 2>&1 &
-agent_pid=$!
-agent_alive() { kill -0 "$agent_pid" 2>/dev/null || fail "portwarden-agent exited early"; }
-stream_ready() { agent_alive; nats --server "$nats_url" stream info ASM_EVENTS >/dev/null 2>&1; }
+start_nats
+start_agent
 wait_for "stream ASM_EVENTS" 15 stream_ready
 
 "$work/portwarden-watch" --nats-url "$nats_url" --since 0s >"$work/watch.log" 2>&1 &
@@ -121,16 +213,81 @@ wait_for "first heartbeat in portwarden-watch" 10 seen HEARTBEAT 1
 log "latency: listen on :$SERVER_PORT"
 t0=$(now_ns)
 start_server
-wait_for "OPENED tcp 0.0.0.0:$SERVER_PORT" "$LINE_TIMEOUT_S" seen "OPENED tcp 0.0.0.0:$SERVER_PORT" 1
+wait_for "OPENED tcp 0.0.0.0:$SERVER_PORT" "$LINE_TIMEOUT_S" seen "OPENED tcp 0.0.0.0:$SERVER_PORT " 1
 t1=$(now_ns)
 latency_ms=$(((t1 - t0) / 1000000))
 echo "opened latency: $latency_ms ms"
 
 stop_server
-wait_for "CLOSED tcp 0.0.0.0:$SERVER_PORT" "$LINE_TIMEOUT_S" seen "CLOSED tcp 0.0.0.0:$SERVER_PORT" 1
+wait_for "CLOSED tcp 0.0.0.0:$SERVER_PORT" "$LINE_TIMEOUT_S" seen "CLOSED tcp 0.0.0.0:$SERVER_PORT " 1
 log "closed line seen"
 
 [ "$latency_ms" -le "$MAX_LATENCY_MS" ] || fail "opened latency $latency_ms ms > $MAX_LATENCY_MS ms"
+
+log "latency: UDP bind on :$UDP_PORT"
+t0=$(now_ns)
+hold_udp "$UDP_PORT"
+udp_pid=$!
+wait_for "OPENED udp 0.0.0.0:$UDP_PORT" "$LINE_TIMEOUT_S" seen "OPENED udp 0.0.0.0:$UDP_PORT " 1
+t1=$(now_ns)
+udp_latency_ms=$(((t1 - t0) / 1000000))
+echo "udp opened latency: $udp_latency_ms ms"
+kill "$udp_pid"
+wait "$udp_pid" 2>/dev/null || true
+wait_for "CLOSED udp 0.0.0.0:$UDP_PORT" "$LINE_TIMEOUT_S" seen "CLOSED udp 0.0.0.0:$UDP_PORT " 1
+[ "$udp_latency_ms" -le "$MAX_LATENCY_MS" ] || fail "udp opened latency $udp_latency_ms ms > $MAX_LATENCY_MS ms"
+
+log "restart: transient unit $RESTART_UNIT on :$RESTART_PORT"
+sudo systemd-run --quiet --unit "$RESTART_UNIT" -p Restart=no \
+	python3 -m http.server "$RESTART_PORT" --directory "$work/www"
+wait_for "OPENED tcp 0.0.0.0:$RESTART_PORT" "$LINE_TIMEOUT_S" \
+	seen "OPENED tcp 0.0.0.0:$RESTART_PORT .* unit=$RESTART_UNIT.service" 1
+restart_at=$(now_ns)
+sudo systemctl restart "$RESTART_UNIT"
+wait_for "OWNER_CHANGED tcp 0.0.0.0:$RESTART_PORT" "$RESTART_WINDOW_S" \
+	seen "OWNER_CHANGED tcp 0.0.0.0:$RESTART_PORT .* unit=$RESTART_UNIT.service" 1
+# A CLOSED would come when the 2 s close grace ends, so the whole window is waited out.
+until [ "$(now_ns)" -ge $((restart_at + RESTART_WINDOW_S * 1000000000)) ]; do sleep 0.1; done
+owner_changes=$(count_in "$work/watch.log" "OWNER_CHANGED tcp 0.0.0.0:$RESTART_PORT ")
+[ "$owner_changes" -eq 1 ] || fail "expected one OWNER_CHANGED for :$RESTART_PORT, got $owner_changes"
+! seen "CLOSED tcp 0.0.0.0:$RESTART_PORT " 1 || fail "restarting $RESTART_UNIT produced a CLOSED for :$RESTART_PORT"
+echo "OWNER_CHANGED seen for :$RESTART_PORT, no CLOSED within ${RESTART_WINDOW_S}s"
+sudo systemctl stop "$RESTART_UNIT"
+
+log "container netns: listener on 127.0.0.1:$NETNS_PORT in a fresh netns"
+host_netns=$(readlink /proc/self/ns/net | tr -dc 0-9)
+sudo unshare -n sh -c "ip link set lo up; exec python3 -m http.server --bind 127.0.0.1 $NETNS_PORT --directory $work/www" \
+	>/dev/null 2>&1 &
+pids+=($!)
+wait_for "OPENED tcp 127.0.0.1:$NETNS_PORT" "$LINE_TIMEOUT_S" seen "OPENED tcp 127.0.0.1:$NETNS_PORT " 1
+netns_line=$(grep -m1 -- "OPENED tcp 127.0.0.1:$NETNS_PORT " "$work/watch.log")
+listener_netns=$(grep -oE ' netns=[0-9]+' <<<"$netns_line" | tr -dc 0-9) || true
+[ -n "$listener_netns" ] && [ "$listener_netns" != "$host_netns" ] ||
+	fail "netns listener line has no foreign netns= (host $host_netns): $netns_line"
+echo "netns listener: netns=$listener_netns (host $host_netns)"
+sudo pkill -TERM -f "http.server --bind 127.0.0.1 $NETNS_PORT"
+
+log "socket activation: :22 after a recheck"
+if ! systemctl is-active --quiet ssh.socket; then
+	echo "socket activation: SKIP (ssh.socket is not active)"
+else
+	# The baseline already holds :22 with its units; changing its holders (sshd joins
+	# systemd, or leaves) makes the next recheck report it as an OWNER_CHANGED.
+	# The restore action is set before each change, so an interrupted change is undone too.
+	if systemctl is-active --quiet ssh.service; then
+		ssh_service_restore=start
+		sudo systemctl -q stop ssh.service
+	else
+		ssh_service_restore=stop
+		# A connection activates ssh.service, whose sshd inherits the listening sockets.
+		timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/22; head -c 4 <&3" >/dev/null ||
+			fail "connecting to :22 did not get an SSH banner"
+		wait_for "ssh.service to start" 10 systemctl is-active --quiet ssh.service
+	fi
+	ssh_pattern=" tcp 0.0.0.0:22 pid=1 .* unit=ssh.service sock=ssh.socket"
+	wait_for ":22 with unit=ssh.service sock=ssh.socket" $((RECHECK_S * 3)) seen "$ssh_pattern" 1
+	echo "socket activation: $(grep -m1 -E -- "$ssh_pattern" "$work/watch.log" | cut -d' ' -f4-)"
+fi
 
 log "efficiency: $CONNECTIONS connections with bpf stats on"
 old_bpf_stats=$(sysctl -n kernel.bpf_stats_enabled)
@@ -143,7 +300,7 @@ done
 log "agent BPF programs: $(awk '{print $1}' <<<"$runs_start" | tr '\n' ' ')"
 
 start_server
-wait_for "second OPENED tcp 0.0.0.0:$SERVER_PORT" "$LINE_TIMEOUT_S" seen "OPENED tcp 0.0.0.0:$SERVER_PORT" 2
+wait_for "second OPENED tcp 0.0.0.0:$SERVER_PORT" "$LINE_TIMEOUT_S" seen "OPENED tcp 0.0.0.0:$SERVER_PORT " 2
 runs_before=$(agent_runs)
 # Control: stats are live, so the listen() above must have run on_listen.
 [ "$(awk '$1=="on_listen"{print $2}' <<<"$runs_before")" -gt "$(awk '$1=="on_listen"{print $2}' <<<"$runs_start")" ] ||
@@ -157,16 +314,59 @@ runs_after=$(agent_runs)
 
 stop_server
 
-read -r runs ns < <(paste -d' ' <(echo "$runs_before") <(echo "$runs_after") |
-	awk '{runs += $5 - $2; ns += $6 - $3} END {print runs, ns}')
-paste -d' ' <(echo "$runs_before") <(echo "$runs_after") | awk '{printf "e2e:   %s run_cnt +%d\n", $1, $5 - $2}'
-echo "bpf runs during load: $runs"
-if [ "$runs" -gt 0 ]; then
-	echo "average ns per run: $((ns / runs))"
-else
-	echo "average ns per run: n/a"
-fi
-[ "$runs" -eq 0 ] || fail "BPF programs ran $runs times during the connection load"
+print_deltas "$runs_before" "$runs_after"
+# Only the TCP probes count: background UDP (resolved, NTP) may run the UDP hooks meanwhile.
+read -r listen_runs _ < <(run_delta "$runs_before" "$runs_after" on_listen)
+read -r stop_runs _ < <(run_delta "$runs_before" "$runs_after" on_stop)
+[ -n "$listen_runs" ] && [ -n "$stop_runs" ] || fail "no run counts for on_listen/on_stop"
+tcp_runs=$((listen_runs + stop_runs))
+echo "bpf runs during load: $tcp_runs (on_listen + on_stop)"
+[ "$tcp_runs" -eq 0 ] || fail "on_listen/on_stop ran $tcp_runs times during the connection load"
 
-! grep -q '^GAP ' "$work/watch.log" || fail "portwarden-watch reported a GAP"
+log "efficiency: $UDP_CLIENTS UDP client sockets"
+udp_events_before=$(count_in "$work/watch.log" " (OPENED|CLOSED) udp ")
+runs_before=$(agent_runs)
+python3 -c 'import socket, sys
+for _ in range(int(sys.argv[1])):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.sendto(b"x", ("127.0.0.1", 9))
+    s.close()' "$UDP_CLIENTS"
+runs_after=$(agent_runs)
+# The marker is bound after the clients closed; the stream is ordered, so once its OPENED
+# is in, any event the clients caused is in too.
+hold_udp "$MARKER_PORT"
+marker_pid=$!
+wait_for "OPENED udp 0.0.0.0:$MARKER_PORT" "$LINE_TIMEOUT_S" seen "OPENED udp 0.0.0.0:$MARKER_PORT " 1
+udp_events_after=$(count_in "$work/watch.log" " (OPENED|CLOSED) udp ")
+kill "$marker_pid"
+wait "$marker_pid" 2>/dev/null || true
+print_deltas "$runs_before" "$runs_after"
+check_udp_prog "$runs_before" "$runs_after" on_udp_bind
+check_udp_prog "$runs_before" "$runs_after" on_udp_unhash
+[ "$udp_events_after" -eq $((udp_events_before + 1)) ] ||
+	fail "UDP client sockets produced $((udp_events_after - udp_events_before - 1)) UDP events"
+echo "udp client sockets: no UDP events"
+
+log "spool: :$SPOOL_PORT opened while nats-server is down, across an agent restart"
+kill "$nats_pid"
+wait "$nats_pid" 2>/dev/null || true
+python3 -m http.server "$SPOOL_PORT" --bind 0.0.0.0 --directory "$work/www" >/dev/null 2>&1 &
+pids+=($!)
+# The record's listener key ("<netns>/tcp/0.0.0.0:8095") is stored verbatim in the segment.
+spool_has_listener() { sudo grep -rqa -- "/tcp/0.0.0.0:$SPOOL_PORT" "$work/spool"; }
+wait_for ":$SPOOL_PORT OPENED in the spool" "$LINE_TIMEOUT_S" spool_has_listener
+agent_stopped_at=$(now_ns)
+stop_agent
+start_agent
+start_nats
+"$work/portwarden-watch" --nats-url "$nats_url" --since 5m >"$work/watch-replay.log" 2>&1 &
+pids+=($!)
+wait_for "replayed OPENED tcp 0.0.0.0:$SPOOL_PORT" 30 \
+	seen_in "$work/watch-replay.log" "OPENED tcp 0.0.0.0:$SPOOL_PORT " 1
+spool_line=$(grep -m1 -- "OPENED tcp 0.0.0.0:$SPOOL_PORT " "$work/watch-replay.log")
+[ "$(line_ns "$spool_line")" -lt "$agent_stopped_at" ] ||
+	fail "spooled OPENED does not carry its original time: $spool_line"
+echo "spool: replayed $(cut -d' ' -f1,4- <<<"$spool_line")"
+
+! grep -q '^GAP ' "$work/watch.log" "$work/watch-replay.log" || fail "portwarden-watch reported a GAP"
 log "ok"

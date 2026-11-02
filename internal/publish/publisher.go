@@ -2,6 +2,9 @@
 //
 // Changes and Snapshot only enqueue; one sender goroutine does all network I/O, so the
 // caller (the agent loop draining the kernel ring buffer) never waits on the network.
+// The queue is a spool (internal/spool): on disk when Config.SpoolDir is set, so
+// messages not yet sent survive a restart and go out, with their original run_id and
+// seq, before the new run's own.
 package publish
 
 import (
@@ -24,27 +27,33 @@ import (
 
 	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
 	"github.com/thapr0digy/portwarden/internal/model"
+	"github.com/thapr0digy/portwarden/internal/spool"
 	"github.com/thapr0digy/portwarden/internal/state"
 )
 
 const (
-	streamName       = "ASM_EVENTS"
-	defaultQueueMax  = 10_000
-	publishTimeout   = 2 * time.Second
-	closeFlushWindow = 2 * time.Second
-	dedupeWindow     = 2 * time.Minute
-	streamMaxAge     = 7 * 24 * time.Hour
+	streamName      = "ASM_EVENTS"
+	defaultSpoolMax = 64 << 20
+	// spoolSegmentBytes is the spool's segment size; a smaller SpoolMax caps it, so
+	// the oldest segment can always be evicted to stay under the limit.
+	spoolSegmentBytes = 4 << 20
+	publishTimeout    = 2 * time.Second
+	closeFlushWindow  = 2 * time.Second
+	dedupeWindow      = 2 * time.Minute
+	streamMaxAge      = 7 * 24 * time.Hour
 )
 
 // reconnectWait is the delay between connection attempts and between send retries.
 // A variable so tests can shorten it.
 var reconnectWait = time.Second
 
-// Config configures a Publisher. Zero QueueMax means 10 000.
+// Config configures a Publisher. SpoolDir "" keeps unsent messages in memory only,
+// where SpoolMax counts each message as 1 KiB. Zero SpoolMax means 64 MiB.
 type Config struct {
 	URL, CredsFile, CAFile, CertFile, KeyFile string
 	HostID                                    string
-	QueueMax                                  int
+	SpoolDir                                  string
+	SpoolMax                                  int64
 }
 
 // Publisher implements agent.Sink on top of a JetStream stream.
@@ -53,9 +62,9 @@ type Publisher struct {
 	runID  string
 	nc     *nats.Conn
 	js     jetstream.JetStream
-	q      *queue
+	q      *spool.Spool
 
-	mu       sync.Mutex // orders seq assignment with queue.push
+	mu       sync.Mutex // orders seq assignment with q.Push
 	seq      uint64
 	current  map[model.ListenerKey]state.Listener // listeners as of the last enqueued message
 	haveSnap bool
@@ -85,8 +94,11 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	if strings.ContainsAny(cfg.HostID, ".*> \t\r\n") {
 		return nil, fmt.Errorf("publish: HostID %q is not a single subject token", cfg.HostID)
 	}
-	if cfg.QueueMax <= 0 {
-		cfg.QueueMax = defaultQueueMax
+	if cfg.SpoolMax < 0 {
+		return nil, fmt.Errorf("publish: SpoolMax %d is negative", cfg.SpoolMax)
+	}
+	if cfg.SpoolMax == 0 {
+		cfg.SpoolMax = defaultSpoolMax
 	}
 	for _, f := range []string{cfg.CredsFile, cfg.CAFile, cfg.CertFile, cfg.KeyFile} {
 		if err := readable(f); err != nil {
@@ -96,12 +108,16 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
 		return nil, errors.New("publish: CertFile and KeyFile must be set together")
 	}
+	q, err := spool.Open(cfg.SpoolDir, cfg.SpoolMax, min(spoolSegmentBytes, cfg.SpoolMax))
+	if err != nil {
+		return nil, fmt.Errorf("publish: %w", err)
+	}
 
 	p := &Publisher{
 		hostID:  cfg.HostID,
 		current: make(map[model.ListenerKey]state.Listener),
 		runID:   ulid.Make().String(),
-		q:       newQueue(cfg.QueueMax),
+		q:       q,
 		wake:    make(chan struct{}, 1),
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
@@ -111,8 +127,8 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 		nats.Name("portwarden"),
 		nats.MaxReconnects(-1),
 		nats.RetryOnFailedConnect(true),
-		// Turn off nats.go's own reconnect buffer so the bounded queue is the only
-		// buffer and its drop counter is true.
+		// Turn off nats.go's own reconnect buffer so the spool is the only buffer and
+		// its drop counter is true.
 		nats.ReconnectBufSize(-1),
 		nats.ReconnectWait(reconnectWait),
 		// Reply inboxes (request replies and JetStream publish acks) live under
@@ -152,11 +168,13 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 
 	nc, err := nats.Connect(cfg.URL, opts...)
 	if err != nil {
+		_ = q.Close()
 		return nil, fmt.Errorf("publish: connect: %w", err)
 	}
 	js, err := jetstream.New(nc)
 	if err != nil {
 		nc.Close()
+		_ = q.Close()
 		return nil, fmt.Errorf("publish: jetstream: %w", err)
 	}
 	p.nc, p.js = nc, js
@@ -208,29 +226,33 @@ func (p *Publisher) Snapshot(listeners []state.Listener) {
 	p.enqueueSnapshot(listeners)
 }
 
-// Heartbeat enqueues a liveness message carrying the drop counters.
-func (p *Publisher) Heartbeat(ringbufDrops, foreignNetns uint64) {
+// Heartbeat enqueues a liveness message carrying the ring buffer's and the spool's
+// drop counters. dropped_foreign_netns is deprecated and always 0.
+func (p *Publisher) Heartbeat(ringbufDrops uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	id, seq := p.nextIDLocked()
 	p.enqueueLocked("heartbeat", id, seq, &asmv1.Heartbeat{
-		EventId:             id,
-		HostId:              p.hostID,
-		RunId:               p.runID,
-		Seq:                 seq,
-		At:                  timestamppb.Now(),
-		RingbufDrops:        ringbufDrops,
-		QueueDrops:          p.q.Dropped(),
-		DroppedForeignNetns: foreignNetns,
+		EventId:      id,
+		HostId:       p.hostID,
+		RunId:        p.runID,
+		Seq:          seq,
+		At:           timestamppb.Now(),
+		RingbufDrops: ringbufDrops,
+		QueueDrops:   p.q.Dropped(),
 	})
 }
 
-// Close flushes what it can within a short window, then disconnects.
-// Messages still queued after that are lost.
+// Close flushes what it can within a short window, then disconnects. Messages still
+// queued after that stay in the spool directory for the next run, or are lost in
+// memory mode.
 func (p *Publisher) Close() error {
 	p.shutdown()
 	<-p.done
 	p.nc.Close()
+	if err := p.q.Close(); err != nil {
+		return fmt.Errorf("publish: close spool: %w", err)
+	}
 	return nil
 }
 
@@ -251,23 +273,29 @@ func (p *Publisher) nextIDLocked() (string, uint64) {
 func (p *Publisher) enqueueChange(c state.Change) {
 	id, seq := p.nextIDLocked()
 	kind, suffix := asmv1.Kind_OPENED, "listener.opened"
-	if c.Kind == model.Closed {
+	var previous []*asmv1.Process
+	switch c.Kind {
+	case model.Closed:
 		kind, suffix = asmv1.Kind_CLOSED, "listener.closed"
+	case model.OwnerChanged:
+		kind, suffix = asmv1.Kind_OWNER_CHANGED, "listener.owner_changed"
+		previous = processesToProto(c.PrevProcs)
 	}
 	at := c.At
 	if at.IsZero() {
 		at = time.Now()
 	}
 	p.enqueueLocked(suffix, id, seq, &asmv1.ListenerEvent{
-		EventId:    id,
-		HostId:     p.hostID,
-		RunId:      p.runID,
-		Seq:        seq,
-		ObservedAt: timestamppb.New(at),
-		Kind:       kind,
-		Source:     sourceToProto(c.Source),
-		Listener:   listenerToProto(c.Key),
-		Processes:  processesToProto(c.Procs),
+		EventId:           id,
+		HostId:            p.hostID,
+		RunId:             p.runID,
+		Seq:               seq,
+		ObservedAt:        timestamppb.New(at),
+		Kind:              kind,
+		Source:            sourceToProto(c.Source),
+		Listener:          listenerToProto(c.Key),
+		Processes:         processesToProto(c.Procs),
+		PreviousProcesses: previous,
 	})
 }
 
@@ -299,16 +327,18 @@ func (p *Publisher) enqueueLocked(suffix, id string, seq uint64, msg proto.Messa
 		slog.Error("marshal event", "subject", suffix, "err", err)
 		return
 	}
-	p.q.push(outMsg{subject: "asm." + p.hostID + "." + suffix, id: id, seq: seq, data: data})
+	p.q.Push(spool.Msg{Subject: "asm." + p.hostID + "." + suffix, ID: id, Seq: seq, Data: data})
 }
 
-// applyLocked folds a change into the current listener set.
+// applyLocked folds a change into the current listener set; an OwnerChanged replaces
+// the listener's processes, so a later resnapshot shows the new owners.
 func (p *Publisher) applyLocked(c state.Change) {
-	if c.Kind == model.Closed {
+	switch c.Kind {
+	case model.Closed:
 		delete(p.current, c.Key)
-		return
+	case model.Opened, model.OwnerChanged:
+		p.current[c.Key] = copyListener(state.Listener{Key: c.Key, Procs: c.Procs})
 	}
-	p.current[c.Key] = copyListener(state.Listener{Key: c.Key, Procs: c.Procs})
 }
 
 func copyListener(l state.Listener) state.Listener {
@@ -356,7 +386,9 @@ func (p *Publisher) resnapshotLocked() {
 }
 
 // run is the single sender goroutine. A message that fails stays at the head and is
-// retried with the same event_id and seq; JetStream dedupes on Nats-Msg-Id.
+// retried with the same event_id and seq; JetStream dedupes on Nats-Msg-Id. The loop
+// looks at the head before it first waits, so messages a previous run left in the
+// spool are sent without waiting for a new Push.
 func (p *Publisher) run() {
 	defer close(p.done)
 	streamReady := false
@@ -375,7 +407,7 @@ func (p *Publisher) run() {
 			streamReady = false
 			p.resnapshot()
 		}
-		m, ok := p.q.head()
+		m, ok := p.q.Head()
 		if !ok {
 			if stopping {
 				return
@@ -384,7 +416,7 @@ func (p *Publisher) run() {
 				continue
 			}
 			select {
-			case <-p.q.ready:
+			case <-p.q.Ready():
 			case <-p.wake:
 			case <-p.stop:
 			}
@@ -395,12 +427,12 @@ func (p *Publisher) run() {
 		var perm *permanentError
 		if errors.As(err, &perm) {
 			slog.Error("dropping message that can never be published",
-				"subject", m.subject, "seq", m.seq, "event_id", m.id, "err", perm.err)
-			p.q.discard(m.seq)
+				"subject", m.Subject, "seq", m.Seq, "event_id", m.ID, "err", perm.err)
+			p.q.Discard(m.ID)
 			continue
 		}
 		if err == nil {
-			p.q.pop(m.seq)
+			p.q.Pop(m.ID)
 			if failing {
 				slog.Info("nats publishing resumed")
 				failing = false
@@ -422,7 +454,7 @@ func (p *Publisher) run() {
 	}
 }
 
-func (p *Publisher) sendOne(m outMsg, streamReady *bool) error {
+func (p *Publisher) sendOne(m spool.Msg, streamReady *bool) error {
 	if !p.nc.IsConnected() {
 		return nats.ErrDisconnected
 	}
@@ -445,16 +477,16 @@ func (p *Publisher) sendOne(m outMsg, streamReady *bool) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 	defer cancel()
-	mark := p.perms.expect(m.subject)
-	msg := &nats.Msg{Subject: m.subject, Data: m.data}
-	_, err := p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(m.id))
+	mark := p.perms.expect(m.Subject)
+	msg := &nats.Msg{Subject: m.Subject, Data: m.Data}
+	_, err := p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(m.ID))
 	p.perms.expect("")
 	if err != nil {
-		err = fmt.Errorf("publish %s: %w", m.subject, err)
+		err = fmt.Errorf("publish %s: %w", m.Subject, err)
 		if errors.Is(err, jetstream.ErrNoStreamResponse) {
 			*streamReady = false // stream vanished; re-ensure before the retry
 		}
-		if p.publishNeverSucceeds(err, m.subject, mark) {
+		if p.publishNeverSucceeds(err, m.Subject, mark) {
 			return &permanentError{err}
 		}
 		return err
@@ -629,8 +661,11 @@ func isClosed(c <-chan struct{}) bool {
 }
 
 func sourceToProto(s model.Source) asmv1.Source {
-	if s == model.SourceBaseline {
+	switch s {
+	case model.SourceBaseline:
 		return asmv1.Source_BASELINE
+	case model.SourceReconcile:
+		return asmv1.Source_RECONCILE
 	}
 	return asmv1.Source_EBPF
 }
@@ -648,7 +683,19 @@ func listenerToProto(k model.ListenerKey) *asmv1.Listener {
 func processesToProto(procs []model.Process) []*asmv1.Process {
 	out := make([]*asmv1.Process, 0, len(procs))
 	for _, p := range procs {
-		out = append(out, &asmv1.Process{Pid: p.PID, Uid: p.UID, Comm: p.Comm, Exe: p.Exe})
+		out = append(out, processToProto(p))
+	}
+	return out
+}
+
+func processToProto(p model.Process) *asmv1.Process {
+	out := &asmv1.Process{
+		Pid: p.PID, Uid: p.UID, Comm: p.Comm, Exe: p.Exe,
+		Cmdline: p.Cmdline, Sha256: p.SHA256,
+		Unit: p.Unit, SocketUnit: p.SocketUnit, CgroupId: p.CgroupID,
+	}
+	if p.Container != (model.Container{}) {
+		out.Container = &asmv1.Container{Runtime: p.Container.Runtime, Id: p.Container.ID}
 	}
 	return out
 }

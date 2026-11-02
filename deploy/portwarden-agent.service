@@ -1,8 +1,8 @@
 [Unit]
-Description=Portwarden agent (TCP listener inventory to NATS)
+Description=Portwarden agent (TCP/UDP listener inventory to NATS)
 DefaultDependencies=no
 Before=network-pre.target shutdown.target
-# Needed for a clean SIGTERM (and queue flush) at shutdown now default dependencies are off.
+# Needed for a clean SIGTERM (and spool flush) at shutdown now default dependencies are off.
 Conflicts=shutdown.target
 Wants=network-pre.target
 After=local-fs.target
@@ -13,7 +13,12 @@ Type=simple
 # Static system user, created by dev/install-agent.sh:
 #   useradd --system --no-create-home --shell /usr/sbin/nologin portwarden-agent
 User=portwarden-agent
-ExecStart=/usr/local/bin/portwarden-agent
+# Unsent messages are spooled here (64 MiB cap by default) and survive restarts.
+# systemd creates /var/lib/portwarden owned by User, mode 0700, and keeps it writable
+# under ProtectSystem=strict.
+StateDirectory=portwarden
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/portwarden-agent --spool-dir /var/lib/portwarden/spool
 AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE
 CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE
 NoNewPrivileges=yes

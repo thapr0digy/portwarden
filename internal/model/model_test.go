@@ -27,3 +27,43 @@ func TestKeyStringFormats(t *testing.T) {
 		}
 	}
 }
+
+func TestProcessIsZero(t *testing.T) {
+	if !(Process{}).IsZero() {
+		t.Error("empty Process should be zero")
+	}
+	if (Process{CgroupID: 1}).IsZero() {
+		t.Error("Process with a cgroup id should not be zero")
+	}
+}
+
+func TestProcessEqualComparesCmdline(t *testing.T) {
+	base := Process{PID: 1, Comm: "nginx", Cmdline: []string{"nginx", "-g", "daemon off;"}, Container: Container{Runtime: "docker", ID: "abc"}}
+	same := base
+	same.Cmdline = []string{"nginx", "-g", "daemon off;"}
+	if !base.Equal(same) {
+		t.Error("identical processes should be equal")
+	}
+	diff := base
+	diff.Cmdline = []string{"nginx", "-g", "daemon on;"}
+	if base.Equal(diff) {
+		t.Error("a differing cmdline argument should make processes unequal")
+	}
+	if !(Process{Cmdline: nil}).Equal(Process{Cmdline: []string{}}) {
+		t.Error("nil and empty cmdline should be equal")
+	}
+}
+
+func TestProcessSameIdentityIgnoresUIDCommCmdline(t *testing.T) {
+	base := Process{PID: 1, UID: 0, Comm: "nginx", Cmdline: []string{"nginx"}, Unit: "nginx.service"}
+	retitled := base
+	retitled.UID, retitled.Comm, retitled.Cmdline = 33, "nginx: worker", []string{"nginx: worker process"}
+	if !base.SameIdentity(retitled) {
+		t.Error("uid, comm and cmdline must not change identity")
+	}
+	moved := base
+	moved.SocketUnit = "nginx.socket"
+	if base.SameIdentity(moved) {
+		t.Error("a socket unit difference must change identity")
+	}
+}

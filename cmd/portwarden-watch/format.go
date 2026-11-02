@@ -15,6 +15,11 @@ import (
 const (
 	timeLayout = "2006-01-02T15:04:05.000Z"
 	hostWidth  = 8
+	idWidth    = 12
+	// initNetNS is the inode of the initial (host) network namespace: the first namespace
+	// inode the kernel allocates (0xF0000000) on the kernels Portwarden supports. The
+	// stream does not carry each host's own value, so the watcher compares against this.
+	initNetNS = 4026531840
 )
 
 // parsed is one decoded message: the line to print plus what gap detection needs.
@@ -25,7 +30,7 @@ type parsed struct {
 }
 
 // formatEvent renders one stream message as a single line. The subject's last token
-// (opened, closed, snapshot, heartbeat) selects the payload type.
+// (opened, closed, owner_changed, snapshot, heartbeat) selects the payload type.
 func formatEvent(subject string, data []byte) (string, error) {
 	p, err := parseMessage(subject, data)
 	return p.line, err
@@ -34,32 +39,36 @@ func formatEvent(subject string, data []byte) (string, error) {
 func parseMessage(subject string, data []byte) (parsed, error) {
 	kind := subject[strings.LastIndexByte(subject, '.')+1:]
 	switch kind {
-	case "opened", "closed":
+	case "opened", "closed", "owner_changed":
 		var ev asmv1.ListenerEvent
 		if err := proto.Unmarshal(data, &ev); err != nil {
 			return parsed{}, fmt.Errorf("decode %s: %w", subject, err)
 		}
-		verb := "OPENED"
-		if ev.GetKind() == asmv1.Kind_CLOSED {
-			verb = "CLOSED"
-		}
 		l := ev.GetListener()
-		body := fmt.Sprintf("%s %s %s", verb, l.GetProto(), net.JoinHostPort(l.GetAddr(), strconv.Itoa(int(l.GetPort()))))
+		body := fmt.Sprintf("%s %s %s", verb(ev.GetKind()), l.GetProto(), net.JoinHostPort(l.GetAddr(), strconv.Itoa(int(l.GetPort()))))
 		body += processSuffix(ev.GetProcesses())
+		body += contextSuffix(l.GetNetns(), ev.GetProcesses())
+		if ev.GetKind() == asmv1.Kind_OWNER_CHANGED {
+			body += " was=" + holders(ev.GetPreviousProcesses())
+		}
 		return parsed{header(ev.GetObservedAt(), ev.GetHostId(), ev.GetSeq()) + " " + body, ev.GetRunId(), ev.GetSeq()}, nil
 	case "snapshot":
 		var s asmv1.Snapshot
 		if err := proto.Unmarshal(data, &s); err != nil {
 			return parsed{}, fmt.Errorf("decode %s: %w", subject, err)
 		}
-		body := fmt.Sprintf("SNAPSHOT n=%d", len(s.GetListeners()))
+		counts := map[string]int{}
+		for _, ls := range s.GetListeners() {
+			counts[ls.GetListener().GetProto()]++
+		}
+		body := fmt.Sprintf("SNAPSHOT n=%d tcp=%d udp=%d", len(s.GetListeners()), counts["tcp"], counts["udp"])
 		return parsed{header(s.GetTakenAt(), s.GetHostId(), s.GetSeq()) + " " + body, s.GetRunId(), s.GetSeq()}, nil
 	case "heartbeat":
 		var h asmv1.Heartbeat
 		if err := proto.Unmarshal(data, &h); err != nil {
 			return parsed{}, fmt.Errorf("decode %s: %w", subject, err)
 		}
-		body := fmt.Sprintf("HEARTBEAT drops=%d/%d/%d", h.GetRingbufDrops(), h.GetQueueDrops(), h.GetDroppedForeignNetns())
+		body := fmt.Sprintf("HEARTBEAT drops=%d/%d", h.GetRingbufDrops(), h.GetQueueDrops())
 		return parsed{header(h.GetAt(), h.GetHostId(), h.GetSeq()) + " " + body, h.GetRunId(), h.GetSeq()}, nil
 	}
 	return parsed{}, fmt.Errorf("unrecognised subject %q", subject)
@@ -89,6 +98,57 @@ func processSuffix(ps []*asmv1.Process) string {
 		s += fmt.Sprintf(" (+%d more)", len(ps)-1)
 	}
 	return s
+}
+
+// contextSuffix prints " netns=<n>" for a listener outside the host netns (0 is unset),
+// then the first holder's " unit=<u> sock=<socket unit> ctr=<runtime>:<id12>", each
+// omitted when empty.
+func contextSuffix(netns uint32, ps []*asmv1.Process) string {
+	var s string
+	if netns != 0 && netns != initNetNS {
+		s += fmt.Sprintf(" netns=%d", netns)
+	}
+	if len(ps) == 0 {
+		return s
+	}
+	p := ps[0]
+	if p.GetUnit() != "" {
+		s += " unit=" + p.GetUnit()
+	}
+	if p.GetSocketUnit() != "" {
+		s += " sock=" + p.GetSocketUnit()
+	}
+	if c := p.GetContainer(); c.GetId() != "" {
+		id := c.GetId()
+		if len(id) > idWidth {
+			id = id[:idWidth]
+		}
+		s += fmt.Sprintf(" ctr=%s:%s", c.GetRuntime(), id)
+	}
+	return s
+}
+
+// holders lists processes as "<pid>/<comm>,…" (the comma-separated owners before an
+// owner change); none is "-".
+func holders(ps []*asmv1.Process) string {
+	if len(ps) == 0 {
+		return "-"
+	}
+	parts := make([]string, len(ps))
+	for i, p := range ps {
+		parts[i] = fmt.Sprintf("%d/%s", p.GetPid(), p.GetComm())
+	}
+	return strings.Join(parts, ",")
+}
+
+func verb(k asmv1.Kind) string {
+	switch k {
+	case asmv1.Kind_CLOSED:
+		return "CLOSED"
+	case asmv1.Kind_OWNER_CHANGED:
+		return "OWNER_CHANGED"
+	}
+	return "OPENED"
 }
 
 // gapTracker remembers the last seq seen per run_id. The first message of a run, however

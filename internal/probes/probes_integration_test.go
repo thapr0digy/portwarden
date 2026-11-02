@@ -9,8 +9,10 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 
@@ -30,7 +32,7 @@ func hostNetNS(t *testing.T) uint32 {
 
 func startProbes(t *testing.T) *Probes {
 	t.Helper()
-	p, err := Start(hostNetNS(t))
+	p, err := Start()
 	if err != nil {
 		t.Fatalf("Start: %+v", err)
 	}
@@ -78,9 +80,8 @@ func waitFor(t *testing.T, p *Probes, match func(model.Observation) bool) model.
 			}
 			seen = append(seen, o)
 		case <-deadline:
-			drops, foreign := p.Counters()
-			t.Fatalf("no matching observation within %s (pid %d); saw %+v; ringbuf drops %d, foreign netns %d",
-				eventWait, os.Getpid(), seen, drops, foreign)
+			t.Fatalf("no matching observation within %s (pid %d); saw %+v; ringbuf drops %d",
+				eventWait, os.Getpid(), seen, p.Counters())
 			return model.Observation{}
 		}
 	}
@@ -153,6 +154,9 @@ func TestOpenBoundPort(t *testing.T) {
 	}
 	if o.Proc.UID != uint32(os.Getuid()) {
 		t.Errorf("UID = %d, want %d", o.Proc.UID, os.Getuid())
+	}
+	if o.Proc.CgroupID == 0 {
+		t.Errorf("CgroupID = 0, want this test's cgroup")
 	}
 }
 
@@ -273,11 +277,16 @@ func enableBPFStats(t *testing.T) {
 
 func runCounts(t *testing.T, p *Probes) (open, close uint64) {
 	t.Helper()
-	open, close, err := p.RunCounts()
+	counts, err := p.RunCounts()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return open, close
+	for _, name := range []string{"on_listen", "on_stop", "on_udp_bind", "on_udp_unhash"} {
+		if _, ok := counts[name]; !ok {
+			t.Fatalf("RunCounts has no %s: %v", name, counts)
+		}
+	}
+	return counts["on_listen"], counts["on_stop"]
 }
 
 func TestConnectionsRunNoProgram(t *testing.T) {
@@ -374,9 +383,16 @@ func inFreshNetns(f func() error) error {
 	return <-done
 }
 
-// listenInNewNetns listens on 127.0.0.1 inside a fresh network namespace.
-func listenInNewNetns() error {
-	return inFreshNetns(func() error {
+// listenInNewNetns listens on 127.0.0.1:port inside a fresh network namespace and
+// returns that namespace's inode.
+func listenInNewNetns(port int) (uint32, error) {
+	var netns uint32
+	err := inFreshNetns(func() error {
+		var st unix.Stat_t
+		if err := unix.Stat("/proc/thread-self/ns/net", &st); err != nil {
+			return err
+		}
+		netns = uint32(st.Ino)
 		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 		if err != nil {
 			return err
@@ -393,23 +409,160 @@ func listenInNewNetns() error {
 		if err := unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr); err != nil {
 			return err
 		}
-		if err := unix.Bind(fd, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		if err := unix.Bind(fd, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}, Port: port}); err != nil {
 			return err
 		}
 		return unix.Listen(fd, 16)
 	})
+	return netns, err
 }
 
-func TestOtherNetnsDropped(t *testing.T) {
+func TestContainerNetnsListenerReported(t *testing.T) {
 	p := startProbes(t)
-	if err := listenInNewNetns(); err != nil {
+	netns, err := listenInNewNetns(9432)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := collectOwn(t, p, eventWait); len(got) != 0 {
-		t.Errorf("got %d observations from another netns, want none: %+v", len(got), got)
+	if netns == hostNetNS(t) {
+		t.Fatalf("fresh netns %d is the host netns", netns)
 	}
-	if _, foreign := p.Counters(); foreign < 1 {
-		t.Errorf("foreignNetns = %d, want >= 1", foreign)
+	o := waitFor(t, p, openedOnPort(9432))
+	if want := model.NewKey(netns, model.ProtoTCP, netip.MustParseAddr("127.0.0.1"), 9432); o.Key != want {
+		t.Errorf("Key = %v, want %v", o.Key, want)
+	}
+}
+
+// udpConnCookie returns the socket cookie of a UDP connection.
+func udpConnCookie(t *testing.T, c *net.UDPConn) uint64 {
+	t.Helper()
+	raw, err := c.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cookie uint64
+	if err := raw.Control(func(fd uintptr) { cookie = socketCookie(t, int(fd)) }); err != nil {
+		t.Fatal(err)
+	}
+	return cookie
+}
+
+func listenUDP9431(t *testing.T) *net.UDPConn {
+	t.Helper()
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9431})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestUDPBindReported(t *testing.T) {
+	p := startProbes(t)
+	c := listenUDP9431(t)
+	defer c.Close()
+
+	o := waitFor(t, p, openedOnPort(9431))
+	if want := model.NewKey(hostNetNS(t), model.ProtoUDP, netip.MustParseAddr("127.0.0.1"), 9431); o.Key != want {
+		t.Errorf("Key = %v, want %v", o.Key, want)
+	}
+	if cookie := udpConnCookie(t, c); o.Cookie != cookie {
+		t.Errorf("Cookie = %d, want the socket's %d", o.Cookie, cookie)
+	}
+	if o.Proc.CgroupID == 0 {
+		t.Errorf("CgroupID = 0, want this test's cgroup")
+	}
+	if o.Source != model.SourceEBPF || o.At.IsZero() {
+		t.Errorf("observation = %+v, want ebpf source and a time", o)
+	}
+}
+
+func TestUDPCloseReported(t *testing.T) {
+	p := startProbes(t)
+	c := listenUDP9431(t)
+	cookie := udpConnCookie(t, c)
+	waitFor(t, p, func(o model.Observation) bool { return o.Kind == model.Opened && o.Cookie == cookie })
+
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	o := waitFor(t, p, closedWithCookie(cookie))
+	if o.Key != (model.ListenerKey{}) {
+		t.Errorf("close Key = %v, want zero", o.Key)
+	}
+}
+
+// udpQuiet is how long a UDP socket that is not a listener is watched for stray events.
+const udpQuiet = 200 * time.Millisecond
+
+// disconnect dissolves a UDP socket's association with connect(AF_UNSPEC), which runs
+// udp_disconnect; x/sys/unix has no AF_UNSPEC sockaddr, so the syscall is made directly.
+func disconnect(fd int) error {
+	sa := unix.RawSockaddrInet4{Family: unix.AF_UNSPEC}
+	_, _, errno := unix.Syscall(unix.SYS_CONNECT, uintptr(fd), uintptr(unsafe.Pointer(&sa)), unix.SizeofSockaddrInet4)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+func TestUDPConnectAndDisconnectAfterBindAreNotAClose(t *testing.T) {
+	p := startProbes(t)
+	c := listenUDP9431(t)
+	defer c.Close()
+	cookie := udpConnCookie(t, c)
+	waitFor(t, p, func(o model.Observation) bool { return o.Kind == model.Opened && o.Cookie == cookie })
+
+	raw, err := c.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var connErr error
+	if err := raw.Control(func(fd uintptr) {
+		connErr = errors.Join(
+			unix.Connect(int(fd), &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}, Port: 9}),
+			disconnect(int(fd)),
+		)
+	}); err != nil || connErr != nil {
+		t.Fatalf("connect and disconnect: %v, %v", err, connErr)
+	}
+	if got := collectOwn(t, p, udpQuiet); len(got) != 0 {
+		t.Errorf("connect and disconnect after bind: got %+v, want no observation", got)
+	}
+}
+
+func TestUDPAutobindEmitsNothing(t *testing.T) {
+	p := startProbes(t)
+	c, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if got := collectOwn(t, p, udpQuiet); len(got) != 0 {
+		t.Errorf("autobound socket: got %+v, want no observation", got)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := collectOwn(t, p, udpQuiet); len(got) != 0 {
+		t.Errorf("closing an autobound socket: got %+v, want no observation", got)
+	}
+}
+
+func TestUDPBindPortZeroEmitsNothing(t *testing.T) {
+	p := startProbes(t)
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := collectOwn(t, p, udpQuiet); len(got) != 0 {
+		t.Errorf("bind(:0): got %+v, want no observation", got)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := collectOwn(t, p, udpQuiet); len(got) != 0 {
+		t.Errorf("closing a bind(:0) socket: got %+v, want no observation", got)
 	}
 }
 
@@ -463,5 +616,58 @@ func TestOpenV4MappedKeysAsIPv4(t *testing.T) {
 	}
 	if o.Key.String() != model.NewKey(hostNetNS(t), "tcp", netip.MustParseAddr("127.0.0.1"), port).String() {
 		t.Errorf("Key string = %q", o.Key.String())
+	}
+}
+
+// onNamedWorkerThread runs f on a locked thread other than the thread-group leader,
+// renamed to name. A goroutine that lands on the leader keeps it locked and hands
+// over to a new goroutine, which then runs on another thread; the renamed thread is
+// discarded when its goroutine exits locked, so the name does not outlive f.
+func onNamedWorkerThread(name string, f func() error) error {
+	done := make(chan error, 1)
+	var run func()
+	run = func() {
+		runtime.LockOSThread()
+		if unix.Gettid() == unix.Getpid() {
+			handedOver := make(chan struct{})
+			go func() { run(); close(handedOver) }()
+			<-handedOver
+			runtime.UnlockOSThread()
+			return
+		}
+		b := append([]byte(name), 0)
+		if err := unix.Prctl(unix.PR_SET_NAME, uintptr(unsafe.Pointer(&b[0])), 0, 0, 0); err != nil {
+			done <- fmt.Errorf("PR_SET_NAME: %w", err)
+			return
+		}
+		done <- f()
+	}
+	go run()
+	return <-done
+}
+
+func TestNamedThreadListenerReportsLeaderComm(t *testing.T) {
+	p := startProbes(t)
+	raw, err := os.ReadFile("/proc/self/comm") // the thread-group leader's
+	if err != nil {
+		t.Fatal(err)
+	}
+	leader := strings.TrimSuffix(string(raw), "\n")
+	const worker = "pw-named-worker"
+
+	fd := tcp4Socket(t)
+	err = onNamedWorkerThread(worker, func() error {
+		if err := unix.Bind(fd, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+			return err
+		}
+		return unix.Listen(fd, 16)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	o := waitFor(t, p, openedOnPort(boundPort(t, fd)))
+	if o.Proc.Comm != leader {
+		t.Fatalf("Comm = %q, want the leader's %q (not the thread's %q)", o.Proc.Comm, leader, worker[:15])
 	}
 }

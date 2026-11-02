@@ -1,19 +1,21 @@
 # Portwarden
 
-A Go agent with C eBPF programs that reports TCP listening sockets (host network namespace) to NATS JetStream.
-M1 scope: TCP only, host netns only. Kernel floor 6.8 (Ubuntu 24.04+).
+A Go agent with C eBPF programs that reports listening TCP sockets and explicitly bound UDP sockets, in every network namespace (host and containers), to NATS JetStream, with the program, systemd unit and container that hold each one.
+Kernel floor 6.8 (Ubuntu 24.04+).
+
+M2 decisions (where the design left room): container network namespaces are reported, each listener carrying its netns (the foreign-netns filter is gone, and the heartbeat's `dropped_foreign_netns` stays only as a deprecated field, always 0); there are no exec or exit tracepoints, so each event carries the cgroup id read in the hook, which still yields unit and container after the process is gone, while exe, cmdline and sha256 come from `/proc` when the process is still there; UDP opens use `fexit/udp_lib_get_port` with a nonzero requested port rather than a cgroup bind program, so client autobinds and `bind(:0)` are not listeners and no `CAP_NET_ADMIN` is needed; a restart is an `owner_changed`, because a close is held for a grace window (`--close-grace`, 2 s) and a reopen of the same key inside it replaces the owners; a recheck every 5 minutes (`--recheck`, and early when ring-buffer drops rise) reconciles a fresh dump and publishes the periodic snapshot; and a size-capped disk spool (64 MiB under `/var/lib/portwarden/spool`, oldest segment dropped when full) replaces the memory queue, so messages survive NATS outages and agent restarts with their original timestamps.
 
 ## Development
 
-Kernel-touching work happens in a Lima VM named `lw` (Ubuntu 24.04), which mounts this repo writable at the same path.
+Kernel-touching work happens in a Lima VM named `portwarden` (Ubuntu 24.04), which mounts this repo writable at the same path.
 
 | Command | What it does |
 | --- | --- |
-| `make vm` | Create and start the VM (`limactl start --name=lw dev/lima.yaml`); provisions the toolchain |
+| `make vm` | Create and start the VM (`limactl start --name=portwarden dev/lima.yaml`); provisions the toolchain |
 | `make generate` | In the VM: `buf generate` then `go generate ./...` (protobuf and bpf2go) |
 | `make test` | `go test ./...` (macOS or Linux, no root) |
-| `make itest` | In the VM: `dev/itest.sh` builds each package's `-tags integration` test binary as the VM user, then runs only the binaries as root (real kernel), so the Go caches stay user-owned. Extra args go to each binary: `limactl shell lw bash -lc 'cd $PWD && dev/itest.sh -test.run TestSnapshot'` |
-| `make e2e` | In the VM: `dev/e2e.sh` builds both binaries, runs its own nats-server (port 4333) and agent (the `portwarden-agent` unit is stopped meanwhile and restarted after), prints `opened latency: <n> ms` (must be <= 1000) and `bpf runs during load: <n>` (must be 0 over 10 000 real connections with `kernel.bpf_stats_enabled=1`), exits non-zero on any miss |
+| `make itest` | In the VM: `dev/itest.sh` builds each package's `-tags integration` test binary as the VM user, then runs only the binaries as root (real kernel), so the Go caches stay user-owned. Extra args go to each binary: `limactl shell portwarden bash -lc 'cd $PWD && dev/itest.sh -test.run TestSnapshot'` |
+| `make e2e` | In the VM: `dev/e2e.sh` builds both binaries, runs its own nats-server (port 4333) and agent (`--recheck 10s`, its own `--spool-dir` under the e2e work dir; the `portwarden-agent` unit is stopped meanwhile and restarted after) and checks, exiting non-zero on any miss: `opened latency` and `udp opened latency` (TCP listen on :8099, UDP bind on :8098, each must be <= 1000 ms); a `systemctl restart` of a transient unit on :8097 gives one `OWNER_CHANGED` and no `CLOSED` within 3 s; a listener in a fresh netns (`unshare -n`) carries a foreign `netns=`; after a recheck, :22 (Ubuntu's `ssh.socket`) shows `unit=ssh.service sock=ssh.socket` (it starts or stops `ssh.service` to change the holders and restores it on exit; SKIP when `ssh.socket` is not active); `bpf runs during load: <n>` (on_listen + on_stop, must be 0 over 10 000 real connections with `kernel.bpf_stats_enabled=1`); 1000 UDP client sockets run `on_udp_bind`/`on_udp_unhash` (`average ns per run` printed) but give no UDP event; a listener opened while nats-server is down survives an agent restart in the spool and reaches a fresh watcher with its original time |
 
 `gen/asm/v1/events.pb.go` is committed, so `go build ./...` works on macOS without `buf`.
 `bpf/vmlinux.h` is produced in the VM with `bpftool btf dump file /sys/kernel/btf/vmlinux format c`.
@@ -21,22 +23,28 @@ Kernel-touching work happens in a Lima VM named `lw` (Ubuntu 24.04), which mount
 ## Event schema
 
 `proto/asm/v1/events.proto` (package `asm.v1`): `ListenerEvent`, `Snapshot`, `Heartbeat`.
+Subjects: `asm.<host>.listener.opened`, `.listener.closed`, `.listener.owner_changed` (its `ListenerEvent` carries the new `processes` and the old `previous_processes`), `.snapshot`, `.heartbeat`.
 A listener's identity is `netns/proto/addr:port`, e.g. `4026531840/tcp/0.0.0.0:8080` or `4026531840/tcp/[::]:8080`;
 IPv4-mapped IPv6 addresses are unmapped first. See `internal/model`.
 
 ## eBPF probes
 
 `bpf/listen.bpf.c`, loaded by `internal/probes` (bindings generated by `bpf2go` via `make generate`; `listen_bpfel.go` and `.o` are committed).
-Neither program runs per connection or per packet.
+They watch every network namespace; each event carries the socket's netns inode and the calling task's cgroup id.
+No program runs per connection or per packet; the two UDP hooks run once per UDP socket bind and close (client sockets included) and return after one field read unless the socket was bound to an explicit port.
 
 | Hook | Emits | Why this hook |
 | --- | --- | --- |
 | `fexit/inet_csk_listen_start` | `opened`, only when it returned 0 and the socket is TCP | The port is assigned inside this function, so `fexit` sees the real port. The `inet_sock_set_state` tracepoint fires before that (port 0 for an unbound socket) and also for listens that then fail. |
 | `fentry/inet_csk_listen_stop` | `closed`, for TCP | In 6.8 it runs only when a listener is torn down: `close()` (via `__tcp_close`) and `shutdown(SHUT_RD)` (via `tcp_disconnect`). The `inet_sock_set_state` tracepoint would run on every TCP state change of every connection just to catch LISTEN→CLOSE. |
+| `fexit/udp_lib_get_port` | `opened`, for UDP, only when it returned 0 for a nonzero requested port | An explicit `bind()` passes the requested port; autobind (`connect`/`sendto` on an unbound socket) and `bind(:0)` pass 0, so client sockets are skipped. The address is set before `get_port` and the port on success. |
+| `fentry/udp_lib_unhash` | `closed`, for UDP sockets with `SOCK_BINDPORT_LOCK` | The lock is set only by a bind to a nonzero port. `fentry` because unhash zeroes the port. `udp_disconnect` never unhashes a socket with that lock, so `connect()` after `bind()` is not a close. |
 
 - A `closed` event carries only the socket cookie, netns and process: by the time `inet_csk_listen_stop` runs, `__inet_put_port` has released the port. The state table closes listeners by cookie.
 - A failed `listen()` (e.g. `EADDRINUSE`) resets the socket state without calling `inet_csk_listen_stop`, so it produces no event at all.
-- Sockets outside the host network namespace are dropped in the kernel and counted (`Probes.Counters`), as are events lost to a full ring buffer.
+- Events lost to a full ring buffer are counted (`Probes.Counters`).
+- UDP-Lite sockets run the UDP hooks too; the protocol check excludes them.
+- If a cgroup `post_bind` program rejects a UDP bind after `get_port` succeeded, the kernel releases the port without an unhash, so the listener stays reported until the next recheck closes it.
 
 Edge cases:
 
@@ -46,12 +54,13 @@ Edge cases:
 
 ## Baseline snapshot
 
-`internal/baseline.Snapshot()` lists every TCP listener in the host netns once at agent start, as `source=baseline` `opened` observations.
+`internal/baseline.Snapshot()` lists every TCP listener and every UDP socket bound to an explicit port, in every network namespace, once at agent start, as `source=baseline` `opened` observations.
 
-- Sockets: a hand-built `SOCK_DIAG_BY_FAMILY` dump (`golang.org/x/sys/unix`, no netlink library) for `AF_INET` and `AF_INET6` with `idiag_states = 1<<TCP_LISTEN` only, so the kernel walks the listening hash and never the established one. Needs no capability. A reply flagged `NLM_F_DUMP_INTR` is retried up to 3 times, then fails.
-- Owners: `bpf/owners.bpf.c`, an `iter/task_file` program run once (`link.AttachIter`, read to EOF) that writes `{cookie, tgid, uid, comm}` per listening TCP socket per process; `exe` is read from `/proc/<pid>/exe`. Joined to the dump by socket cookie: one observation per socket per owning process, one with an empty process for kernel listeners (nfsd, ksmbd).
-- Order: a cookie-assigning dump, then owners, then the dump that is reported. A socket that appears after the owners were read is reported without an owner (the live probe has its `opened` with the owner).
-- MPTCP (Go's default for listeners): the fd holds the MPTCP socket, but inet_diag and the probe see its first TCP subflow, so the iterator reports the subflow's cookie. On 6.8 it can only read that cookie (via `bpf_rdonly_cast`), not assign it, and the kernel assigns cookies lazily; the first dump assigns them. `SO_COOKIE` on an MPTCP fd returns the MPTCP socket's own cookie, not the subflow's.
+- TCP sockets (host netns): a hand-built `SOCK_DIAG_BY_FAMILY` dump (`golang.org/x/sys/unix`, no netlink library) for `AF_INET` and `AF_INET6` with `idiag_states = 1<<TCP_LISTEN` only, so the kernel walks the listening hash and never the established one. Needs no capability. A reply flagged `NLM_F_DUMP_INTR` is retried up to 3 times, then fails.
+- UDP sockets (host netns): `bpf/udp.bpf.c`, an `iter/udp` program run once that writes `{cookie, family, port, addr}` per socket with `SOCK_BINDPORT_LOCK` (bound to a nonzero port; autobound and `bind(:0)` client sockets are skipped). It walks only the agent's netns, and is the only source for kernel sockets such as VXLAN's or WireGuard's, which have no file and so no owner.
+- Owners: `bpf/owners.bpf.c`, an `iter/task_file` program run once (`link.AttachIter`, read to EOF) that writes `{cookie, cgroup_id, tgid, uid, netns, family, proto, port, addr, comm}` per TCP listening or explicitly bound UDP socket per process, in any netns; `cgroup_id` is `task->cgroups->dfl_cgrp->kn->id` and `exe` is read from `/proc/<pid>/exe`. Host sockets are joined to the dumps by socket cookie: one observation per socket per owning process, one with an empty process for kernel sockets (nfsd, ksmbd, VXLAN). Sockets in other netns (containers) are keyed from the owner records alone, so ownerless sockets there (kernel sockets inside a container netns) are not listed.
+- Order: a cookie-assigning TCP dump, then owners, then the TCP and UDP dumps that are reported. A socket that appears after the owners were read is reported without an owner (the live probe has its `opened` with the owner).
+- MPTCP (Go's default for listeners): the fd holds the MPTCP socket, but inet_diag and the probe see its first TCP subflow, so the iterator reports the subflow's cookie. On 6.8 it can only read that cookie (via `bpf_rdonly_cast`), not assign it, and the kernel assigns cookies lazily; the first dump assigns them, but only in the host netns. An MPTCP listener in another netns that was opened while no probe ran (before install, during agent downtime) therefore has no subflow cookie; the iterator reports it under the MPTCP socket's own cookie (also global and unique), which the baseline and every recheck use. The live probe reports the subflow's cookie, so such a listener's close is not matched and is reported by the next recheck (within 5 minutes). A restart of it in the same netns is not `closed` plus `opened` either: the new socket joins the key while the old cookie still stands, giving an `owner_changed` that lists both the old and the new PID, and the next recheck then publishes a second `owner_changed` that drops the dead PID. `SO_COOKIE` on an MPTCP fd returns the MPTCP socket's own cookie, not the subflow's.
 
 ## Running the agent (`portwarden-agent`)
 
@@ -64,25 +73,42 @@ Edge cases:
 | `--tls-ca`, `--tls-cert`, `--tls-key` | | TLS for the NATS connection |
 | `--machine-id-path` | `/etc/machine-id` | host id used in subjects |
 | `--heartbeat` | `30s` | heartbeat interval |
+| `--spool-dir` | `/var/lib/portwarden/spool` | directory for unsent messages; `""` keeps them in memory only |
+| `--spool-max` | `64MiB` | spool size cap: bytes, or with a `KiB`/`MiB`/`GiB` suffix; invalid or non-positive is a startup error |
+| `--close-grace` | `2s` | a closed listener is reported only if it is not reopened within this delay (a quick restart is an `owner_changed`); `0s` reports at once |
+| `--recheck` | `5m` | interval between full listener dumps reconciled against the state (`source=reconcile`); `0s` disables |
 
-Logs are JSON (`log/slog`) on stderr. The agent exits non-zero, with the reason, when the kernel is older than 6.8, `/sys/kernel/btf/vmlinux` is missing, lockdown is `confidentiality`, a BPF program fails to load or attach (the verifier log is included), or the probe reader stops. On SIGTERM it stops the probes, flushes the queue for up to 2 s and exits 0. The startup checks live in `internal/preflight`.
+Process context: every holder is enriched from `/proc` (`exe`, `cmdline`, `sha256` of executables up to 64 MiB, systemd `unit` and `container` from the cgroup). A host-netns listener held by PID 1 (socket activation) gets the owning socket unit as `socket_unit` and its service as `unit`. Socket units are listed over D-Bus (a 2 s attempt before the baseline; afterwards a lookup that misses, or finds the list older than 30 s, starts a background refresh, at most one every 5 s, and is answered from the old list). A listener that systemd opened after the last list, including at boot, when the agent starts before the system bus, gets its `socket_unit`/`unit` at the next recheck (≤ 5 min), as an `owner_changed`. An `owner_changed` is published only when a holder's identity changes: its `pid`, `exe`, `sha256`, `unit`, `socket_unit`, `container` or cgroup. A change of `uid`, `comm` or `cmdline` alone (a privilege drop, a process retitling itself) is no event; the new values appear in the next snapshot and in later events. `comm` is the process's name (the thread-group leader's), also when a renamed thread opened the listener.
+
+Spool: messages are queued in the spool (`internal/spool`, 4 MiB segment files, fsynced) and sent in order; on a restart, messages the last run did not send go out first, with their original `run_id`, `seq` and timestamps. Past `--spool-max` the oldest segment is dropped and counted in the heartbeat's `queue_drops`.
+
+Logs are JSON (`log/slog`) on stderr. The agent exits non-zero, with the reason, when the kernel is older than 6.8, `/sys/kernel/btf/vmlinux` is missing, lockdown is `confidentiality`, a BPF program fails to load or attach (the verifier log is included), or the probe reader stops. On SIGTERM it stops the probes, sends what it can from the spool for up to 2 s and exits 0 (the rest stays in the spool directory). The startup checks live in `internal/preflight`.
+
+### Limitations
+
+- `sha256` is empty for an executable larger than 64 MiB, and for one the agent user cannot read (mode 0711): opening `/proc/<pid>/exe` passes the ptrace check but still needs read permission on the file. `CAP_DAC_READ_SEARCH` would fix the latter and is deliberately not granted.
+- A never-seen executable is hashed on the event loop, so a new binary delays the events behind it by its hashing time (bounded by the 64 MiB cap); later events for the same file are answered from a cache.
+- `cmdline` is published for every holder and kept in JetStream for the stream's max age (7 days). Command lines can contain secrets (passwords or tokens passed as arguments).
+- After a power loss the spool may resend messages that were already acknowledged, later than JetStream's 2-minute dedupe window, so consumers should dedupe on `event_id`.
 
 ## Watching the stream (`portwarden-watch`)
 
 `go run ./cmd/portwarden-watch [--nats-url nats://127.0.0.1:4222] [--host <machine-id>|*] [--since 10m]` prints one line per message from `ASM_EVENTS` (ordered consumer on `asm.<host>.>`, replaying from now minus `--since`; `--since 0s` is new messages only; `--host` defaults to `*`, all hosts). The host column is the first 8 characters of `host_id`.
 
 ```
-2026-10-30T14:02:11.418Z 0123abcd seq=42 OPENED tcp 0.0.0.0:8443 pid=4410 /opt/app/bin/server
-2026-10-30T14:02:12.001Z 0123abcd seq=43 SNAPSHOT n=12
-2026-10-30T14:02:41.001Z 0123abcd seq=44 HEARTBEAT drops=0/0/0
-GAP run=01J... expected=45 got=47
+2026-10-30T14:02:11.418Z 0123abcd seq=42 OPENED tcp 0.0.0.0:8443 pid=4410 /opt/app/bin/server unit=app.service
+2026-10-30T14:02:11.902Z 0123abcd seq=43 OPENED udp 10.0.0.5:5353 pid=3120 /usr/bin/mdns netns=4026532301 ctr=docker:0123456789ab
+2026-10-30T14:02:12.001Z 0123abcd seq=44 SNAPSHOT n=12 tcp=9 udp=3
+2026-10-30T14:02:20.310Z 0123abcd seq=45 OWNER_CHANGED tcp 0.0.0.0:22 pid=1 /usr/lib/systemd/systemd unit=ssh.service sock=ssh.socket was=1/systemd,812/sshd
+2026-10-30T14:02:41.001Z 0123abcd seq=46 HEARTBEAT drops=0/0
+GAP run=01J... expected=47 got=49
 ```
 
-Only the first process is shown (`(+N more)` for further holders); `HEARTBEAT drops=` is ringbuf/queue/foreign-netns. A `GAP` line means `seq` skipped within one `run_id`.
+Only the first process is shown (`(+N more)` for further holders), followed by its context: `netns=` only for a listener outside the host netns (compared with 4026531840, the initial netns inode on the supported kernels, since the stream does not carry each host's own), then `unit=`, `sock=` (the systemd socket unit of a socket-activated listener) and `ctr=<runtime>:<first 12 characters of the id>`, each omitted when empty. `OWNER_CHANGED` adds `was=<pid>/<comm>,…`, the holders before the change. `SNAPSHOT` counts the listeners in total and per protocol. `HEARTBEAT drops=` is ringbuf/queue (queue: messages the spool dropped when full). A `GAP` line means `seq` skipped within one `run_id`.
 
 ### systemd
 
-`deploy/portwarden-agent.service` runs it as the static `portwarden-agent` user with only `CAP_BPF CAP_PERFMON CAP_SYS_PTRACE` (`CAP_SYS_PTRACE` is only for reading `/proc/<pid>/exe` of other users' processes), `NoNewPrivileges`, `ProtectSystem=strict` and `ProtectHome`. It is `WantedBy=sysinit.target` with `DefaultDependencies=no`, so it starts before the network; the publisher queues until NATS is reachable. `ProtectKernelTunables` is deliberately off: it hides `/proc/kallsyms`.
+`deploy/portwarden-agent.service` runs it as the static `portwarden-agent` user with only `CAP_BPF CAP_PERFMON CAP_SYS_PTRACE` (`CAP_SYS_PTRACE` is only for reading `/proc/<pid>/exe` of other users' processes), `NoNewPrivileges`, `ProtectSystem=strict` and `ProtectHome`. It is `WantedBy=sysinit.target` with `DefaultDependencies=no`, so it starts before the network; the publisher spools until NATS is reachable. `StateDirectory=portwarden` (mode 0700, owned by the agent user) holds the spool at `/var/lib/portwarden/spool`. `ProtectKernelTunables` is deliberately off: it hides `/proc/kallsyms`.
 
 In the VM, `make install-agent` (`dev/install-agent.sh`) builds the binary, creates the user, installs the binary to `/usr/local/bin` and the unit, then enables and restarts it. `dev/install-nats.sh` installs `deploy/nats-server.conf` and runs nats-server as a service so there is a broker across reboots. Check with `sudo journalctl -u portwarden-agent` (look for `snapshot queued`: the snapshot is queued for NATS, not necessarily delivered yet; `nats publishing resumed` or a stream message confirms delivery) and `nats stream info ASM_EVENTS`.
 
@@ -90,6 +116,6 @@ Stream: on connect (and after each reconnect) the agent looks up `ASM_EVENTS` an
 
 Per-host users should only publish `asm.<host>.>` and subscribe to `_INBOX_<host>.>` (`deploy/nats-server-auth.example.conf`; the admin creates the stream, and `$JS.API.>` is admin-level). The agent uses `_INBOX_<host>` as its reply-inbox prefix, so JetStream publish acks arrive there. Never give a host `_INBOX.>`: JetStream consumers receive message payloads on `_INBOX.<id>` subjects, so that would let any host read every consumer's deliveries. The stream lookup is refused for such a user and the agent keeps publishing. A permission violation that does not belong to the request in flight (for example a missing inbox permission, which leaves every publish waiting for an ack) is logged at Warn as `nats permission violation` with its subject.
 
-If messages are dropped because the queue is full (10 000 messages, e.g. NATS unreachable at boot), the agent queues a fresh `snapshot` once the queue has drained, as it does after a reconnect.
+If messages are dropped because the spool is full (`--spool-max`, e.g. NATS unreachable for a long time), the agent queues a fresh `snapshot` once the spool has drained, as it does after a reconnect. A resnapshot reflects every `opened`, `closed` and `owner_changed` since the last snapshot.
 
 A listener held by several processes (socket-activated sshd: systemd and sshd) lists every holder in the baseline snapshot.

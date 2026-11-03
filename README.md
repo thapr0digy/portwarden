@@ -169,6 +169,7 @@ Logs are JSON (`log/slog`) on stderr. The agent exits non-zero, with the reason,
 - Host names in proxy targets are not resolved by DNS (only literals, `localhost`, the proxy's `/etc/hosts`); such backends show unresolved, plus an inferred route once traffic is seen.
 - Observed connections are TCP `connect()`s only: UDP upstreams (nginx `stream` with `udp`) are config-only, and Unix-socket backends (PHP-FPM) report their path without traffic or the listening process (Unix-socket tracing is v2). The destination is the one the proxy dialled, so a backend behind NAT or another host is not joined. Counts are per proxy master: they survive reloads, and a destination unseen for an hour is dropped.
 - A proxy in the root cgroup (or sharing a cgroup with other programs, e.g. started from a login session) makes the connect programs run for every process in that cgroup; they return after one map lookup unless the process or its parent is a proxy.
+- Route targets, server names, paths and config file names are published as written in the proxy's config (and kept for the stream's max age, like command lines); a target URL carrying credentials would be published with them.
 - Proxy kinds are recognised by executable name: a renamed binary is not a proxy, and a program named like one (except `httpd`, which is checked) is treated as one.
 
 ## Watching the stream (`portwarden-watch`)

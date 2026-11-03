@@ -21,6 +21,8 @@ type attachedLink struct {
 	prog        uint32
 	tag         string
 	targetBTF   uint32
+	// cgIno is the cgroup directory's inode at attach (cgroup links).
+	cgIno uint64
 }
 
 func newAttachedLink(name, where string, prog *ebpf.Program, l link.Link) (attachedLink, error) {

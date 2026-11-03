@@ -180,3 +180,64 @@ func anyAttached(as []tamper.Attachment) bool {
 	}
 	return false
 }
+
+// A proxy restart removes its cgroup and creates it again at the same path: the old links
+// die with the old cgroup. That is not tamper, and the next SetCgroups with the same path
+// re-attaches (ruling R-a).
+func TestTamperRecreatedCgroupIsReattached(t *testing.T) {
+	p, err := StartProxyConns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	rel := fmt.Sprintf("pw-itest-recreate-%d", os.Getpid())
+	dir := filepath.Join(CgroupRoot, rel)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(dir)
+	if err := p.SetCgroups([]string{rel}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := p.Attachments()
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Recreated, not yet re-attached: whatever the old links read, no flag.
+	if flags := attachmentFlags(t, p.Attachments); len(flags) != 0 {
+		t.Fatalf("a recreated cgroup was flagged: %+v", flags)
+	}
+	if err := p.SetCgroups([]string{rel}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := p.Attachments()
+	if err != nil || len(after) != 2 {
+		t.Fatalf("after re-attach: %+v %v", after, err)
+	}
+	for i, a := range after {
+		if !a.Attached || a.Prog != a.WantProg || a.LinkID == before[i].LinkID {
+			t.Fatalf("not re-attached with new links: before %+v after %+v", before, after)
+		}
+	}
+	if flags := attachmentFlags(t, p.Attachments); len(flags) != 0 {
+		t.Fatalf("flags after re-attach: %+v", flags)
+	}
+	// An outside detach of the (new) cgroup is still caught: SetCgroups does not heal it.
+	l, err := link.NewFromID(link.ID(after[0].LinkID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if err := l.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetCgroups([]string{rel}); err != nil {
+		t.Fatal(err)
+	}
+	if flags := attachmentFlags(t, p.Attachments); len(flags) != 1 || flags[0].Kind != tamper.KindProbeDetached {
+		t.Fatalf("an outside detach must stay flagged: %+v", flags)
+	}
+}

@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"maps"
 	"net/netip"
-	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -66,10 +65,25 @@ func (p *ProxyConns) SetCgroups(paths []string) error {
 	var errs []error
 	for _, cg := range paths {
 		want[cg] = true
-		if _, ok := p.links[cg]; ok {
+		dir := filepath.Join(CgroupRoot, filepath.Clean("/"+cg))
+		ino, inoErr := cgroupIno(dir)
+		if old, ok := p.links[cg]; ok {
+			// The same path holds the same cgroup: keep it. A cgroup removed and created
+			// again at the path (a proxy restart) is a new cgroup: the old links died with
+			// the old one (ruling R-a), so they are replaced. An outside detach of the
+			// same cgroup is left for the tamper check to see.
+			if inoErr != nil || old[0].cgIno == ino {
+				continue
+			}
+			for _, l := range old {
+				_ = l.link.Close()
+			}
+			delete(p.links, cg)
+		}
+		if inoErr != nil {
+			errs = append(errs, fmt.Errorf("cgroup %s: %w", dir, inoErr))
 			continue
 		}
-		dir := filepath.Join(CgroupRoot, filepath.Clean("/"+cg))
 		var ls []attachedLink
 		for _, a := range []struct {
 			name string
@@ -88,6 +102,7 @@ func (p *ProxyConns) SetCgroups(paths []string) error {
 				errs = append(errs, err)
 				break
 			}
+			al.cgIno = ino
 			ls = append(ls, al)
 		}
 		if len(ls) != 2 {
@@ -123,10 +138,24 @@ func (p *ProxyConns) Attachments() ([]tamper.Attachment, error) {
 	for _, cg := range slices.Sorted(maps.Keys(p.links)) {
 		all = append(all, p.links[cg]...)
 	}
+	// A detached link whose cgroup is gone, or was created anew at the same path (not
+	// yet re-attached by the next SetCgroups), is not tamper.
 	return observe(all, func(a attachedLink) bool {
-		_, err := os.Stat(filepath.Join(CgroupRoot, filepath.Clean("/"+a.where)))
-		return errors.Is(err, fs.ErrNotExist)
+		ino, err := cgroupIno(filepath.Join(CgroupRoot, filepath.Clean("/"+a.where)))
+		return errors.Is(err, fs.ErrNotExist) || (err == nil && ino != a.cgIno)
 	})
+}
+
+// cgroupIno is the inode of a cgroup v2 directory (its cgroup id).
+func cgroupIno(dir string) (uint64, error) {
+	var st unix.Stat_t
+	if err := unix.Stat(dir, &st); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return 0, fs.ErrNotExist
+		}
+		return 0, err
+	}
+	return st.Ino, nil
 }
 
 // Cgroups lists the attached cgroups, sorted.

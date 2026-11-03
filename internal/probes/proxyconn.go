@@ -5,7 +5,10 @@ package probes
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"maps"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -14,6 +17,8 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
+
+	"github.com/thapr0digy/portwarden/internal/tamper"
 )
 
 // CgroupRoot is where the cgroup v2 hierarchy is mounted.
@@ -35,7 +40,7 @@ type ProxyConn struct {
 type ProxyConns struct {
 	mu    sync.Mutex
 	objs  proxyconnObjects
-	links map[string][]link.Link // cgroup path -> connect4, connect6 links
+	links map[string][]attachedLink // cgroup path -> connect4, connect6 links
 }
 
 // StartProxyConns loads the programs; nothing is attached until SetCgroups.
@@ -44,7 +49,7 @@ func StartProxyConns() (*ProxyConns, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &ProxyConns{links: make(map[string][]link.Link)}
+	p := &ProxyConns{links: make(map[string][]attachedLink)}
 	if err := spec.LoadAndAssign(&p.objs, nil); err != nil {
 		return nil, fmt.Errorf("load proxy connect programs: %w", WithVerifierLog(err))
 	}
@@ -65,21 +70,29 @@ func (p *ProxyConns) SetCgroups(paths []string) error {
 			continue
 		}
 		dir := filepath.Join(CgroupRoot, filepath.Clean("/"+cg))
-		var ls []link.Link
+		var ls []attachedLink
 		for _, a := range []struct {
+			name string
 			typ  ebpf.AttachType
 			prog *ebpf.Program
-		}{{ebpf.AttachCGroupInet4Connect, p.objs.OnConnect4}, {ebpf.AttachCGroupInet6Connect, p.objs.OnConnect6}} {
+		}{{proxyconnProgOnConnect4, ebpf.AttachCGroupInet4Connect, p.objs.OnConnect4},
+			{proxyconnProgOnConnect6, ebpf.AttachCGroupInet6Connect, p.objs.OnConnect6}} {
 			l, err := link.AttachCgroup(link.CgroupOptions{Path: dir, Attach: a.typ, Program: a.prog})
 			if err != nil {
 				errs = append(errs, fmt.Errorf("attach to cgroup %s: %w", dir, err))
 				break
 			}
-			ls = append(ls, l)
+			al, err := newAttachedLink(a.name, cg, a.prog, l)
+			if err != nil {
+				_ = l.Close()
+				errs = append(errs, err)
+				break
+			}
+			ls = append(ls, al)
 		}
 		if len(ls) != 2 {
 			for _, l := range ls {
-				_ = l.Close()
+				_ = l.link.Close()
 			}
 			continue
 		}
@@ -90,13 +103,30 @@ func (p *ProxyConns) SetCgroups(paths []string) error {
 			continue
 		}
 		for _, l := range ls {
-			if err := l.Close(); err != nil {
+			if err := l.link.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("detach from cgroup %s: %w", cg, err))
 			}
 		}
 		delete(p.links, cg)
 	}
 	return errors.Join(errs...)
+}
+
+// Attachments reports, for the tamper checks, each connect link with the program the
+// agent attached and what the kernel reports for it now. A link that reads detached
+// because its cgroup was removed (the proxy's unit stopped) is left out: that is not
+// tamper, and the next SetCgroups drops it.
+func (p *ProxyConns) Attachments() ([]tamper.Attachment, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var all []attachedLink
+	for _, cg := range slices.Sorted(maps.Keys(p.links)) {
+		all = append(all, p.links[cg]...)
+	}
+	return observe(all, func(a attachedLink) bool {
+		_, err := os.Stat(filepath.Join(CgroupRoot, filepath.Clean("/"+a.where)))
+		return errors.Is(err, fs.ErrNotExist)
+	})
 }
 
 // Cgroups lists the attached cgroups, sorted.

@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/thapr0digy/portwarden/internal/model"
+	"github.com/thapr0digy/portwarden/internal/tamper"
 )
 
 // Event kinds and counter slots, as defined in bpf/listen.bpf.c.
@@ -33,12 +34,16 @@ const eventsBuffer = 4096
 
 // Probes owns the loaded listener programs, their links and the ring buffer reader.
 type Probes struct {
-	objs   listenObjects
-	links  []link.Link
-	reader *ringbuf.Reader
-	events chan model.Observation
-	done   chan struct{}
-	wg     sync.WaitGroup
+	objs  listenObjects
+	links []link.Link
+	// attached records what each link was attached with, for the tamper checks; mu
+	// guards it and links against Close.
+	attached []attachedLink
+	mu       sync.Mutex
+	reader   *ringbuf.Reader
+	events   chan model.Observation
+	done     chan struct{}
+	wg       sync.WaitGroup
 
 	readErr   error // set by the reader goroutine before it closes events
 	closeOnce sync.Once
@@ -81,6 +86,12 @@ func Start() (*Probes, error) {
 			return nil, fmt.Errorf("attach %s: %w", prog.name, err)
 		}
 		p.links = append(p.links, l)
+		a, err := newAttachedLink(prog.name, "", prog.prog, l)
+		if err != nil {
+			p.closeResources()
+			return nil, err
+		}
+		p.attached = append(p.attached, a)
 	}
 
 	p.reader, err = ringbuf.NewReader(p.objs.Events)
@@ -153,16 +164,26 @@ func (p *Probes) RunCounts() (map[string]uint64, error) {
 	return counts, nil
 }
 
+// Attachments reports, for the tamper checks, each listener link with the program the
+// agent attached and what the kernel reports for it now. It is empty after Close.
+func (p *Probes) Attachments() ([]tamper.Attachment, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return observe(p.attached, nil)
+}
+
 // Close detaches the programs, stops the reader and releases the kernel objects.
 // Events is closed when it returns.
 func (p *Probes) Close() error {
 	p.closeOnce.Do(func() {
 		close(p.done)
 		var errs []error
+		p.mu.Lock()
 		for _, l := range p.links {
 			errs = append(errs, l.Close())
 		}
-		p.links = nil
+		p.links, p.attached = nil, nil
+		p.mu.Unlock()
 		errs = append(errs, p.reader.Close())
 		p.wg.Wait()
 		errs = append(errs, p.objs.Close())

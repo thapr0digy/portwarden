@@ -15,14 +15,17 @@ tmp=$(mktemp -d)
 trap 'rm -rf "${tmp:?}"' EXIT
 
 go run "$HELM" lint deploy/helm/portwarden-agent
-for set in "" "--set nats.caSecret=nats-ca --set nats.credentialType=creds --set nats.credentialKey=host.creds --set seccompProfile=Unconfined"; do
+for set in "" "--set nats.caSecret=nats-ca --set nats.credentialType=creds --set nats.allowSharedCredentials=true --set nats.credentialKey=host.creds --set seccompProfile=Unconfined" "--set nats.credentialType=nkey --set nats.singleNode=true"; do
 	# shellcheck disable=SC2086 # $set is a list of flags
 	go run "$HELM" template pw deploy/helm/portwarden-agent --namespace portwarden --kube-version "$KUBE_VERSION" $set >"$tmp/rendered.yaml"
 	go run "$KUBECONFORM" -strict -summary -kubernetes-version "$KUBE_VERSION" "$tmp/rendered.yaml" deploy/kubernetes/daemonset.yaml
 done
-if go run "$HELM" template pw deploy/helm/portwarden-agent --kube-version "$KUBE_VERSION" --set nats.credentialType=bogus >/dev/null 2>&1; then
-	echo "lint-deploy: a bad nats.credentialType rendered" >&2
-	exit 1
-fi
+# Settings that cannot work on several nodes, or drop cross-host isolation, refuse to render.
+for bad in nats.credentialType=bogus nats.credentialType=nkey nats.credentialType=creds; do
+	if go run "$HELM" template pw deploy/helm/portwarden-agent --kube-version "$KUBE_VERSION" --set "$bad" >/dev/null 2>&1; then
+		echo "lint-deploy: --set $bad rendered" >&2
+		exit 1
+	fi
+done
 go run "$ACTIONLINT" .github/workflows/*.yml
 echo "lint-deploy: ok"

@@ -2,13 +2,28 @@
 # network namespaces (it must see every process and listening socket), with exactly the
 # four capabilities the systemd unit grants (design §9) and a read-only root filesystem.
 #
-#   kubectl create namespace portwarden
+#   portwarden-natsauth mint --dir users --role host --host <machine-id>   # once per node
+#   kubectl apply -f deploy/kubernetes/daemonset.yaml   # creates the namespace too
 #   kubectl -n portwarden create secret generic portwarden-agent-nats \
-#     --from-file=host.nk=<seed>   # see README "Kubernetes": one host user per node, or a creds file
-#   kubectl apply -f deploy/kubernetes/daemonset.yaml
+#     --from-file=users/host-<id1>.nk --from-file=users/host-<id2>.nk ...
+#
+# Per-node credentials: the Secret holds one seed per node, named host-<machine-id>.nk,
+# and each agent (--nats-nkey-dir) uses its own node's, so a node can still publish only
+# under its own asm.<host> prefix. A node without its seed fails to start (a crash-looping
+# pod), and an agent whose publishes NATS refuses exits: nothing is dropped silently.
+# The namespace needs the "privileged" Pod Security level (hostPID, hostNetwork, hostPath
+# and added capabilities are refused under "baseline").
 #
 # The image is built from deploy/Dockerfile. The Helm chart (deploy/helm/portwarden-agent)
 # renders the same objects with values.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: portwarden
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -53,7 +68,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - --nats-url=tls://nats.example:4222
-            - --nats-nkey=/etc/portwarden/nats/host.nk
+            - --nats-nkey-dir=/etc/portwarden/nats
             - --spool-dir=/var/lib/portwarden/spool
             - --machine-id-path=/etc/machine-id
           securityContext:
@@ -122,7 +137,9 @@ spec:
             type: DirectoryOrCreate
         - name: spool
           hostPath:
-            path: /var/lib/portwarden
+            # Not /var/lib/portwarden: that is the .deb's StateDirectory, and a node with
+            # both (a migration) must not have two agents share one spool.
+            path: /var/lib/portwarden-k8s
             type: DirectoryOrCreate
         - name: tmp
           emptyDir:

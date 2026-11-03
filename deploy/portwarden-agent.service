@@ -40,6 +40,9 @@ NoNewPrivileges=yes
 
 # --- Filesystem. Everything is read-only but the state directory; /proc and /sys stay
 # readable (the agent reads every process's /proc entries, BTF and the cgroup tree).
+# ProtectKernelTunables also hides /proc/kallsyms and /proc/kcore: fine for the fentry,
+# fexit and cgroup programs used now (they resolve through BTF), but a future program
+# that needs kernel symbols (__ksym, kprobe.multi by name) fails to load under it.
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes

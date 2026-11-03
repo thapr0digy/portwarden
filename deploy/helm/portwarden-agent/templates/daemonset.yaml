@@ -58,12 +58,20 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - --nats-url={{ .Values.nats.url }}
-            {{- if eq .Values.nats.credentialType "creds" }}
-            - --nats-creds=/etc/portwarden/nats/{{ .Values.nats.credentialKey }}
+            {{- if eq .Values.nats.credentialType "nkey-dir" }}
+            - --nats-nkey-dir=/etc/portwarden/nats
             {{- else if eq .Values.nats.credentialType "nkey" }}
+            {{- if not .Values.nats.singleNode }}
+            {{- fail "nats.credentialType nkey is one host's seed: use nkey-dir (one key per node), or set nats.singleNode=true" }}
+            {{- end }}
             - --nats-nkey=/etc/portwarden/nats/{{ .Values.nats.credentialKey }}
+            {{- else if eq .Values.nats.credentialType "creds" }}
+            {{- if not .Values.nats.allowSharedCredentials }}
+            {{- fail "nats.credentialType creds shares one user across nodes (any node can forge any other's events): set nats.allowSharedCredentials=true to accept that, or use nkey-dir" }}
+            {{- end }}
+            - --nats-creds=/etc/portwarden/nats/{{ .Values.nats.credentialKey }}
             {{- else }}
-            {{- fail "nats.credentialType must be nkey or creds" }}
+            {{- fail "nats.credentialType must be nkey-dir, nkey or creds" }}
             {{- end }}
             {{- if .Values.nats.caSecret }}
             - --tls-ca=/etc/portwarden/nats-ca/{{ .Values.nats.caKey }}

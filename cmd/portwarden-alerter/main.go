@@ -41,6 +41,8 @@ type Config struct {
 		PageLevel       string           `json:"page_level"`
 		PageOnConfirmed *bool            `json:"page_on_confirmed"`
 		PageOnSilence   *bool            `json:"page_on_silence"`
+		PageOnTamper    *bool            `json:"page_on_tamper"`
+		TamperIgnore    []string         `json:"tamper_ignore"`
 		DedupeWindow    svc.Duration     `json:"dedupe_window"`
 		SilentAfter     svc.Duration     `json:"silent_after"`
 		Ignore          []alerter.Ignore `json:"ignore"`
@@ -73,7 +75,8 @@ func run(path string) error {
 		return err
 	}
 	rules := alerter.Rules{PageLevel: cfg.Rules.PageLevel, PageOnConfirmed: orTrue(cfg.Rules.PageOnConfirmed),
-		PageOnSilence: orTrue(cfg.Rules.PageOnSilence), DedupeWindow: cfg.Rules.DedupeWindow.D(time.Hour), Ignore: cfg.Rules.Ignore}
+		PageOnSilence: orTrue(cfg.Rules.PageOnSilence), DedupeWindow: cfg.Rules.DedupeWindow.D(time.Hour), Ignore: cfg.Rules.Ignore,
+		PageOnTamper: orTrue(cfg.Rules.PageOnTamper), TamperIgnore: cfg.Rules.TamperIgnore}
 	if err := rules.Validate(); err != nil {
 		return err
 	}
@@ -148,9 +151,12 @@ func run(path string) error {
 	return svc.Consume(ctx, ex, a.exposure, svc.ConsumeOptions{})
 }
 
-// heartbeatConsumer re-creates the heartbeat consumer from each host's last heartbeat, so
-// a host that died while the alerter was down is still noticed. Messages up to the
-// stream's last sequence at creation are a replay: they only seed liveness.
+// heartbeatConsumer re-creates the heartbeat consumer from each host's last heartbeat and
+// last tamper event, so a host that died while the alerter was down is still noticed.
+// Heartbeats and tamper events share it, so each host's tamper status is judged in the
+// host's order. Messages up to the stream's last sequence at creation are a replay: they
+// seed liveness and feed the tamper rule (whose marks make it idempotent), never a
+// recovery page.
 func heartbeatConsumer(ctx context.Context, js jetstream.JetStream, stream jetstream.Stream, a *app) (jetstream.Consumer, error) {
 	info, err := stream.Info(ctx)
 	if err != nil {
@@ -161,7 +167,7 @@ func heartbeatConsumer(ctx context.Context, js jetstream.JetStream, stream jetst
 		return nil, fmt.Errorf("reset heartbeat consumer: %w", err)
 	}
 	return js.CreateOrUpdateConsumer(ctx, natsauth.StreamName, jetstream.ConsumerConfig{
-		Durable: natsauth.ConsumerAlerterHB, FilterSubject: "asm.*." + bus.KindHeartbeat,
+		Durable: natsauth.ConsumerAlerterHB, FilterSubjects: []string{"asm.*." + bus.KindHeartbeat, "asm.*." + bus.KindTamper},
 		DeliverPolicy: jetstream.DeliverLastPerSubjectPolicy, AckPolicy: jetstream.AckExplicitPolicy, AckWait: 30 * time.Second,
 	})
 }
@@ -203,7 +209,7 @@ func (a *app) decide(ctx context.Context, what string, f func(alerter.State) (al
 }
 
 func (a *app) heartbeat(ctx context.Context, m jetstream.Msg) error {
-	host, _, ok := bus.ParseSubject(m.Subject())
+	host, kind, ok := bus.ParseSubject(m.Subject())
 	if !ok {
 		return nil
 	}
@@ -211,6 +217,20 @@ func (a *app) heartbeat(ctx context.Context, m jetstream.Msg) error {
 	replay := false
 	if md, err := m.Metadata(); err == nil && md.Sequence.Stream <= a.replayUpTo {
 		replay = true
+	}
+	status, err := tamperStatus(host, kind, m.Data())
+	if err != nil {
+		return svc.Permanent(err)
+	}
+	if status != nil {
+		if err := a.decide(ctx, "tamper "+host, func(st alerter.State) (alerter.Decision, error) {
+			return a.engine.Tamper(ctx, st, host, status, now)
+		}); err != nil {
+			return err
+		}
+	}
+	if kind != bus.KindHeartbeat {
+		return nil
 	}
 	a.mu.Lock()
 	a.live.Seen(host, now, now)
@@ -224,6 +244,36 @@ func (a *app) heartbeat(ctx context.Context, m jetstream.Msg) error {
 	return a.decide(ctx, "heartbeat "+host, func(st alerter.State) (alerter.Decision, error) {
 		return a.engine.Heard(ctx, st, host, now)
 	})
+}
+
+// tamperStatus decodes a heartbeat's or tamper event's tamper status (nil when the agent
+// sends none). A body naming another host is forged.
+func tamperStatus(host, kind string, data []byte) (*asmv1.TamperStatus, error) {
+	var hostID string
+	var status *asmv1.TamperStatus
+	switch kind {
+	case bus.KindHeartbeat:
+		var hb asmv1.Heartbeat
+		if err := proto.Unmarshal(data, &hb); err != nil {
+			return nil, err
+		}
+		hostID, status = hb.GetHostId(), hb.GetTamper()
+	case bus.KindTamper:
+		var ev asmv1.TamperEvent
+		if err := proto.Unmarshal(data, &ev); err != nil {
+			return nil, err
+		}
+		hostID, status = ev.GetHostId(), ev.GetStatus()
+		if status == nil {
+			status = &asmv1.TamperStatus{}
+		}
+	default:
+		return nil, nil
+	}
+	if hostID != "" && hostID != host {
+		return nil, fmt.Errorf("forged %s (host %q on %s's subject)", kind, hostID, host)
+	}
+	return status, nil
 }
 
 // watch checks the feed and host silence every 5 s.

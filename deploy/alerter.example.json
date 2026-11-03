@@ -9,6 +9,8 @@
     "page_level": "host_firewall_open",
     "page_on_confirmed": true,
     "page_on_silence": true,
+    "page_on_tamper": true,
+    "tamper_ignore": [],
     "silent_after": "90s",
     "dedupe_window": "1h",
     "ignore": [

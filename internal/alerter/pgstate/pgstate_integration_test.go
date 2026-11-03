@@ -92,3 +92,35 @@ func open2(t *testing.T) *Store {
 	t.Cleanup(s.Close)
 	return s
 }
+
+// PagedKeys matches a literal prefix: a host id with LIKE wildcards matches nothing else.
+func TestPagedKeysPrefix(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	if err := s.InTx(ctx, func(st alerter.State) error {
+		for _, k := range []string{"tamper:h1/ptraced/self", "tamper:h1/unit_changed/x", "tamper:h10/ptraced/self", "tamper:h_/a/b", "listener:h1/k"} {
+			if err := st.SetPaged(ctx, k, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InTx(ctx, func(st alerter.State) error {
+		got, err := st.PagedKeys(ctx, "tamper:h1/")
+		if err != nil {
+			return err
+		}
+		if len(got) != 2 || got[0] != "tamper:h1/ptraced/self" || got[1] != "tamper:h1/unit_changed/x" {
+			t.Errorf("tamper:h1/ = %v", got)
+		}
+		if got, _ := st.PagedKeys(ctx, "tamper:h%"); len(got) != 0 {
+			t.Errorf("a wildcard prefix matched %v", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

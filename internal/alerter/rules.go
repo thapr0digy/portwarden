@@ -7,6 +7,9 @@ package alerter
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
@@ -22,6 +25,7 @@ const (
 	KindHostRecovered  = "host_recovered"
 	KindFeedStalled    = "backend_feed_stalled"
 	KindFeedRecovered  = "backend_feed_recovered"
+	KindTamper         = "tamper"
 )
 
 // Alert is the webhook payload.
@@ -78,9 +82,13 @@ type Ignore struct {
 type Rules struct {
 	// PageLevel: an exposure.changed whose level reaches it from below pages (default
 	// host_firewall_open).
-	PageLevel        string        `json:"page_level"`
-	PageOnConfirmed  bool          `json:"page_on_confirmed"`
-	PageOnSilence    bool          `json:"page_on_silence"`
+	PageLevel       string `json:"page_level"`
+	PageOnConfirmed bool   `json:"page_on_confirmed"`
+	PageOnSilence   bool   `json:"page_on_silence"`
+	// PageOnTamper pages when an agent raises a tamper flag (asm.<host>.tamper or a
+	// heartbeat's tamper status); TamperIgnore lists flag kinds that never page.
+	PageOnTamper     bool          `json:"page_on_tamper"`
+	TamperIgnore     []string      `json:"tamper_ignore"`
 	DedupeWindow     time.Duration `json:"-"`
 	Ignore           []Ignore      `json:"ignore"`
 	pageLevelNumeric int
@@ -113,6 +121,8 @@ type State interface {
 	LastPaged(ctx context.Context, key string) (time.Time, bool, error)
 	SetPaged(ctx context.Context, key string, at time.Time) error
 	ClearPaged(ctx context.Context, key string) error
+	// PagedKeys lists the marks whose key starts with prefix.
+	PagedKeys(ctx context.Context, prefix string) ([]string, error)
 	ProbeResult(ctx context.Context, key string) (string, error)
 	SetProbeResult(ctx context.Context, key, result string, at time.Time) error
 	Enqueue(ctx context.Context, a *Alert) error
@@ -280,6 +290,58 @@ func (e *Engine) Feed(ctx context.Context, st State, ev liveness.FeedEvent, now 
 			Summary: "the alerter receives host messages again; host silence is judged again after one silent_after"})
 	}
 	return Decision{}, nil
+}
+
+// Tamper judges an agent's tamper status (from a tamper event or a heartbeat, in the
+// host's order): one page per flag newly present, with a mark per flag
+// ("tamper:<host>/<kind>/<subject>") so a flag that stays raised never pages again; marks
+// of flags no longer present are dropped, so a flag raised again later pages again. A
+// nil status (an agent without tamper checks) changes nothing.
+func (e *Engine) Tamper(ctx context.Context, st State, host string, status *asmv1.TamperStatus, now time.Time) (Decision, error) {
+	if status == nil {
+		return Decision{}, nil
+	}
+	prefix := "tamper:" + host + "/"
+	current := map[string]*asmv1.TamperFlag{}
+	for _, f := range status.GetFlags() {
+		if slices.Contains(e.rules.TamperIgnore, f.GetKind()) {
+			continue
+		}
+		current[prefix+f.GetKind()+"/"+f.GetSubject()] = f
+	}
+	marked, err := st.PagedKeys(ctx, prefix)
+	if err != nil {
+		return Decision{}, err
+	}
+	have := map[string]bool{}
+	for _, k := range marked {
+		have[k] = true
+		if current[k] == nil {
+			if err := st.ClearPaged(ctx, k); err != nil {
+				return Decision{}, err
+			}
+		}
+	}
+	var fresh []string
+	for _, k := range slices.Sorted(maps.Keys(current)) {
+		if have[k] {
+			continue
+		}
+		if err := st.SetPaged(ctx, k, now); err != nil {
+			return Decision{}, err
+		}
+		f := current[k]
+		ev := f.GetKind() + ":" + f.GetSubject()
+		if f.GetDetail() != "" {
+			ev += ": " + f.GetDetail()
+		}
+		fresh = append(fresh, ev)
+	}
+	if len(fresh) == 0 || !e.rules.PageOnTamper {
+		return Decision{}, nil
+	}
+	return e.queue(ctx, st, &Alert{ID: e.newID(), Kind: KindTamper, Host: host, At: now, Origin: "agent", Evidence: fresh,
+		Summary: fmt.Sprintf("host %s: agent tamper signal: %s", host, strings.Join(fresh, "; "))})
 }
 
 func listener(l *asmv1.Listener) *Listener {

@@ -112,6 +112,9 @@ func parseMessage(subject string, data []byte) (parsed, error) {
 		if n := len(s.GetProxies()); n > 0 {
 			body += fmt.Sprintf(" proxies=%d", n)
 		}
+		if h := s.GetHost(); h != nil {
+			body += firewallSuffix(h.FirewallFingerprint)
+		}
 		return parsed{header(s.GetTakenAt(), s.GetHostId(), s.GetSeq()) + " " + body, s.GetRunId(), s.GetSeq()}, nil
 	case "tamper":
 		var ev asmv1.TamperEvent
@@ -139,6 +142,7 @@ func parseMessage(subject string, data []byte) (parsed, error) {
 		if st := h.GetTamper(); st != nil {
 			body += " tamper=" + tamperFlags(st.GetFlags(), "ok")
 		}
+		body += firewallSuffix(h.FirewallFingerprint)
 		return parsed{header(h.GetAt(), h.GetHostId(), h.GetSeq()) + " " + body, h.GetRunId(), h.GetSeq()}, nil
 	}
 	return parsed{}, fmt.Errorf("unrecognised subject %q", subject)
@@ -250,6 +254,33 @@ func hostSuffix(h *asmv1.HostInfo) string {
 		s += " conditions=" + strings.Join(c, "; ")
 	}
 	return s
+}
+
+// firewallSuffix is " fw=<first 12 hex of the fingerprint>", " fw=-" while the firewall
+// is not fully readable, " fw=?" for a value that is not a digest (64 lowercase hex), and
+// nothing from an agent that sends none.
+func firewallSuffix(fp *string) string {
+	switch {
+	case fp == nil:
+		return ""
+	case *fp == "":
+		return " fw=-"
+	case !isDigest(*fp):
+		return " fw=?"
+	}
+	return " fw=" + (*fp)[:12]
+}
+
+func isDigest(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func verb(k asmv1.Kind) string {

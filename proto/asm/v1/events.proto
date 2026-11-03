@@ -111,6 +111,9 @@ message Heartbeat {
   uint64 run_number = 10;
   // The agent's tamper checks as of its last pass (M6); unset from agents without them.
   TamperStatus tamper = 11;
+  // The firewall fingerprint as of the agent's latest exposure view (M7), the same value
+  // as HostInfo.firewall_fingerprint. Unset from agents without it.
+  optional string firewall_fingerprint = 12;
 }
 
 // TamperFlag is one tamper signal the agent's self-checks (design §9) currently see.
@@ -209,6 +212,12 @@ message HostInfo {
   // The cloud region (AWS placement/region, the GCP zone's region, the Azure location);
   // the backend's cloud look-up needs it. Empty off-cloud.
   string region = 5;
+  // A digest of the firewall ruleset the agent judges with (M7): lowercase hex SHA-256 of
+  // the parsed rules (counters and dump timestamps excluded), never the rules themselves.
+  // It changes whenever a rule does, even one that moves no listener's exposure. Set and
+  // empty while the firewall cannot be read in full (a "fw:unreadable" condition says
+  // why); unset from agents without it.
+  optional string firewall_fingerprint = 6;
 }
 
 // ExposureEvent is published on asm.<host>.exposure.changed when a listener's level

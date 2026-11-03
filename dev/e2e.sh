@@ -33,7 +33,10 @@
 #      accepted port and none for the dropped one; the host user cannot publish under
 #      another host's prefix nor forge a verifier or cloud verdict for itself; with a
 #      second (fake) host still sending heartbeats, stopping the agent makes the host
-#      silent in the inventory and pages host_silent.
+#      silent in the inventory and pages host_silent. Before that (M7), an nft rule for a
+#      port nothing listens on changes the inventory's firewall_fingerprint and moves its
+#      firewall_changed_at, with no exposure event and no page; an agent restart with
+#      the same rules then leaves both unchanged.
 #  11. hardened unit and tamper (M6): until here the agent ran with --tamper-interval 1s and
 #      must have raised no tamper signal. Then the deploy/ unit itself (as the .deb installs
 #      it, with a runtime drop-in for the e2e NATS) runs the agent as portwarden-agent under
@@ -76,6 +79,7 @@ RESTART_WINDOW_S=3
 RECHECK_S=10
 M5_OPEN_PORT=8092
 M5_FW_PORT=8091
+M7_UNUSED_PORT=8089 # nothing listens here: a rule for it moves no listener's exposure
 UNIT_PORT=8090
 TAMPER_WINDOW_S=10
 UNIT_DROPIN_DIR=/run/systemd/system/portwarden-agent.service.d
@@ -768,6 +772,43 @@ sleep 3 # the confirmation (suppressed by dedupe) has been seen by now; give any
 seen_in "$work/alerter.log" '"msg":"alert suppressed".*"rule":"dedupe"' 1 || fail "the confirmation was not suppressed by dedupe"
 echo "alerter: one page for :$M5_OPEN_PORT ($(jq -r "select(.listener.port == $M5_OPEN_PORT) | .kind + \" \" + .summary" "$work/hook.jsonl")), none for :$M5_FW_PORT"
 ! grep -q "bad signature" "$work/hook.log" || fail "the webhook saw a bad signature"
+
+log "firewall fingerprint: a rule that moves no listener changes the inventory's fingerprint, and nothing else"
+inv_fw() { api "/v1/hosts/$host_id" | jq -r '"\(.firewall_fingerprint // "null") \(.firewall_changed_at // "null")"'; }
+read -r fw_before fw_changed_before <<<"$(inv_fw)"
+[[ "$fw_before" =~ ^[0-9a-f]{64}$ ]] || fail "inventory firewall_fingerprint is '$fw_before', want 64 hex digits"
+seen "HEARTBEAT .* fw=${fw_before:0:12}" 1 || fail "no heartbeat in portwarden-watch prints fw=${fw_before:0:12}"
+fw_exposures() { count_in "$work/watch.log" "EXPOSURE .* trigger=firewall"; }
+fw_exposures_before=$(fw_exposures)
+pages_before=$(wc -l <"$work/hook.jsonl")
+reads_before=$(firewall_reads)
+t0=$(now_ns)
+sudo nft add rule inet "$M5_NFT_TABLE" input tcp dport "$M7_UNUSED_PORT" drop
+wait_for "the agent to read the rule for :$M7_UNUSED_PORT" "$EXPOSURE_WINDOW_S" read_since
+fw_moved() {
+	local fp at
+	read -r fp at <<<"$(inv_fw)"
+	[[ "$fp" =~ ^[0-9a-f]{64}$ ]] && [ "$fp" != "$fw_before" ] && [ "$at" != "$fw_changed_before" ]
+}
+wait_for "the inventory's firewall_changed_at to move" "$INV_WINDOW_S" fw_moved
+fw_ms=$((($(now_ns) - t0) / 1000000))
+sleep 3 # an exposure event or page from that view would be out by now
+[ "$(fw_exposures)" -eq "$fw_exposures_before" ] ||
+	fail "a rule for the unused :$M7_UNUSED_PORT gave exposure events: $(grep -E 'EXPOSURE .* trigger=firewall' "$work/watch.log" | tail -3)"
+[ "$(wc -l <"$work/hook.jsonl")" -eq "$pages_before" ] || fail "a firewall-only change paged: $(tail -n 1 "$work/hook.jsonl")"
+read -r fw_after fw_changed_after <<<"$(inv_fw)"
+echo "firewall fingerprint: ${fw_before:0:12} -> ${fw_after:0:12} in the inventory after $fw_ms ms (changed_at $fw_changed_before -> $fw_changed_after), no exposure event, no page"
+# An agent restart with the same rules (a new run) must not look like a rule change.
+run_before=$(api "/v1/hosts/$host_id" | jq -r .run_id)
+hb_seen=$(count_in "$work/watch.log" "HEARTBEAT .* fw=${fw_after:0:12}")
+stop_agent
+start_agent
+new_run() { [ "$(api "/v1/hosts/$host_id" | jq -r .run_id)" != "$run_before" ]; }
+wait_for "the restarted agent's run in the inventory" 20 new_run
+wait_for "a heartbeat of the new run with fw=${fw_after:0:12}" 10 seen "HEARTBEAT .* fw=${fw_after:0:12}" "$((hb_seen + 2))"
+sleep 2 # the inventory has applied those heartbeats by now
+[ "$(inv_fw)" = "$fw_after $fw_changed_after" ] || fail "an agent restart with the same rules moved the fingerprint: '$fw_after $fw_changed_after' -> '$(inv_fw)'"
+echo "firewall fingerprint: unchanged across an agent restart (run $run_before -> $(api "/v1/hosts/$host_id" | jq -r .run_id))"
 
 log "backend: stopping the agent makes the host silent (another host keeps the feed alive)"
 stop_agent

@@ -248,3 +248,27 @@ func TestFailedReadKeepsLastLevelSilently(t *testing.T) {
 	h.noExposures(100 * time.Millisecond)
 	h.stop()
 }
+
+// OnJudge runs on the loop before the new judge's exposure changes are published, so
+// they carry what it describes (the firewall fingerprint).
+func TestOnJudgeRunsBeforeTheJudgesEvents(t *testing.T) {
+	judges := make(chan Judge)
+	var h *harness
+	ready := make(chan struct{})
+	opts := Options{Judge: newJudge("start", nil), Judges: judges, OnJudge: func(j Judge) {
+		<-ready
+		h.rec.note("onjudge:" + j.Trigger())
+	}}
+	h = startWith(t, []model.Observation{obs(model.Opened, 1, 22, 10, model.SourceBaseline)}, nil, opts)
+	close(ready)
+	close(h.release)
+	h.snapshot()
+	judges <- newJudge("firewall", map[uint16]model.ExposureLevel{22: model.ExposureHostFirewallOpen})
+	h.exposures()
+	calls := h.rec.calls()
+	i := slices.Index(calls, "onjudge:firewall")
+	if i < 0 || i+1 >= len(calls) || calls[i+1] != "exposures" {
+		t.Fatalf("call order %v: OnJudge must come right before the judge's exposures", calls)
+	}
+	h.stop()
+}

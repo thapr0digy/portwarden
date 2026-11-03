@@ -69,6 +69,8 @@ esac
 git_dir=$(git rev-parse --absolute-git-dir)
 sha=$(git rev-parse --short=7 HEAD)
 mkdir -p "$base"
+# Ignored by itself too, for checkouts whose .gitignore predates .vmverify/.
+[ -f "$base/.gitignore" ] || printf '*\n' >"$base/.gitignore"
 copy=$(mktemp -d "$base/$sha-XXXXXX")
 
 # save_logs: the copy's .matrix logs and summary (not the test binaries or rebuilt

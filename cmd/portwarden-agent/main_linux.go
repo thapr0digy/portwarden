@@ -297,7 +297,7 @@ type loggingSink struct {
 	log *slog.Logger
 }
 
-func (s loggingSink) Snapshot(listeners []state.Listener) {
-	s.log.Info("snapshot queued", "listeners", len(listeners))
-	s.Publisher.Snapshot(listeners)
+func (s loggingSink) Snapshot(listeners []state.Listener, proxies []model.ProxyRoutes) {
+	s.log.Info("snapshot queued", "listeners", len(listeners), "proxies", len(proxies))
+	s.Publisher.Snapshot(listeners, proxies)
 }

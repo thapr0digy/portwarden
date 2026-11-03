@@ -30,7 +30,7 @@ func TestExposureOnEventsAndSnapshots(t *testing.T) {
 	p.SetHost(testHostInfo)
 	snap := snapshotOf(22)
 	snap[0].Exposure = boundExposure
-	p.Snapshot(snap)
+	p.Snapshot(snap, nil)
 	c := openedChange(8080)
 	c.Exposure = openExposure
 	p.Changes([]state.Change{c})

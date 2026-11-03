@@ -21,6 +21,8 @@ type Change struct {
 	At        time.Time
 	Source    model.Source
 	Exposure  model.Exposure
+	// BehindProxy lists the proxy routes ending at the listener; the agent fills it in.
+	BehindProxy []model.ProxyRef
 }
 
 // Listener is a currently open listener and the processes holding its sockets. The
@@ -29,6 +31,8 @@ type Listener struct {
 	Key      model.ListenerKey
 	Procs    []model.Process
 	Exposure model.Exposure
+	// BehindProxy lists the proxy routes ending at the listener; the agent fills it in.
+	BehindProxy []model.ProxyRef
 }
 
 // ExposureChange is a listener judged for the first time (Previous is zero) or whose

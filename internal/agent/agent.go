@@ -25,8 +25,11 @@ type Snapshotter func() ([]model.Observation, error)
 // listener's Opened comes before its first ExposureChange.
 type Sink interface {
 	Changes([]state.Change)
-	Snapshot([]state.Listener)
+	// Snapshot carries every open listener and every known proxy's route set.
+	Snapshot([]state.Listener, []model.ProxyRoutes)
 	ExposureChanges([]state.ExposureChange)
+	// ProxyRoutes publishes route sets that changed (or were removed).
+	ProxyRoutes([]model.ProxyRoutes)
 }
 
 // Judge rates every listener's exposure under one reading of the host (its firewall
@@ -292,7 +295,7 @@ func (l *loop) snapshot() {
 	for i := range listeners {
 		listeners[i].Exposure = l.levels[listeners[i].Key]
 	}
-	l.sink.Snapshot(listeners)
+	l.sink.Snapshot(listeners, nil)
 }
 
 // keepThroughFailedRead keeps a listener's last known level when the new judgement was

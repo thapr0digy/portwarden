@@ -41,10 +41,12 @@ func (r *recorder) ExposureChanges(c []state.ExposureChange) {
 	r.exposures <- c
 }
 
-func (r *recorder) Snapshot(l []state.Listener) {
+func (r *recorder) Snapshot(l []state.Listener, _ []model.ProxyRoutes) {
 	r.note("snapshot")
 	r.snapshots <- l
 }
+
+func (r *recorder) ProxyRoutes([]model.ProxyRoutes) { r.note("proxies") }
 
 func (r *recorder) Changes(c []state.Change) {
 	r.note("changes")

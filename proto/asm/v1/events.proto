@@ -62,12 +62,15 @@ message ListenerEvent {
   Exposure exposure = 11;
   // The host's public-IP candidates and cloud identity at publish time.
   HostInfo host = 12;
+  // The proxy routes that end at this listener (it is their backend), at publish time.
+  repeated ProxyRef behind_proxy = 13;
 }
 
 message ListenerState {
   Listener listener = 1;
   repeated Process processes = 2;
   Exposure exposure = 3;
+  repeated ProxyRef behind_proxy = 4;
 }
 
 message Snapshot {
@@ -78,6 +81,8 @@ message Snapshot {
   google.protobuf.Timestamp taken_at = 5;
   repeated ListenerState listeners = 6;
   HostInfo host = 7;
+  // Every known proxy with its full route set.
+  repeated ProxyState proxies = 8;
 }
 
 message Heartbeat {
@@ -166,4 +171,106 @@ message HostEvent {
   google.protobuf.Timestamp observed_at = 5;
   HostInfo host = 6;
   HostInfo previous = 7;
+}
+
+// Proxy is a reverse proxy instance (nginx, Apache, HAProxy, or an observed-only kind).
+message Proxy {
+  // Stable across reloads and restarts: <kind>/<netns>/<config path or exe>.
+  string id = 1;
+  // nginx, apache, haproxy, caddy, envoy, traefik.
+  string kind = 2;
+  // The master (the root of the proxy's process tree) first, then the other holders.
+  repeated Process processes = 3;
+  // The proxy's own listeners.
+  repeated Listener listeners = 4;
+  // The main configuration file ("" for observed-only kinds).
+  string config_path = 5;
+  // Every configuration file read, in include order.
+  repeated string config_files = 6;
+  // What could not be read or followed, e.g. "unreadable /etc/nginx/x.conf: permission denied".
+  repeated string notes = 7;
+}
+
+// ProxyBackend is one place a route sends traffic to.
+message ProxyBackend {
+  // As written in the config ("127.0.0.1:8000", "unix:/run/php/php-fpm.sock", "app:8000",
+  // "$backend"), or the observed destination of an inferred backend.
+  string address = 1;
+  // The resolved destination (empty when unresolved or a Unix socket).
+  string ip = 2;
+  uint32 port = 3;
+  // The Unix socket path, for a Unix-socket backend.
+  string unix_path = 4;
+  // The listener this backend ends at, and its holders, when one matches.
+  Listener listener = 5;
+  repeated Process processes = 6;
+  // config: named in the configuration. seen: the proxy connected to it (observed
+  // connections). A backend seen but not configured is inferred.
+  bool config = 7;
+  bool seen = 8;
+  uint64 connections = 9;
+  google.protobuf.Timestamp last_seen = 10;
+  // Why it is not resolved or joined, e.g. "unresolved: variable $host", "no listener".
+  string note = 11;
+}
+
+// ProxyRoute is one routing rule: frontend (listen, names, path) to backends.
+message ProxyRoute {
+  // Listen addresses as configured, normalised ("0.0.0.0:443", "[::]:443", "*:80").
+  repeated string listen = 1;
+  // The proxy's listeners this route is served on.
+  repeated Listener frontends = 2;
+  repeated string server_names = 3;
+  // location / ProxyPass path / HAProxy use_backend condition.
+  string path = 4;
+  // proxy, fastcgi, uwsgi, scgi, grpc, memcached, static, return.
+  string kind = 5;
+  // The target as written (proxy_pass argument, ProxyPass URL, backend name).
+  string target = 6;
+  // The upstream / balancer / HAProxy backend name, when the target names one.
+  string upstream = 7;
+  // The document root, for static routes.
+  string root = 8;
+  // file:line of the directive.
+  string source = 9;
+  // true when the route comes from observed connections only (not in the config).
+  bool inferred = 10;
+  repeated string notes = 11;
+  repeated ProxyBackend backends = 12;
+}
+
+// ProxyState is a proxy with its full route set, as carried in snapshots.
+message ProxyState {
+  Proxy proxy = 1;
+  repeated ProxyRoute routes = 2;
+}
+
+// ProxyRoutes is published on asm.<host>.proxy.routes with a proxy's full route set
+// whenever it changes (config, reload, restart, a backend listener, newly seen traffic),
+// and with removed=true when the proxy is gone.
+message ProxyRoutes {
+  string event_id = 1;
+  string host_id = 2;
+  string run_id = 3;
+  uint64 seq = 4;
+  google.protobuf.Timestamp observed_at = 5;
+  Proxy proxy = 6;
+  repeated ProxyRoute routes = 7;
+  // started, config, listener, traffic, recheck, stopped.
+  string trigger = 8;
+  bool removed = 9;
+  HostInfo host = 10;
+}
+
+// ProxyRef names a proxy route that ends at a listener (on the backend's events).
+message ProxyRef {
+  string proxy_id = 1;
+  string kind = 2;
+  // The proxy's master process.
+  Process proxy = 3;
+  repeated Listener frontends = 4;
+  repeated string server_names = 5;
+  string path = 6;
+  bool config = 7;
+  bool seen = 8;
 }

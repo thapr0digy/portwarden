@@ -350,6 +350,8 @@ A missing VM is created and provisioned (`dev/provision.sh` from this checkout; 
 
 CI (`.github/workflows/ci.yml`): a `unit` job (tests, vet with and without `integration`, amd64 and arm64 builds, `buf generate` + `go generate` drift, `make dist` + `dist-check` + `dist-lint`, `lint-deploy`) and a `kernel` job per leg (`2404`, `2604`) that installs QEMU and Lima on the `ubuntu-24.04` runner, opens `/dev/kvm` (GitHub's x86_64 Linux runners have KVM) and runs `dev/matrix.sh` for the leg with the workspace mounted, so CI's legs are x86_64 VMs running the real probes. The workflow passes actionlint; it has not run on GitHub (Actions minutes on this account may be exhausted).
 
+CI is manual-only since 2026-11-03 (`workflow_dispatch`; no push or pull request runs): local and VM verify (`dev/vm-verify.sh`) are the gate.
+
 ## x86 test checklist
 
 On an x86_64 Ubuntu 24.04 or 26.04 machine (or VM) with sudo, from a checkout of this branch, with nothing of Portwarden installed:

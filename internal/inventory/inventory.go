@@ -42,7 +42,6 @@ import (
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
 	"github.com/thapr0digy/portwarden/internal/backend/liveness"
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
-	"github.com/thapr0digy/portwarden/internal/natsauth"
 )
 
 // Meta is where a message came from.
@@ -93,12 +92,15 @@ type Store interface {
 	// LastHeartbeats returns every host's last heartbeat time, to seed liveness.
 	LastHeartbeats(ctx context.Context) (map[string]time.Time, error)
 	// Forget removes a host's rows (host, listeners, proxies, exposure history) and records
-	// streamSeq, the stream sequence of its pwb.inventory.<host>.forgotten announcement, as
-	// its watermark (the highest one wins), in one transaction. existed reports whether
-	// the host was stored.
-	Forget(ctx context.Context, host string, streamSeq uint64) (existed bool, err error)
-	// ForgottenSeq returns a host's forget watermark (0: never forgotten).
-	ForgottenSeq(ctx context.Context, host string) (uint64, error)
+	// mark, its pwb.inventory.<host>.forgotten announcement's place in the stream, in one
+	// transaction (a mark of the same stream with a higher sequence is kept). existed
+	// reports whether the host was stored.
+	Forget(ctx context.Context, host string, mark Mark) (existed bool, err error)
+	// ForgottenMark returns a host's forget mark (ok false: never forgotten).
+	ForgottenMark(ctx context.Context, host string) (mark Mark, ok bool, err error)
+	// PruneMarks drops the marks of another stream (one created at another time) and those
+	// past the stream's last sequence (a stream reset), at start.
+	PruneMarks(ctx context.Context, stream time.Time, lastSeq uint64) (int64, error)
 }
 
 // SnapshotSource fetches a host's latest snapshot from the stream (gap reload).
@@ -127,106 +129,36 @@ type Consumer struct {
 	Announce func(ctx context.Context, host string) (uint64, error)
 	Now      func() time.Time
 
-	// handleMu serialises Handle and Forget, so a message is never applied half before
-	// and half after a forget.
-	handleMu sync.Mutex
+	// handle serialises Handle and Forget, so a message is never applied half before and
+	// half after a forget; Forget waits for it under its context.
+	handleOnce sync.Once
+	handle     chan struct{}
+	// stream is the ASM_EVENTS stream's identity (SetStream), stamped on forget marks.
+	streamMu sync.Mutex
+	stream   time.Time
 	// liveMu guards Liveness and Feed: Handle and CheckSilence run on different goroutines.
 	liveMu sync.Mutex
-}
-
-// ErrBadHost is a host id that is not one plain subject token (or is reserved).
-var ErrBadHost = errors.New("bad host id")
-
-// ForgetResult is what Forget did.
-type ForgetResult struct {
-	Host string `json:"host"`
-	// Existed is whether the inventory held the host (it is announced either way: the
-	// alerter may still hold state for it).
-	Existed bool `json:"existed"`
-	// StreamSeq is the announcement's stream sequence: the host's messages stored before
-	// it are skipped from now on; later ones make it a new host.
-	StreamSeq uint64 `json:"stream_seq"`
-}
-
-// Forget removes a decommissioned host (M8). It announces the host on
-// pwb.inventory.<host>.forgotten first (so the alerter drops its marks and stops judging
-// its silence), then removes its rows and stops judging its silence here. A failed
-// announcement changes nothing; a failure after it leaves the host announced but stored,
-// and running Forget again completes it. A host that sends again after its announcement
-// is a new host.
-func (c *Consumer) Forget(ctx context.Context, host string) (ForgetResult, error) {
-	if err := natsauth.ValidHostID(host); err != nil {
-		return ForgetResult{}, fmt.Errorf("%w: %v", ErrBadHost, err)
-	}
-	if c.Announce == nil {
-		return ForgetResult{}, errors.New("inventory: forget needs the bus (no announcer)")
-	}
-	c.handleMu.Lock()
-	defer c.handleMu.Unlock()
-	seq, err := c.Announce(ctx, host)
-	if err != nil {
-		return ForgetResult{}, fmt.Errorf("announce the forgotten host: %w", err)
-	}
-	existed, err := c.Store.Forget(ctx, host, seq)
-	if err != nil {
-		return ForgetResult{}, fmt.Errorf("forget %s (announced at stream seq %d; run it again): %w", host, seq, err)
-	}
-	if c.Liveness != nil {
-		c.liveMu.Lock()
-		c.Liveness.Forget(host)
-		c.liveMu.Unlock()
-	}
-	slog.Info("host forgotten", "host", host, "existed", existed, "stream_seq", seq)
-	return ForgetResult{Host: host, Existed: existed, StreamSeq: seq}, nil
-}
-
-// staleVerdict reports whether a backend event (a cloud or verifier verdict) concerns a
-// forgotten host: stored before its announcement, or after it while the host has not come
-// back (a look-up or probe started before the forget). Backend events are only ever about
-// hosts the inventory holds, so neither may recreate one.
-func (c *Consumer) staleVerdict(ctx context.Context, host string, streamSeq uint64) (bool, error) {
-	mark, err := c.Store.ForgottenSeq(ctx, host)
-	if err != nil || mark == 0 {
-		return false, err
-	}
-	if streamSeq != 0 && streamSeq < mark {
-		return true, nil
-	}
-	if _, known, err := c.Store.Cursor(ctx, host); err != nil || known {
-		return false, err
-	}
-	slog.Info("inventory: skipping a verdict for a forgotten host that has not come back", "host", host, "stream_seq", streamSeq)
-	return true, nil
-}
-
-// leftover reports whether a message stored at streamSeq predates the host's forget
-// watermark (0, a message without stream metadata, is never a leftover).
-func (c *Consumer) leftover(ctx context.Context, host string, streamSeq uint64) (bool, error) {
-	if streamSeq == 0 {
-		return false, nil
-	}
-	mark, err := c.Store.ForgottenSeq(ctx, host)
-	if err != nil {
-		return false, err
-	}
-	if streamSeq < mark {
-		slog.Info("inventory: skipping a message stored before the host was forgotten", "host", host, "stream_seq", streamSeq, "forgotten_at_seq", mark)
-		return true, nil
-	}
-	return false, nil
 }
 
 // Handle processes one message. A permanent error (svc.IsPermanent) means the message
 // must be quarantined; any other error means retry.
 func (c *Consumer) Handle(ctx context.Context, subject string, data []byte, m Meta) error {
-	c.handleMu.Lock()
-	defer c.handleMu.Unlock()
+	if err := c.lock(ctx); err != nil {
+		return err
+	}
+	defer c.unlock()
 	p, ok := bus.Parse(subject)
 	if !ok {
 		slog.Warn("inventory: skipping message on unexpected subject", "subject", subject)
 		return nil
 	}
 	m.Host, m.Kind, m.Origin = p.Host, p.Kind, p.Origin
+	if p.Origin == bus.OriginInventory {
+		if p.Kind == bus.KindForgotten {
+			return c.applyForgotten(ctx, p.Host, data, m.StreamSeq)
+		}
+		return nil
+	}
 	msg, err := decode(p, data)
 	if err != nil {
 		return svc.Permanent(err)

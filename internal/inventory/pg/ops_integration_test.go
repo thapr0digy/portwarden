@@ -83,9 +83,15 @@ func TestTamperStatusStored(t *testing.T) {
 	if v := tamper(); len(v.Flags) != 0 || v.CheckedAt == nil || !v.CheckedAt.Equal(t0.Add(3*time.Minute)) {
 		t.Fatalf("all clear: %+v", v)
 	}
+	// The same status from a later pass (only checked_at differs) is no write.
+	snd.send(h1, "heartbeat", &asmv1.Heartbeat{HostId: h1, RunId: "01A", Seq: 5, BootId: "b", RunNumber: 1,
+		Tamper: &asmv1.TamperStatus{CheckedAt: timestamppb.New(t0.Add(4 * time.Minute)), Checks: []string{"ptrace"}}}, t0.Add(4*time.Minute))
+	if hv, _, _ := s.Host(ctx, h1); !hv.TamperAt.Equal(t0.Add(3 * time.Minute)) {
+		t.Fatalf("an unchanged status moved tamper_at to %v", hv.TamperAt)
+	}
 	// A late tamper event of an earlier run never rolls it back.
 	snd.send(h1, "heartbeat", &asmv1.Heartbeat{HostId: h1, RunId: "01B", Seq: 1, BootId: "b", RunNumber: 2}, t0.Add(4*time.Minute))
-	snd.send(h1, "tamper", &asmv1.TamperEvent{HostId: h1, RunId: "01A", Seq: 5, BootId: "b", RunNumber: 1, Status: st}, t0.Add(5*time.Minute))
+	snd.send(h1, "tamper", &asmv1.TamperEvent{HostId: h1, RunId: "01A", Seq: 6, BootId: "b", RunNumber: 1, Status: st}, t0.Add(5*time.Minute))
 	if v := tamper(); len(v.Flags) != 0 {
 		t.Fatalf("an earlier run's tamper event was applied: %+v", v)
 	}
@@ -96,6 +102,7 @@ func TestForgetHost(t *testing.T) {
 	ctx := context.Background()
 	var announced uint64
 	c := &inventory.Consumer{Store: s, Announce: func(context.Context, string) (uint64, error) { return announced, nil }}
+	c.SetStream(stream1)
 	snd := &sender{t: t, c: c}
 	t0 := time.Now()
 	snap := &asmv1.Snapshot{HostId: h1, RunId: "01A", Seq: 1, BootId: "b", RunNumber: 1, Listeners: []*asmv1.ListenerState{lst(22, "ssh.service")},
@@ -127,8 +134,8 @@ func TestForgetHost(t *testing.T) {
 	if ls, _ := s.Listeners(ctx, inventory.ListenerFilter{Host: "keep"}); len(ls) != 1 {
 		t.Fatal("another host lost its listeners")
 	}
-	if seq, _ := s.ForgottenSeq(ctx, h1); seq != announced {
-		t.Fatalf("watermark %d", seq)
+	if m, ok, _ := s.ForgottenMark(ctx, h1); !ok || m.Seq != announced || !m.Stream.Equal(stream1) {
+		t.Fatalf("mark %+v %v", m, ok)
 	}
 
 	// A redelivered leftover (stored before the announcement) does not bring it back.
@@ -145,15 +152,59 @@ func TestForgetHost(t *testing.T) {
 	if err != nil || !ok || hv.Listeners != 0 || !hv.FirstSeen.After(t0) {
 		t.Fatalf("returned host %+v %v %v", hv, ok, err)
 	}
-	// Forgetting twice keeps the highest watermark; forgetting an unknown host records one.
-	if _, err := s.Forget(ctx, h1, 1); err != nil {
+	// Forgetting twice keeps the highest mark of a stream; forgetting an unknown host
+	// records one.
+	if _, err := s.Forget(ctx, h1, inventory.Mark{Seq: 1, Stream: stream1}); err != nil {
 		t.Fatal(err)
 	}
-	if seq, _ := s.ForgottenSeq(ctx, h1); seq != announced {
-		t.Fatalf("watermark went back to %d", seq)
+	if m, _, _ := s.ForgottenMark(ctx, h1); m.Seq != announced {
+		t.Fatalf("mark went back to %d", m.Seq)
 	}
-	if existed, err := s.Forget(ctx, "never", 9); err != nil || existed {
+	if existed, err := s.Forget(ctx, "never", inventory.Mark{Seq: 9, Stream: stream1}); err != nil || existed {
 		t.Fatalf("unknown host: %v %v", existed, err)
+	}
+	// A mark of a new stream replaces the old one even with a lower sequence.
+	if _, err := s.Forget(ctx, "never", inventory.Mark{Seq: 3, Stream: stream2}); err != nil {
+		t.Fatal(err)
+	}
+	if m, _, _ := s.ForgottenMark(ctx, "never"); m.Seq != 3 || !m.Stream.Equal(stream2) {
+		t.Fatalf("new stream's mark %+v", m)
+	}
+}
+
+var (
+	stream1 = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	stream2 = time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+)
+
+// The stream was deleted and created again: its sequences start over, so a host id
+// reused on it must not be judged by the old stream's mark.
+func TestRecreatedStreamReusedHostID(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, err := s.Forget(ctx, "reused", inventory.Mark{Seq: 5000, Stream: stream1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Forget(ctx, "same-stream-past-end", inventory.Mark{Seq: 900, Stream: stream2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Forget(ctx, "kept", inventory.Mark{Seq: 7, Stream: stream2}); err != nil {
+		t.Fatal(err)
+	}
+	// Even before the prune, the consumer ignores another stream's mark.
+	c := &inventory.Consumer{Store: s}
+	c.SetStream(stream2)
+	snd := &sender{t: t, c: c}
+	snd.send("reused", "snapshot", &asmv1.Snapshot{HostId: "reused", RunId: "01A", Seq: 1}, time.Now())
+	if _, ok, _ := s.Host(ctx, "reused"); !ok {
+		t.Fatal("the reused host id was skipped by the old stream's mark")
+	}
+	n, err := s.PruneMarks(ctx, stream2, 100)
+	if err != nil || n != 2 {
+		t.Fatalf("pruned %d (%v), want the old stream's and the one past the last seq", n, err)
+	}
+	if _, ok, _ := s.ForgottenMark(ctx, "kept"); !ok {
+		t.Fatal("a current mark was pruned")
 	}
 }
 

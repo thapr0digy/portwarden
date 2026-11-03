@@ -141,6 +141,32 @@ func TestForgetHostErrors(t *testing.T) {
 	}
 }
 
+func TestRetentionConfigBounds(t *testing.T) {
+	for body, ok := range map[string]bool{
+		`{"retention": {"history": "-1h"}}`:                    false,
+		`{"retention": {"quarantine": "-5s"}}`:                 false,
+		`{"retention": {"interval": "30s"}}`:                   false,
+		`{"retention": {"batch": 10001}}`:                      false,
+		`{"retention": {"batch": -1}}`:                         false,
+		`{"retention": {"history": null, "quarantine": null}}`: true,
+		`{"retention": {"interval": "1m", "batch": 10000}}`:    true,
+	} {
+		var c Config
+		err := loadConfig(writeFile(t, "inventory.json", body), &c)
+		if err == nil {
+			err = c.Retention.validate()
+		}
+		if (err == nil) != ok {
+			t.Errorf("%s: %v", body, err)
+		}
+	}
+	var c Config
+	_ = loadConfig(writeFile(t, "inventory.json", `{"retention": {"history": null}}`), &c)
+	if c.retention().History != inventory.DefaultHistoryRetention {
+		t.Fatal("null history is not the default")
+	}
+}
+
 func TestRetentionConfig(t *testing.T) {
 	var c Config
 	if r := c.retention(); r.History != inventory.DefaultHistoryRetention || r.Quarantine != inventory.DefaultQuarantineRetention {

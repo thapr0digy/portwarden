@@ -296,14 +296,16 @@ func setFirewall(ctx context.Context, tx pgx.Tx, host, fp string, at time.Time) 
 	return err
 }
 
-// setTamper stores a host's latest tamper status (the consumer's run and sequence order
-// keeps a late message from rolling it back).
+// setTamper stores a host's latest tamper status when it changed (the consumer's run and
+// sequence order keeps a late message from rolling it back). checked_at moves on every
+// pass, so it is left out of the comparison: tamper_at is when the status last changed.
 func setTamper(ctx context.Context, tx pgx.Tx, host string, st *asmv1.TamperStatus, at time.Time) error {
 	b, err := inventory.TamperJSON(st)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, "UPDATE hosts SET tamper = $2, tamper_at = $3 WHERE host_id = $1", host, json.RawMessage(b), at)
+	_, err = tx.Exec(ctx, `UPDATE hosts SET tamper = $2, tamper_at = $3 WHERE host_id = $1
+		AND (tamper IS NULL OR tamper - 'checked_at' IS DISTINCT FROM $2::jsonb - 'checked_at')`, host, json.RawMessage(b), at)
 	return err
 }
 

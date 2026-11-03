@@ -66,14 +66,26 @@ type APIConfig struct {
 	AdminTokenFile string `json:"admin_token_file"`
 }
 
-// RetentionConfig prunes old rows (M8). History and Quarantine are ages; unset means the
-// default (90 days, 30 days), "0s" keeps the table forever.
+// RetentionConfig prunes old rows (M8). History and Quarantine are ages; unset or null
+// means the default (90 days, 30 days), "0s" keeps the table forever; a negative duration
+// is refused when the config is read. Interval (unset: 1h) must be at least a minute,
+// Batch (unset: 1000) 1 to 10 000.
 type RetentionConfig struct {
 	History    *svc.Duration `json:"history"`
 	Quarantine *svc.Duration `json:"quarantine"`
 	// Interval between passes (default 1h); Batch rows per DELETE (default 1000).
 	Interval svc.Duration `json:"interval"`
 	Batch    int          `json:"batch"`
+}
+
+func (r RetentionConfig) validate() error {
+	if r.Interval != 0 && time.Duration(r.Interval) < time.Minute {
+		return errors.New("retention.interval must be at least 1m")
+	}
+	if r.Batch < 0 || r.Batch > 10000 {
+		return errors.New("retention.batch must be 1 to 10000")
+	}
+	return nil
 }
 
 func (c Config) retention() inventory.Retention {
@@ -137,8 +149,8 @@ func run(path string) error {
 	if cfg.Listen == "" {
 		cfg.Listen = defaultListen
 	}
-	if cfg.Retention.Batch < 0 {
-		return errors.New("retention.batch must not be negative")
+	if err := cfg.Retention.validate(); err != nil {
+		return err
 	}
 	if err := checkListen(cfg.Listen, cfg.AllowInsecureListen); err != nil {
 		return err
@@ -208,6 +220,17 @@ func run(path string) error {
 		return err
 	}
 	cons.Snapshots = inventory.StreamSnapshots{Stream: stream}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("stream info: %w", err)
+	}
+	// Forget marks belong to one stream: a recreated stream starts its sequences over.
+	if n, err := store.PruneMarks(ctx, info.Created, info.State.LastSeq); err != nil {
+		return fmt.Errorf("forget marks: %w", err)
+	} else if n > 0 {
+		slog.Warn("dropped forget marks of another stream (or past its last sequence)", "marks", n, "stream_created", info.Created)
+	}
+	cons.SetStream(info.Created)
 	if err := cons.SeedLiveness(ctx); err != nil {
 		return err
 	}
@@ -252,7 +275,8 @@ func run(path string) error {
 	})
 
 	c, err := bus.Durable(ctx, js, natsauth.ConsumerInventory, bus.DurableOptions{
-		Filters: []string{"asm.>", "pwb.cloud.*.exposure", "pwb.verifier.*.exposure"}})
+		// Its own announcements too: a forget whose database step failed heals here.
+		Filters: []string{"asm.>", "pwb.cloud.*.exposure", "pwb.verifier.*.exposure", "pwb.inventory.*.forgotten"}})
 	if err != nil {
 		return err
 	}

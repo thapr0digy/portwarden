@@ -12,26 +12,32 @@ import (
 	"time"
 )
 
-// maxExeBytes bounds the read of a proxy binary for its compiled-in defaults.
+// maxExeBytes bounds the scan of a proxy binary for its compiled-in defaults.
 const maxExeBytes = 64 << 20
 
 // ProcFS reads /proc (CAP_SYS_PTRACE lets the agent read other users' exe, environ and
-// ns links). Binaries are cached by file identity.
+// ns links).
 type ProcFS struct {
 	Root string // "/proc"
 
-	mu   sync.Mutex
-	bins map[binKey][]byte
+	mu    sync.Mutex
+	found map[binKey]scanResult
 }
 
 type binKey struct {
-	dev, ino uint64
-	size     int64
-	mtime    time.Time
+	dev, ino     uint64
+	size         int64
+	mtime        time.Time
+	prefix, stop string
+}
+
+type scanResult struct {
+	value string
+	ok    bool
 }
 
 // NewProcFS reads under root ("/proc").
-func NewProcFS(root string) *ProcFS { return &ProcFS{Root: root, bins: make(map[binKey][]byte)} }
+func NewProcFS(root string) *ProcFS { return &ProcFS{Root: root, found: make(map[binKey]scanResult)} }
 
 func (p *ProcFS) path(pid uint32, name string) string {
 	return filepath.Join(p.Root, strconv.FormatUint(uint64(pid), 10), name)
@@ -100,39 +106,71 @@ func nsInode(path string) (uint64, bool) {
 	return uint64(st.Ino), true
 }
 
-// ExeBytes reads the process's executable through /proc/<pid>/exe (at most 64 MiB; nil
-// when larger or unreadable), cached by its identity.
-func (p *ProcFS) ExeBytes(pid uint32) []byte {
+// ExeString finds prefix in the process's executable (read through /proc/<pid>/exe, at
+// most 64 MiB, streamed) and returns what follows it up to the first byte of stop (at
+// most 4096 bytes). Results are cached by file identity and prefix, never the file.
+func (p *ProcFS) ExeString(pid uint32, prefix, stop string) (string, bool) {
 	f, err := os.Open(p.path(pid, "exe"))
 	if err != nil {
-		return nil
+		return "", false
 	}
 	defer f.Close()
 	fi, err := f.Stat()
-	if err != nil || fi.Size() > maxExeBytes {
-		return nil
+	if err != nil {
+		return "", false
 	}
-	key := binKey{size: fi.Size(), mtime: fi.ModTime()}
+	key := binKey{size: fi.Size(), mtime: fi.ModTime(), prefix: prefix, stop: stop}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 		key.dev, key.ino = uint64(st.Dev), uint64(st.Ino) //nolint:unconvert // int32 on darwin
 	}
 	p.mu.Lock()
-	b, ok := p.bins[key]
+	r, ok := p.found[key]
 	p.mu.Unlock()
 	if ok {
-		return b
+		return r.value, r.ok
 	}
-	b, err = io.ReadAll(io.LimitReader(f, maxExeBytes))
-	if err != nil {
-		return nil
-	}
+	v, found := scanFor(io.LimitReader(f, maxExeBytes), []byte(prefix), stop, maxValue)
 	p.mu.Lock()
-	if len(p.bins) >= 8 {
-		clear(p.bins)
+	if len(p.found) >= 256 {
+		clear(p.found)
 	}
-	p.bins[key] = b
+	p.found[key] = scanResult{v, found}
 	p.mu.Unlock()
-	return b
+	return v, found
+}
+
+const maxValue = 4096
+
+// scanFor streams r looking for prefix and returns the bytes after it up to a byte of
+// stop, if that comes within max bytes.
+func scanFor(r io.Reader, prefix []byte, stop string, max int) (string, bool) {
+	const chunk = 64 << 10
+	buf := make([]byte, 0, chunk+len(prefix)+max)
+	tmp := make([]byte, chunk)
+	eof := false
+	for {
+		if !eof {
+			n, err := r.Read(tmp)
+			buf = append(buf, tmp[:n]...)
+			eof = err != nil
+		}
+		if i := bytes.Index(buf, prefix); i >= 0 {
+			rest := buf[i+len(prefix):]
+			if j := bytes.IndexAny(rest, stop); j >= 0 && j <= max {
+				return string(rest[:j]), true
+			}
+			if len(rest) > max || eof {
+				return "", false
+			}
+			continue // the value runs past what was read
+		}
+		if eof {
+			return "", false
+		}
+		if keep := len(prefix) - 1; len(buf) > keep {
+			buf = append(buf[:0], buf[len(buf)-keep:]...)
+		}
+	}
 }
 
 // Cgroup is the cgroup v2 path from /proc/<pid>/cgroup.

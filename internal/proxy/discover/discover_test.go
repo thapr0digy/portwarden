@@ -1,10 +1,12 @@
 package discover
 
 import (
+	"bytes"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/thapr0digy/portwarden/internal/model"
@@ -30,8 +32,10 @@ func (f fakeProcs) Environ(pid uint32) map[string]string {
 	return f[pid].env
 }
 func (f fakeProcs) MountNS(pid uint32) (uint64, bool) { p, ok := f[pid]; return p.mntns, ok }
-func (f fakeProcs) ExeBytes(pid uint32) []byte        { return []byte(f[pid].bin) }
-func (f fakeProcs) Cgroup(pid uint32) string          { return f[pid].cgroup }
+func (f fakeProcs) ExeString(pid uint32, prefix, stop string) (string, bool) {
+	return scanFor(strings.NewReader(f[pid].bin), []byte(prefix), stop, maxValue)
+}
+func (f fakeProcs) Cgroup(pid uint32) string { return f[pid].cgroup }
 
 const hostNS = 4026531840
 
@@ -101,13 +105,14 @@ func TestNginxDefaultsAndContainerRoot(t *testing.T) {
 		got[0].ID != "nginx/4026531840//etc/nginx/nginx.conf@abc" {
 		t.Fatalf("container nginx = %+v", got)
 	}
-	if c := nginxConf([]string{"nginx: master process nginx -p /opt/n/ -c conf/n.conf"}, func() []byte { return nil }); c != "/opt/n/conf/n.conf" {
+	none := func(string, string) string { return "" }
+	if c := nginxConf([]string{"nginx: master process nginx -p /opt/n/ -c conf/n.conf"}, none); c != "/opt/n/conf/n.conf" {
 		t.Errorf("relative -c = %q", c)
 	}
-	if c := nginxConf(nil, func() []byte { return nil }); c != "/etc/nginx/nginx.conf" {
+	if c := nginxConf(nil, none); c != "/etc/nginx/nginx.conf" {
 		t.Errorf("default = %q", c)
 	}
-	if o := apacheOptions([]string{"/usr/sbin/httpd", "-DFOREGROUND"}, "/usr/sbin/httpd", nil, func() []byte { return nil }); o.MainFile() != "/etc/httpd/conf/httpd.conf" {
+	if o := apacheOptions([]string{"/usr/sbin/httpd", "-DFOREGROUND"}, "/usr/sbin/httpd", nil, none); o.MainFile() != "/etc/httpd/conf/httpd.conf" {
 		t.Errorf("httpd default = %q", o.MainFile())
 	}
 	if KindOf("/usr/local/openresty/nginx/sbin/nginx (deleted)", "") != KindNginx || KindOf("", "caddy") != KindCaddy || KindOf("/bin/sh", "nginx") != "" {
@@ -142,5 +147,20 @@ func TestProcFS(t *testing.T) {
 	}
 	if c := p.Cgroup(42); c != "/system.slice/nginx.service" {
 		t.Errorf("cgroup = %q", c)
+	}
+}
+
+// scanFor finds values across read boundaries and refuses ones without a terminator.
+func TestScanForStreams(t *testing.T) {
+	data := bytes.Repeat([]byte("x"), 70<<10) // the prefix straddles the first 64 KiB read
+	data = append(data, []byte(` -D HTTPD_ROOT="/etc/apache2" more`)...)
+	if v, ok := scanFor(bytes.NewReader(data), []byte(` -D HTTPD_ROOT="`), `"`, 4096); !ok || v != "/etc/apache2" {
+		t.Fatalf("scanFor = %q %v", v, ok)
+	}
+	if _, ok := scanFor(strings.NewReader(`a -D HTTPD_ROOT="unterminated`), []byte(` -D HTTPD_ROOT="`), `"`, 4096); ok {
+		t.Fatal("an unterminated value must not be found")
+	}
+	if v, ok := scanFor(strings.NewReader("args: --prefix=/usr/share/nginx --conf-path=/etc/nginx/nginx.conf\x00"), []byte(" --conf-path="), configureStop, 4096); !ok || v != "/etc/nginx/nginx.conf" {
+		t.Fatalf("value at the end = %q %v", v, ok)
 	}
 }

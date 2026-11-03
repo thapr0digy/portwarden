@@ -32,11 +32,11 @@ func (procs) Exe(pid uint32) string {
 	}
 	return ""
 }
-func (procs) Cmdline(uint32) []string          { return []string{"nginx: master process /usr/sbin/nginx"} }
-func (procs) Environ(uint32) map[string]string { return nil }
-func (procs) MountNS(uint32) (uint64, bool)    { return 7, true }
-func (procs) ExeBytes(uint32) []byte           { return nil }
-func (procs) Cgroup(uint32) string             { return "/system.slice/nginx.service" }
+func (procs) Cmdline(uint32) []string                         { return []string{"nginx: master process /usr/sbin/nginx"} }
+func (procs) Environ(uint32) map[string]string                { return nil }
+func (procs) MountNS(uint32) (uint64, bool)                   { return 7, true }
+func (procs) ExeString(uint32, string, string) (string, bool) { return "", false }
+func (procs) Cgroup(uint32) string                            { return "/system.slice/nginx.service" }
 
 // files is a MemFS the test edits while the mapper reads it.
 type files struct {

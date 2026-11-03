@@ -5,7 +5,6 @@
 package discover
 
 import (
-	"bytes"
 	"path"
 	"slices"
 	"strconv"
@@ -59,8 +58,9 @@ type Procs interface {
 	Environ(pid uint32) map[string]string
 	// MountNS is the inode of the process's mount namespace.
 	MountNS(pid uint32) (uint64, bool)
-	// ExeStrings returns the executable's bytes (bounded), for compiled-in defaults.
-	ExeBytes(pid uint32) []byte
+	// ExeString finds prefix in the executable and returns what follows it up to a byte
+	// of stop (compiled-in defaults).
+	ExeString(pid uint32, prefix, stop string) (string, bool)
 	// Cgroup is the cgroup v2 path ("/system.slice/nginx.service").
 	Cgroup(pid uint32) string
 }
@@ -182,7 +182,8 @@ func isApache(proc model.Process, p Procs) bool {
 	if path.Base(proc.Exe) == "apache2" {
 		return true
 	}
-	return bytes.Contains(p.ExeBytes(proc.PID), []byte(` -D HTTPD_ROOT="`))
+	_, ok := p.ExeString(proc.PID, httpdRoot, `"`)
+	return ok
 }
 
 // masterOf climbs the parent chain while the parent runs the same executable.
@@ -208,12 +209,16 @@ func locate(inst *Instance, master model.Process, p Procs) {
 	if len(args) == 0 {
 		args = p.Cmdline(master.PID)
 	}
+	compiled := func(prefix, stop string) string {
+		v, _ := p.ExeString(master.PID, prefix, stop)
+		return v
+	}
 	switch inst.Kind {
 	case KindNginx:
-		inst.NginxConf = nginxConf(args, func() []byte { return p.ExeBytes(master.PID) })
+		inst.NginxConf = nginxConf(args, compiled)
 		inst.ConfigPath = inst.NginxConf
 	case KindApache:
-		inst.Apache = apacheOptions(args, master.Exe, p.Environ(master.PID), func() []byte { return p.ExeBytes(master.PID) })
+		inst.Apache = apacheOptions(args, master.Exe, p.Environ(master.PID), compiled)
 		inst.ConfigPath = inst.Apache.MainFile()
 	case KindHAProxy:
 		inst.HAProxyFile = haproxyFiles(args)
@@ -232,18 +237,21 @@ func nginxArgs(cmdline []string) []string {
 	return cmdline
 }
 
-func nginxConf(cmdline []string, exe func() []byte) string {
+// compiledFunc returns what follows prefix in the binary, up to a byte of stop ("" when
+// absent).
+type compiledFunc func(prefix, stop string) string
+
+// nginx's configure arguments end at a space (or the string's end).
+const configureStop = " \x00\n"
+
+func nginxConf(cmdline []string, compiled compiledFunc) string {
 	args := nginxArgs(cmdline)
 	conf, prefix := flagValue(args, "-c"), flagValue(args, "-p")
-	var bin []byte
-	if prefix == "" || conf == "" {
-		bin = exe()
-	}
 	if prefix == "" {
-		prefix = compiled(bin, "--prefix=")
+		prefix = compiled(" --prefix=", configureStop)
 	}
 	if conf == "" {
-		conf = compiled(bin, "--conf-path=")
+		conf = compiled(" --conf-path=", configureStop)
 	}
 	if conf == "" {
 		return nginx.DefaultConfPath
@@ -254,7 +262,13 @@ func nginxConf(cmdline []string, exe func() []byte) string {
 	return path.Clean(conf)
 }
 
-func apacheOptions(cmdline []string, exe string, env map[string]string, bin func() []byte) apache.Options {
+// httpd's -V strings, compiled into the binary.
+const (
+	httpdRoot       = ` -D HTTPD_ROOT="`
+	httpdConfigFile = ` -D SERVER_CONFIG_FILE="`
+)
+
+func apacheOptions(cmdline []string, exe string, env map[string]string, compiled compiledFunc) apache.Options {
 	o := apache.Options{Env: env}
 	args := cmdline
 	if len(args) > 0 {
@@ -283,14 +297,11 @@ func apacheOptions(cmdline []string, exe string, env map[string]string, bin func
 			i++ // takes a value
 		}
 	}
-	if o.ServerRoot == "" || o.ConfigFile == "" {
-		b := bin()
-		if o.ServerRoot == "" {
-			o.ServerRoot = quoted(b, ` -D HTTPD_ROOT="`)
-		}
-		if o.ConfigFile == "" {
-			o.ConfigFile = quoted(b, ` -D SERVER_CONFIG_FILE="`)
-		}
+	if o.ServerRoot == "" {
+		o.ServerRoot = compiled(httpdRoot, `"`)
+	}
+	if o.ConfigFile == "" {
+		o.ConfigFile = compiled(httpdConfigFile, `"`)
 	}
 	rhel := path.Base(exe) != "apache2"
 	if o.ServerRoot == "" {
@@ -343,32 +354,4 @@ func flagValue(args []string, flag string) string {
 		}
 	}
 	return v
-}
-
-// compiled finds "<key><value>" in nginx's configure arguments compiled into the binary.
-func compiled(bin []byte, key string) string {
-	i := bytes.Index(bin, []byte(" "+key))
-	if i < 0 {
-		return ""
-	}
-	rest := bin[i+1+len(key):]
-	end := bytes.IndexAny(rest, " \x00\n")
-	if end < 0 {
-		return ""
-	}
-	return string(rest[:end])
-}
-
-// quoted finds `<key>value"` (httpd's -V strings compiled into the binary).
-func quoted(bin []byte, key string) string {
-	i := bytes.Index(bin, []byte(key))
-	if i < 0 {
-		return ""
-	}
-	rest := bin[i+len(key):]
-	end := bytes.IndexByte(rest, '"')
-	if end < 0 || end > 4096 {
-		return ""
-	}
-	return string(rest[:end])
 }

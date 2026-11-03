@@ -43,7 +43,7 @@ PROXY_PORT=8080
 BACKEND_PORT=18081
 BACKEND2_PORT=18082
 PROXY_UNIT=pw-e2e-nginx
-PROXY_WINDOW_S=10
+PROXY_WINDOW_S=25 # route sets of one proxy go out at most once per 10 s
 DOCKER_IMAGE=busybox:1.36
 DOCKER_NAME=pw-e2e
 NFT_TABLE=pw_e2e
@@ -363,10 +363,11 @@ backend() {
 	python3 -m http.server "$1" --bind 127.0.0.1 --directory "$work/www" >/dev/null 2>&1 &
 	pids+=($!)
 }
-# nginx_conf <backend port>: the e2e nginx's whole config.
+# nginx_conf <backend port>: the e2e nginx's whole config, root-owned (the agent reads
+# only config files root owns and only root may write).
 nginx_conf() {
 	mkdir -p "$work/nginx"
-	cat >"$work/nginx/nginx.conf" <<NGINX
+	cat >"$work/nginx/nginx.conf.new" <<NGINX
 pid $work/nginx/nginx.pid;
 error_log $work/nginx/error.log;
 events {}
@@ -383,6 +384,8 @@ http {
 	}
 }
 NGINX
+	sudo install -m 0644 -o root -g root "$work/nginx/nginx.conf.new" "$work/nginx/nginx.conf"
+	rm -f "$work/nginx/nginx.conf.new"
 }
 backend "$BACKEND_PORT"
 wait_for "OPENED tcp 127.0.0.1:$BACKEND_PORT" "$LINE_TIMEOUT_S" seen "OPENED tcp 127.0.0.1:$BACKEND_PORT " 1
@@ -397,7 +400,8 @@ echo "proxy routes: $(grep -m1 -E -- "$config_line" "$work/watch.log" | cut -d' 
 nginx_master=$(grep -m1 -E -- "$config_line" "$work/watch.log" | grep -oE 'PROXY nginx pid=[0-9]+' | tr -dc 0-9)
 codes=$(curl -s -o /dev/null -w '%{http_code}\n' --max-time 30 "http://127.0.0.1:$PROXY_PORT/?[1-20]" | sort | uniq -c)
 [ "$(awk '{print $2}' <<<"$codes")" = "200" ] || fail "requests through nginx: $codes"
-seen_line=$(route_to traffic "$BACKEND_PORT" "pid=[0-9]+ \\S*python3\\S* \\[config,seen\\]")
+# The traffic change may be held back (10 s per proxy) and merged with a recheck.
+seen_line=$(route_to "(traffic|recheck)" "$BACKEND_PORT" "pid=[0-9]+ \\S*python3\\S* \\[config,seen\\]")
 wait_for "the backend seen in traffic" "$PROXY_WINDOW_S" seen "$seen_line" 1
 echo "proxy traffic: $(grep -m1 -E -- "$seen_line" "$work/watch.log" | cut -d' ' -f4-)"
 # Reload with the upstream moved to a port nothing listens on yet.
@@ -412,8 +416,8 @@ backend "$BACKEND2_PORT"
 behind_line="OPENED tcp 127\\.0\\.0\\.1:$BACKEND2_PORT .* behind=nginx:$nginx_master:/\\[config\\]"
 wait_for "the new backend's OPENED behind nginx" "$LINE_TIMEOUT_S" seen "$behind_line" 1
 echo "behind_proxy: $(grep -m1 -E -- "$behind_line" "$work/watch.log" | cut -d' ' -f4-)"
-joined_line=$(route_to listener "$BACKEND2_PORT" "pid=[0-9]+ \\S*python3\\S* \\[config\\]")
-wait_for "proxy.routes joined to the new backend" "$LINE_TIMEOUT_S" seen "$joined_line" 1
+joined_line=$(route_to "[a-z]+" "$BACKEND2_PORT" "pid=[0-9]+ \\S*python3\\S* \\[config\\]")
+wait_for "proxy.routes joined to the new backend" "$PROXY_WINDOW_S" seen "$joined_line" 1
 
 log "socket activation: :22 after a recheck"
 if ! systemctl is-active --quiet ssh.socket; then

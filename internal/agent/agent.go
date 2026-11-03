@@ -421,8 +421,8 @@ func (l *loop) rejoin(listeners []state.Listener) []model.ProxyRoutes {
 			delete(l.pendingRt, id)
 			continue
 		}
-		if held, ok := l.pendingRt[id]; ok && trigger == model.ProxyTriggerListener {
-			trigger = held // keep the more telling reason of a held-back change
+		if held, ok := l.pendingRt[id]; ok {
+			trigger = held // a held-back change keeps the reason it was first held for
 		}
 		if gap := l.opts.ProxyMinInterval; had && now.Sub(l.lastPubAt[id]) < gap {
 			l.pendingRt[id] = trigger

@@ -138,3 +138,27 @@ func TestJudgeNATRangeTooManyPieces(t *testing.T) {
 		t.Fatalf("%v %q", e.Level, e.Evidence)
 	}
 }
+
+// A container that is mapped (and closed on that mapping) in a view whose mapping
+// discovery was truncated: the drop is not presented as decided.
+func TestJudgeMappedContainerWithTruncation(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("*nat\n:PREROUTING ACCEPT [0:0]\n")
+	b.WriteString("-A PREROUTING -p tcp -m tcp --dport 18080 -j DNAT --to-destination 172.17.0.9:80\n")
+	b.WriteString("-A PREROUTING -p tcp -m tcp --dport 20000:29999 -j DNAT --to-destination 172.17.0.2:20000-29999\nCOMMIT\n")
+	b.WriteString("*filter\n:INPUT ACCEPT [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n")
+	for p := 20000; p < 20000+2*300; p += 2 {
+		fmt.Fprintf(&b, "-A FORWARD -p tcp -m tcp --dport %d -j ACCEPT\n", p)
+	}
+	b.WriteString("COMMIT\n")
+	fw, err := Merge(MergeInput{IPT4: []byte(b.String())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := NewView("start", hostNS, fw, nil, vmIfs(), natRangeAddrs)
+	checkJudge(t, v, []state.Listener{lst(4026532709, "tcp", "0.0.0.0", 80, model.Process{PID: 5009})}, map[string]want{
+		"4026532709/tcp/0.0.0.0:80": {model.ExposureBound, []string{
+			"nat: dnat tcp/18080 -> 172.17.0.9:80", "bind:192.168.5.15 (eth0)",
+			"fw:undetermined netns mapping (too many NAT paths)"}},
+	})
+}

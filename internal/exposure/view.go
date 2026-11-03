@@ -51,6 +51,9 @@ type View struct {
 	// Cilium, Swarm ingress, LoadBalancer IPs, DNATs without a port match):
 	// with any of them, an unmapped container listener is undetermined, not local.
 	opaque []string
+	// natTruncated: mapping discovery went past the path bound, so a mapping may be
+	// missing (a container mapped once may be mapped again, more openly).
+	natTruncated bool
 	// unreadable lists what could not be read ("fw:unreadable …"); judgements are then
 	// Degraded.
 	unreadable []string
@@ -179,12 +182,11 @@ func (v *View) init() {
 		AddrCuts: addrCuts(v.ifs),
 	}
 	if v.fw != nil {
-		var truncated bool
-		v.natMaps, truncated = v.findNATMappings()
+		v.natMaps, v.natTruncated = v.findNATMappings()
 		v.natTargets, v.opaque = v.scanNAT()
-		if truncated {
+		if v.natTruncated {
 			// Some mapping may be missing: no unmapped container is provably local.
-			v.opaque = append(v.opaque, "too many NAT paths")
+			v.opaque = append(v.opaque, evTooManyNATPaths)
 		}
 		for _, p := range v.fw.Partial {
 			v.unreadable = append(v.unreadable, "fw:unreadable "+p)
@@ -548,6 +550,9 @@ func (v *View) judgeNetns(l state.Listener, maps []Mapping) model.Exposure {
 		if unreadable != "" {
 			best.Evidence = append(best.Evidence, unreadable)
 		}
+		if v.natTruncated && best.Level < model.ExposureHostFirewallOpen {
+			best = undecidedByTruncation(best)
+		}
 		return best
 	}
 	for _, a := range addrs {
@@ -572,6 +577,23 @@ func (v *View) judgeNetns(l state.Listener, maps []Mapping) model.Exposure {
 		return model.Exposure{Level: model.ExposureBound, Evidence: why}
 	}
 	return model.Exposure{Level: model.ExposureLocal, Evidence: []string{"netns: no host port mapping"}}
+}
+
+const evTooManyNATPaths = "too many NAT paths"
+
+// undecidedByTruncation turns a mapped container's closed verdict into an undetermined
+// one when mapping discovery was cut short: another mapping it did not find may let
+// the outside in. The drop lines go (they decide nothing), the mapping stays.
+func undecidedByTruncation(e model.Exposure) model.Exposure {
+	out := model.Exposure{Level: model.ExposureBound, Degraded: e.Degraded}
+	for _, ev := range e.Evidence {
+		if strings.Contains(ev, ": drop ") || strings.HasPrefix(ev, "restricted by source") {
+			continue
+		}
+		out.Evidence = append(out.Evidence, ev)
+	}
+	out.Evidence = append(out.Evidence, "fw:undetermined netns mapping ("+evTooManyNATPaths+")")
+	return out
 }
 
 // netnsAddrs returns the addresses of a netns, read through one of its holders' /proc

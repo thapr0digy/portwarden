@@ -298,3 +298,25 @@ func TestEvaluateForkBound(t *testing.T) {
 		t.Fatalf("2^12 marked paths must hit the bound: truncated=%v", r.Truncated)
 	}
 }
+
+func TestEvaluateAcceptLocationIsTheLastHook(t *testing.T) {
+	raw := base("raw", HookPrerouting, -300, VerdictAccept)
+	raw.Table = "raw"
+	in := base("input", HookInput, 0, VerdictAccept)
+	r := decide(t, &Ruleset{Chains: []*Chain{raw, in}}, pkt("tcp", 1))
+	if r.Outcomes[0].Where != "policy inet filter input" {
+		t.Fatalf("where %q", r.Outcomes[0].Where)
+	}
+	raw.Rules = []Rule{rule(accept())}
+	in.Rules = nil
+	r = decide(t, &Ruleset{Chains: []*Chain{raw, in}}, pkt("tcp", 1))
+	if r.Outcomes[0].Where != "policy inet filter input" {
+		t.Fatalf("an explicit accept on prerouting is not the input verdict: %q", r.Outcomes[0].Where)
+	}
+	in.Rules = []Rule{rule(accept())}
+	in.Policy = VerdictDrop
+	r = decide(t, &Ruleset{Chains: []*Chain{raw, in}}, pkt("tcp", 1))
+	if r.Outcomes[0].Where != "inet filter input" {
+		t.Fatalf("explicit input accept: %q", r.Outcomes[0].Where)
+	}
+}

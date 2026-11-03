@@ -165,8 +165,10 @@ type pktState struct {
 // state is one path through the rules.
 type state struct {
 	pkt pktState
-	// origin and where: the last filter chain that accepted the packet.
+	// origin and where: the last filter chain that accepted the packet, on hook
+	// whereHook.
 	origin, where string
+	whereHook     Hook
 	// maybe is a sorted, comma-joined list of undecidable expressions on this path.
 	maybe string
 	// lost: a NAT target the model cannot read rewrote the destination.
@@ -208,6 +210,16 @@ type evaluator struct {
 	// base is the base chain being evaluated: regular chains it jumps to take its type
 	// (a dnat in a chain reached from a NAT base chain ends that evaluation).
 	base *Chain
+}
+
+// acceptedBy reports whether a policy accept in c should become the path's accept
+// location: when none is recorded, the recorded one is from an earlier hook, or it was
+// itself a policy. An explicit accept rule on the same hook is kept.
+func (s state) acceptedBy(c *Chain) state {
+	if s.where == "" || s.whereHook != c.Hook || strings.HasPrefix(s.where, "policy ") {
+		s.origin, s.where, s.whereHook = c.Origin, "policy "+c.Where(), c.Hook
+	}
+	return s
 }
 
 // terminal is a path that ended in a chain with a verdict.
@@ -261,8 +273,8 @@ func (e *evaluator) hook(h Hook, in []state) (passed []state, final []Outcome) {
 				final = append(final, s.outcome(false, false))
 				continue
 			}
-			if c.Type != TypeNAT && s.where == "" {
-				s.origin, s.where = c.Origin, "policy "+c.Where()
+			if c.Type != TypeNAT {
+				s = s.acceptedBy(c)
 			}
 			next = append(next, s)
 		}
@@ -381,7 +393,7 @@ func (e *evaluator) verdict(c *Chain, v Verdict, s state, depth int) (terms []te
 		return nil, []state{s}, nil
 	case VerdictAccept:
 		if e.base.Type != TypeNAT {
-			s.origin, s.where = c.Origin, c.Where()
+			s.origin, s.where, s.whereHook = c.Origin, c.Where(), e.base.Hook
 		}
 		return []terminal{{s, VerdictAccept, c}}, nil, nil
 	case VerdictDrop:

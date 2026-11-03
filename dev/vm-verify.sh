@@ -16,9 +16,16 @@
 # the amd64 leg, `make dist` runs in the copy first so the .deb lifecycle check runs; git
 # commands there read this checkout's history (GIT_DIR), not the main checkout's.
 #
+# make dist builds its tools from the Go module cache (dev/dist.sh install_tool), and
+# SOURCE_DATE_EPOCH and COMMIT are taken from this checkout once, at copy time, so a
+# commit made here during the run does not change the packages the copy builds.
+#
 # On exit the copy's logs go to this checkout's .matrix/ and the copy is removed
-# (VMVERIFY_KEEP=1 keeps it). Prints the matrix's per-leg summary; exits non-zero when
-# any leg fails.
+# (VMVERIFY_KEEP=1 keeps it). On any failure the logs are also kept in
+# <root>/.vmverify/logs/<short-sha>-<UTC time>/ (the newest 20 such directories are
+# kept), whose path is printed, and the last 40 lines of each failing log are printed,
+# so a caller that keeps only stdout (Flowryn's verify) still sees why. Prints the
+# matrix's per-leg summary; exits non-zero when any leg fails.
 set -euo pipefail
 # One brace group, read whole before it runs: the checkout under test may be edited (or
 # its branch switched) during the hour this runs, and bash reads a script as it goes.
@@ -81,6 +88,7 @@ mkdir -p "$base"
 # Ignored by itself too, for checkouts whose .gitignore predates .vmverify/.
 [ -f "$base/.gitignore" ] || printf '*\n' >"$base/.gitignore"
 copy=$(mktemp -d "$base/$sha-XXXXXX")
+dist_failed=false
 
 # save_logs: the copy's .matrix logs and summary (not the test binaries or rebuilt
 # packages) into this checkout's .matrix/.
@@ -90,9 +98,64 @@ save_logs() {
 	(cd "$copy/.matrix" && find . -type f \( -name '*.log' -o -name 'summary.txt' \) -print0) |
 		tar -C "$copy/.matrix" --null -T - -cf - | tar -C "$src/.matrix" -xf -
 }
+# failing_logs: the copy's .matrix logs that explain a failure, relative to .matrix:
+# dist.log when make dist failed, each failed check's log per the summary, or every log
+# when there is no summary (the matrix did not finish).
+failing_logs() {
+	local m="$copy/.matrix" leg rest
+	if $dist_failed; then
+		echo dist.log
+		return
+	fi
+	if [ ! -f "$m/summary.txt" ]; then
+		(cd "$m" && find . -type f -name '*.log' | sed 's#^\./##' | sort)
+		return
+	fi
+	while IFS='|' read -r leg _ rest; do
+		leg=${leg// /}
+		case $rest in *FAIL*) ;; *) continue ;; esac
+		case $rest in *itest=FAIL*) echo "$leg/itest.log" ;; esac
+		case $rest in *e2e=FAIL*) echo "$leg/e2e.log" ;; esac
+		case $rest in *tests=FAIL*) echo "$leg/tests.log" ;; esac
+		case $rest in *deb=FAIL*) echo "$leg/dist-upgrade.log"; echo "$leg/deb.log" ;; esac
+		case $rest in *busy*) echo "$leg/vm.log" ;; esac
+	done < <(tail -n +2 "$m/summary.txt")
+}
+
+# keep_failure_logs: copies the copy's logs to <base>/logs/<sha>-<time>/, prints that
+# path and the tail of each failing log, and prunes the log directories to the newest 20.
+keep_failure_logs() {
+	local logs="$base/logs" dir f
+	[ -d "$copy/.matrix" ] || return 0
+	mkdir -p "$logs"
+	dir="$logs/$sha-$(date -u +%Y%m%dT%H%M%SZ)"
+	mkdir "$dir" 2>/dev/null || { dir="$dir-$$"; mkdir "$dir"; }
+	(cd "$copy/.matrix" && find . -type f \( -name '*.log' -o -name 'summary.txt' \) -print0) |
+		tar -C "$copy/.matrix" --null -T - -cf - | tar -C "$dir" -xf -
+	echo "vm-verify: failed; logs kept in $dir"
+	while IFS= read -r f; do
+		[ -f "$dir/$f" ] || continue
+		echo "vm-verify: ---- last 40 lines of $f ----"
+		tail -n 40 "$dir/$f"
+	done < <(failing_logs)
+	echo "vm-verify: ---- end of logs (all of them in $dir) ----"
+	prune_failure_logs "$logs"
+}
+
+# prune_failure_logs <dir>: removes all but the newest VMVERIFY_KEEP_LOGS (20) log dirs.
+prune_failure_logs() {
+	local logs=$1 old
+	(cd "$logs" && ls -1t) | tail -n +"$((${VMVERIFY_KEEP_LOGS:-20} + 1))" | while IFS= read -r old; do
+		[ -n "$old" ] && rm -rf "${logs:?}/${old:?}"
+	done
+}
+
 cleanup() {
 	local status=$?
 	save_logs || { echo "vm-verify: could not copy the logs from $copy/.matrix" >&2; status=1; }
+	if [ "$status" != 0 ] && ! $copy_only; then
+		keep_failure_logs || { echo "vm-verify: could not keep the logs from $copy/.matrix" >&2; }
+	fi
 	if [ "${VMVERIFY_KEEP:-0}" = 1 ] || { $copy_only && [ "$status" = 0 ]; }; then
 		$copy_only || echo "vm-verify: kept the copy at $copy" >&2
 	else
@@ -113,11 +176,18 @@ if $copy_only; then
 fi
 
 export GIT_DIR=$git_dir
+SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+COMMIT=$(git rev-parse HEAD)
+export SOURCE_DATE_EPOCH COMMIT
 mkdir -p "$copy/.matrix"
 case " $legs " in
 *" amd64 "*)
 	echo "vm-verify: make dist in the copy (log: .matrix/dist.log)"
-	make -C "$copy" dist >"$copy/.matrix/dist.log" 2>&1 || { echo "vm-verify: make dist failed (see .matrix/dist.log)" >&2; exit 1; }
+	make -C "$copy" dist >"$copy/.matrix/dist.log" 2>&1 || {
+		dist_failed=true
+		echo "vm-verify: make dist failed (see .matrix/dist.log)" >&2
+		exit 1
+	}
 	;;
 esac
 

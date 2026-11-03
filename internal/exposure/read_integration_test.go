@@ -22,8 +22,10 @@ func TestReadRealFirewall(t *testing.T) {
 	t.Cleanup(func() { _ = exec.Command("nft", "delete", "table", "inet", "pw_itest").Run() })
 	nftCmd(t, "add chain inet pw_itest input { type filter hook input priority 10; policy accept; }")
 	nftCmd(t, "add rule inet pw_itest input tcp dport 18093 drop")
-	nftCmd(t, "add rule inet pw_itest input udp dport 18094 limit rate 1/second accept")
+	nftCmd(t, "add rule inet pw_itest input udp dport 18094 quota 10 mbytes accept")
 	nftCmd(t, "add rule inet pw_itest input udp dport 18094 drop")
+	nftCmd(t, "add rule inet pw_itest input udp dport 18096 limit rate 1/second accept")
+	nftCmd(t, "add rule inet pw_itest input udp dport 18096 drop")
 
 	hostNS, err := baseline.HostNetNS()
 	if err != nil {
@@ -43,16 +45,20 @@ func TestReadRealFirewall(t *testing.T) {
 	key := func(proto string, port uint16) model.ListenerKey {
 		return model.NewKey(hostNS, proto, netip.MustParseAddr("0.0.0.0"), port)
 	}
-	ls := []state.Listener{{Key: key("tcp", 18093)}, {Key: key("udp", 18094)}, {Key: key("tcp", 18095)}}
+	ls := []state.Listener{{Key: key("tcp", 18093)}, {Key: key("udp", 18094)}, {Key: key("tcp", 18095)}, {Key: key("udp", 18096)}}
 	got := v.Judge(ls)
 	if e := got[key("tcp", 18093)]; e.Level != model.ExposureBound || !strings.Contains(strings.Join(e.Evidence, "|"), "nft: drop tcp/18093 from 0/0") {
 		t.Errorf("18093: %+v", e)
 	}
-	if e := got[key("udp", 18094)]; e.Level != model.ExposureBound || !strings.Contains(strings.Join(e.Evidence, "|"), "undetermined udp/18094") {
+	if e := got[key("udp", 18094)]; e.Level != model.ExposureBound || !strings.Contains(strings.Join(e.Evidence, "|"), "fw:undetermined quota (nft: udp/18094") {
 		t.Errorf("18094: %+v", e)
 	}
 	if e := got[key("tcp", 18095)]; e.Level != model.ExposureHostFirewallOpen {
 		t.Errorf("18095: %+v", e)
+	}
+	// A rate limit the first packet passes is open, and says so.
+	if e := got[key("udp", 18096)]; e.Level != model.ExposureHostFirewallOpen || !strings.HasSuffix(strings.Join(e.Evidence, "|"), ", rate-limited") {
+		t.Errorf("18096: %+v", e)
 	}
 
 	// The fingerprint follows the rules, not the counters.

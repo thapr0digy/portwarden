@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -31,6 +33,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/publish"
 	"github.com/thapr0digy/portwarden/internal/sdsocket"
 	"github.com/thapr0digy/portwarden/internal/state"
+	"github.com/thapr0digy/portwarden/internal/tamper"
 )
 
 const (
@@ -51,6 +54,7 @@ const (
 	defaultProxyPoll = 2 * time.Second
 	proxySettle      = 2 * time.Second  // a changed proxy config is read once it held still this long
 	proxyMinGap      = 10 * time.Second // at most one proxy.routes per proxy per this interval
+	defaultTamper    = 30 * time.Second
 )
 
 type options struct {
@@ -63,6 +67,8 @@ type options struct {
 	imds                                                                string
 	proxyMap                                                            string
 	proxyPoll                                                           time.Duration
+	tamperInterval                                                      time.Duration
+	tamperFiles                                                         []string
 }
 
 func parseFlags(args []string) (options, error) {
@@ -84,8 +90,22 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&o.imds, "imds", "auto", "cloud metadata for public IPs: auto (only when DMI says AWS, GCP or Azure) or off")
 	fs.StringVar(&o.proxyMap, "proxy-map", "auto", "map reverse proxies (nginx, Apache, HAProxy configs; observed proxy connections): auto or off")
 	fs.DurationVar(&o.proxyPoll, "proxy-poll", defaultProxyPoll, "how often proxy config files and connection counts are checked")
+	fs.DurationVar(&o.tamperInterval, "tamper-interval", defaultTamper, "interval between tamper self-checks (0 disables them)")
+	tamperFiles := fs.String("tamper-files", "", "comma-separated absolute paths of extra files whose change is a tamper signal (e.g. the NATS credentials)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
+	}
+	if o.tamperInterval < 0 {
+		return o, fmt.Errorf("--tamper-interval must not be negative, got %s", o.tamperInterval)
+	}
+	for _, f := range strings.Split(*tamperFiles, ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		if !filepath.IsAbs(f) {
+			return o, fmt.Errorf("--tamper-files: %q is not an absolute path", f)
+		}
+		o.tamperFiles = append(o.tamperFiles, f)
 	}
 	if o.firewallPoll <= 0 {
 		return o, fmt.Errorf("--firewall-poll must be positive, got %s", o.firewallPoll)
@@ -187,6 +207,14 @@ func run(opts options, log *slog.Logger) error {
 	}
 	hostInfo.SetConditions(initialView.Conditions())
 
+	// Extra watched files are hashed before anything starts: a missing one is a bad flag.
+	var extraFiles *tamper.FileSet
+	if opts.tamperInterval > 0 && len(opts.tamperFiles) > 0 {
+		if extraFiles, err = tamper.NewFileSet("files", tamper.KindFileChanged, tamper.StaticFiles(opts.tamperFiles...)); err != nil {
+			return fmt.Errorf("--tamper-files: %w", err)
+		}
+	}
+
 	// Probes first, so no listener is missed while the baseline is taken.
 	pr, err := probes.Start()
 	if err != nil {
@@ -255,6 +283,15 @@ func run(opts options, log *slog.Logger) error {
 	var proxyConns *probes.ProxyConns
 	if opts.proxyMap == "auto" {
 		proxyConns = startProxyMapping(ctx, opts, hostNetNS, resolver, &agentOpts, log)
+	}
+
+	if opts.tamperInterval > 0 {
+		mon := newTamperMonitor(extraFiles, pr, proxyConns, log)
+		beats.Add(1)
+		go func() {
+			defer beats.Done()
+			tamperLoop(ctx, opts.tamperInterval, mon, pub, log)
+		}()
 	}
 
 	runErr := agent.Run(ctx, pr, baseline.Snapshot, loggingSink{pub, log}, agentOpts)

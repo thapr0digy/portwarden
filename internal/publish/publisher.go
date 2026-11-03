@@ -92,6 +92,10 @@ type Publisher struct {
 	host    model.HostInfo
 	hostSet bool
 
+	// tamper is the last tamper status (SetTamper), carried on heartbeats; nil until the
+	// first pass.
+	tamper *asmv1.TamperStatus
+
 	// usingExistingLogged is touched only by the sender goroutine.
 	usingExistingLogged bool
 
@@ -363,7 +367,8 @@ func (p *Publisher) hostProtoLocked() *asmv1.HostInfo {
 }
 
 // Heartbeat enqueues a liveness message carrying the ring buffer's and the spool's
-// drop counters. dropped_foreign_netns is deprecated and always 0.
+// drop counters and the last tamper status. dropped_foreign_netns is deprecated and
+// always 0.
 func (p *Publisher) Heartbeat(ringbufDrops uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -376,6 +381,7 @@ func (p *Publisher) Heartbeat(ringbufDrops uint64) {
 		At:           timestamppb.Now(),
 		RingbufDrops: ringbufDrops,
 		QueueDrops:   p.q.Dropped(),
+		Tamper:       p.tamperLocked(),
 	})
 }
 

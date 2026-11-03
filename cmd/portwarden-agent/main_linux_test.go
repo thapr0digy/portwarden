@@ -70,3 +70,19 @@ func TestParseFlagsProxy(t *testing.T) {
 		}
 	}
 }
+
+func TestParseFlagsTamper(t *testing.T) {
+	o, err := parseFlags(nil)
+	if err != nil || o.tamperInterval != 30*time.Second || len(o.tamperFiles) != 0 {
+		t.Fatalf("tamper defaults: %+v %v", o, err)
+	}
+	o, err = parseFlags([]string{"--tamper-interval", "0s", "--tamper-files", "/etc/default/portwarden-agent,/etc/portwarden/agent/host.nk"})
+	if err != nil || o.tamperInterval != 0 || len(o.tamperFiles) != 2 || o.tamperFiles[1] != "/etc/portwarden/agent/host.nk" {
+		t.Fatalf("parsed %+v %v", o, err)
+	}
+	for _, args := range [][]string{{"--tamper-interval", "-1s"}, {"--tamper-files", "relative/path"}} {
+		if _, err := parseFlags(args); err == nil {
+			t.Fatalf("%v must be rejected", args)
+		}
+	}
+}

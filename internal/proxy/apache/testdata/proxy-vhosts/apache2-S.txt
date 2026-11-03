@@ -1,0 +1,24 @@
+AH00112: Warning: DocumentRoot [/var/www/app] does not exist
+AH00112: Warning: DocumentRoot [/var/www/static] does not exist
+VirtualHost configuration:
+[::1]:8082             internal.local (/etc/pw-apache/sites-enabled/app.conf:47)
+127.0.0.1:8081         internal.local (/etc/pw-apache/sites-enabled/app.conf:47)
+*:80                   is a NameVirtualHost
+         default server app.example.com (/etc/pw-apache/sites-enabled/app.conf:1)
+         port 80 namevhost app.example.com (/etc/pw-apache/sites-enabled/app.conf:1)
+                 alias www.app.example.com
+         port 80 namevhost static.example.com (/etc/pw-apache/sites-enabled/static.conf:1)
+ServerRoot: "/etc/pw-apache"
+Main DocumentRoot: "/var/www/html"
+Main ErrorLog: "/var/log/apache2/error.log"
+Mutex rewrite-map: using_defaults
+Mutex proxy: using_defaults
+Mutex default: dir="/var/lock/apache2" mechanism=fcntl 
+Mutex watchdog-callback: using_defaults
+Mutex proxy-balancer-shm: using_defaults
+PidFile: "/var/run/apache2/apache2.pid"
+Define: DUMP_VHOSTS
+Define: DUMP_RUN_CFG
+Define: BACKEND=127.0.0.1:8070
+User: name="www-data" id=33
+Group: name="www-data" id=33

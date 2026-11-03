@@ -1,0 +1,129 @@
+# configuration file /etc/pw-multi/nginx.conf:
+# Hand-written: several virtual hosts, an upstream file under conf.d, sites-enabled
+# symlinks, every *_pass kind, nested locations and a stream block.
+user www-data;
+worker_processes 1;
+pid /run/pw-multi.pid;
+load_module /usr/lib/nginx/modules/ngx_stream_module.so;
+
+events {
+	worker_connections 64;
+}
+
+http {
+	include /etc/pw-multi/conf.d/*.conf;
+	include sites-enabled/*;
+}
+
+stream {
+	upstream pg {
+		server 127.0.0.1:5432;
+		server 10.0.0.9:5432 backup;
+	}
+	server {
+		listen 15432;
+		proxy_pass pg;
+	}
+	server {
+		listen 127.0.0.1:1053 udp;
+		proxy_pass 127.0.0.53:53;
+	}
+}
+
+# configuration file /etc/pw-multi/conf.d/upstreams.conf:
+upstream app {
+	server 127.0.0.1:8000 weight=3;
+	server 127.0.0.1:8001 backup;
+	server unix:/run/app.sock;
+	keepalive 16;
+}
+
+upstream api_v2 {
+	server [::1]:9002;
+	server localhost:9003 down;
+}
+
+# configuration file /etc/pw-multi/sites-enabled/api.conf:
+server {
+	listen 80;
+	listen [::]:80;
+	server_name api.example.com api2.example.com;
+	root /var/www/api;
+
+	location / {
+		proxy_pass http://app;
+		proxy_set_header Host $host;
+		add_header X-Note "a;b{c}#d"; # quoted ; { } and # are not syntax
+	}
+
+	location /v2/ {
+		proxy_pass http://api_v2/;
+	}
+
+	location = /admin {
+		proxy_pass http://127.0.0.1:9000/admin;
+	}
+
+	# a comment with a { brace
+	location ~ \.php$ {
+		include fastcgi_params;
+		fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+	}
+
+	location /grpc {
+		grpc_pass grpc://127.0.0.1:50051;
+	}
+
+	location /py {
+		include uwsgi_params;
+		uwsgi_pass 127.0.0.1:3031;
+	}
+
+	location /scgi {
+		scgi_pass 127.0.0.1:4000;
+	}
+
+	location /cache {
+		set $memcached_key "$uri?$args";
+		memcached_pass 127.0.0.1:11211;
+	}
+
+	location /static/ {
+		alias /srv/static/;
+	}
+
+	location /api {
+		location /api/internal {
+			proxy_pass http://127.0.0.1:7000;
+		}
+		proxy_pass http://localhost:7001;
+	}
+}
+
+# configuration file /etc/pw-multi/fastcgi_params:
+fastcgi_param  QUERY_STRING       $query_string;
+fastcgi_param  SCRIPT_FILENAME    $document_root$fastcgi_script_name;
+
+# configuration file /etc/pw-multi/uwsgi_params:
+uwsgi_param  QUERY_STRING       $query_string;
+
+# configuration file /etc/pw-multi/sites-enabled/tls.conf:
+server {
+	listen 443 ssl default_server;
+	listen [::]:443 ssl default_server;
+	server_name _;
+	ssl_certificate /etc/ssl/certs/ssl-cert-snakeoil.pem;
+	ssl_certificate_key /etc/ssl/private/ssl-cert-snakeoil.key;
+	return 444;
+}
+
+server {
+	listen 127.0.0.1:8081;
+	server_name internal.local;
+
+	location / {
+		root /var/www/internal;
+		index index.html;
+	}
+}
+

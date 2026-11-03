@@ -17,6 +17,12 @@
 #      SKIP when docker or the busybox image is unavailable.
 #   8. spool: with nats-server down, a listener opened on :8095 survives an agent restart in
 #      the spool and reaches a fresh watcher (--since 5m) with its original time.
+#   9. proxy: an nginx (its own transient unit) proxying :8080 to a backend on 127.0.0.1:18081
+#      gives a proxy.routes event naming the backend program with [config]; real requests
+#      through it make the backend [config,seen]; a reload with the upstream changed to
+#      :18082 updates the routes; the backend that then opens on :18082 carries
+#      behind=nginx:<pid>:/ on its OPENED. In the efficiency step the connect hook must not
+#      run for the 10 000 non-proxy connections, and must run for requests through nginx.
 # Self-contained: it builds its own binaries, runs its own nats-server on a private port
 # and store, runs its agent with its own spool directory, stops the portwarden-agent
 # systemd unit while it runs (it would share the BPF programs' run counters) and puts
@@ -33,6 +39,11 @@ SPOOL_PORT=8095
 MARKER_PORT=8094
 EXPOSURE_PORT=8093
 DOCKER_HOST_PORT=18090
+PROXY_PORT=8080
+BACKEND_PORT=18081
+BACKEND2_PORT=18082
+PROXY_UNIT=pw-e2e-nginx
+PROXY_WINDOW_S=25 # route sets of one proxy go out at most once per 10 s
 DOCKER_IMAGE=busybox:1.36
 DOCKER_NAME=pw-e2e
 NFT_TABLE=pw_e2e
@@ -44,7 +55,7 @@ MAX_LATENCY_MS=1000
 LINE_TIMEOUT_S=5
 RESTART_WINDOW_S=3
 RECHECK_S=10
-REQUIRED_PROGS=(on_listen on_stop on_udp_bind on_udp_unhash) # the probes must be among the agent's programs
+REQUIRED_PROGS=(on_listen on_stop on_udp_bind on_udp_unhash on_connect4 on_connect6) # the probes must be among the agent's programs
 
 work=$(mktemp -d)
 nats_url="nats://127.0.0.1:$NATS_PORT"
@@ -77,6 +88,7 @@ cleanup() {
 	fi
 	sudo pkill -TERM -f "http.server --bind 127.0.0.1 $NETNS_PORT" 2>/dev/null || true
 	sudo systemctl stop "$RESTART_UNIT" 2>/dev/null || true
+	sudo systemctl stop "$PROXY_UNIT" 2>/dev/null || true
 	sudo nft delete table inet "$NFT_TABLE" 2>/dev/null || true
 	$docker_rule && sudo iptables -D DOCKER-USER -p tcp --dport 80 -j DROP 2>/dev/null || true
 	$docker_started && sudo docker rm -f "$DOCKER_NAME" >/dev/null 2>&1 || true
@@ -200,14 +212,17 @@ signal.pause()' "$1" &
 	pids+=($!)
 }
 
-for port in "$SERVER_PORT" "$RESTART_PORT" "$NETNS_PORT" "$SPOOL_PORT" "$EXPOSURE_PORT" "$DOCKER_HOST_PORT"; do
+for port in "$SERVER_PORT" "$RESTART_PORT" "$NETNS_PORT" "$SPOOL_PORT" "$EXPOSURE_PORT" "$DOCKER_HOST_PORT" \
+	"$PROXY_PORT" "$BACKEND_PORT" "$BACKEND2_PORT"; do
 	ss -Hltn "sport = :$port" | grep -q . && fail "tcp port $port is already in use"
 done
 for port in "$UDP_PORT" "$MARKER_PORT"; do
 	ss -Hlun "sport = :$port" | grep -q . && fail "udp port $port is already in use"
 done
-systemctl is-active --quiet "$RESTART_UNIT" && fail "unit $RESTART_UNIT is already running"
-sudo systemctl reset-failed "$RESTART_UNIT" 2>/dev/null || true
+for unit in "$RESTART_UNIT" "$PROXY_UNIT"; do
+	systemctl is-active --quiet "$unit" && fail "unit $unit is already running"
+	sudo systemctl reset-failed "$unit" 2>/dev/null || true
+done
 mkdir -p "$work/www"
 
 log "building"
@@ -341,6 +356,69 @@ else
 	docker_started=false
 fi
 
+log "proxy: nginx ($PROXY_UNIT) on :$PROXY_PORT -> 127.0.0.1:$BACKEND_PORT"
+command -v nginx >/dev/null || fail "nginx is not installed (apt-get install nginx)"
+# backend <port>: a python http.server on 127.0.0.1:<port>.
+backend() {
+	python3 -m http.server "$1" --bind 127.0.0.1 --directory "$work/www" >/dev/null 2>&1 &
+	pids+=($!)
+}
+# nginx_conf <backend port>: the e2e nginx's whole config, root-owned (the agent reads
+# only config files root owns and only root may write).
+nginx_conf() {
+	mkdir -p "$work/nginx"
+	cat >"$work/nginx/nginx.conf.new" <<NGINX
+pid $work/nginx/nginx.pid;
+error_log $work/nginx/error.log;
+events {}
+http {
+	access_log off;
+	upstream app {
+		server 127.0.0.1:$1;
+	}
+	server {
+		listen $PROXY_PORT;
+		location / {
+			proxy_pass http://app;
+		}
+	}
+}
+NGINX
+	sudo install -m 0644 -o root -g root "$work/nginx/nginx.conf.new" "$work/nginx/nginx.conf"
+	rm -f "$work/nginx/nginx.conf.new"
+}
+backend "$BACKEND_PORT"
+wait_for "OPENED tcp 127.0.0.1:$BACKEND_PORT" "$LINE_TIMEOUT_S" seen "OPENED tcp 127.0.0.1:$BACKEND_PORT " 1
+nginx_conf "$BACKEND_PORT"
+sudo systemd-run --quiet --unit "$PROXY_UNIT" -p Restart=no /usr/sbin/nginx -c "$work/nginx/nginx.conf" -g "daemon off;"
+# route_to <trigger> <backend port> <backend suffix regex>: a PROXY line with that trigger
+# whose :8080 / route ends at the backend.
+route_to() { echo "PROXY nginx pid=[0-9]+ \\S+ trigger=$1 routes=[0-9]+ .*\\| \\*:$PROXY_PORT / proxy -> 127\\.0\\.0\\.1:$2 $3"; }
+config_line=$(route_to started "$BACKEND_PORT" "pid=[0-9]+ \\S*python3\\S* \\[config\\]")
+wait_for "proxy.routes naming the backend [config]" "$PROXY_WINDOW_S" seen "$config_line" 1
+echo "proxy routes: $(grep -m1 -E -- "$config_line" "$work/watch.log" | cut -d' ' -f4-)"
+nginx_master=$(grep -m1 -E -- "$config_line" "$work/watch.log" | grep -oE 'PROXY nginx pid=[0-9]+' | tr -dc 0-9)
+codes=$(curl -s -o /dev/null -w '%{http_code}\n' --max-time 30 "http://127.0.0.1:$PROXY_PORT/?[1-20]" | sort | uniq -c)
+[ "$(awk '{print $2}' <<<"$codes")" = "200" ] || fail "requests through nginx: $codes"
+# The traffic change may be held back (10 s per proxy) and merged with a recheck.
+seen_line=$(route_to "(traffic|recheck)" "$BACKEND_PORT" "pid=[0-9]+ \\S*python3\\S* \\[config,seen\\]")
+wait_for "the backend seen in traffic" "$PROXY_WINDOW_S" seen "$seen_line" 1
+echo "proxy traffic: $(grep -m1 -E -- "$seen_line" "$work/watch.log" | cut -d' ' -f4-)"
+# Reload with the upstream moved to a port nothing listens on yet.
+nginx_conf "$BACKEND2_PORT"
+t0=$(now_ns)
+sudo /usr/sbin/nginx -c "$work/nginx/nginx.conf" -s reload
+# A recheck that comes due first re-reads it too (trigger=recheck).
+reload_line=$(route_to "(config|recheck)" "$BACKEND2_PORT" "\\[config\\] \\(no listener\\)")
+wait_for "proxy.routes after the reload" "$PROXY_WINDOW_S" seen "$reload_line" 1
+echo "proxy reload: $(((($(now_ns) - t0)) / 1000000)) ms ($(grep -m1 -E -- "$reload_line" "$work/watch.log" | cut -d' ' -f4-))"
+backend "$BACKEND2_PORT"
+behind_line="OPENED tcp 127\\.0\\.0\\.1:$BACKEND2_PORT .* behind=nginx:$nginx_master:/\\[config\\]"
+wait_for "the new backend's OPENED behind nginx" "$LINE_TIMEOUT_S" seen "$behind_line" 1
+echo "behind_proxy: $(grep -m1 -E -- "$behind_line" "$work/watch.log" | cut -d' ' -f4-)"
+joined_line=$(route_to "[a-z]+" "$BACKEND2_PORT" "pid=[0-9]+ \\S*python3\\S* \\[config\\]")
+wait_for "proxy.routes joined to the new backend" "$PROXY_WINDOW_S" seen "$joined_line" 1
+
 log "socket activation: :22 after a recheck"
 if ! systemctl is-active --quiet ssh.socket; then
 	echo "socket activation: SKIP (ssh.socket is not active)"
@@ -389,6 +467,17 @@ runs_after=$(agent_runs)
 stop_server
 
 print_deltas "$runs_before" "$runs_after"
+read -r c4 _ < <(run_delta "$runs_before" "$runs_after" on_connect4)
+read -r c6 _ < <(run_delta "$runs_before" "$runs_after" on_connect6)
+echo "connect hook runs for $CONNECTIONS non-proxy connections: $((c4 + c6))"
+[ "$((c4 + c6))" -eq 0 ] || fail "the proxy connect hook ran $((c4 + c6)) times for non-proxy connections"
+# Control: requests through nginx run it (one upstream connect per request).
+proxy_runs_before=$(agent_runs)
+curl -s -o /dev/null --max-time 30 "http://127.0.0.1:$PROXY_PORT/?[1-50]"
+proxy_runs_after=$(agent_runs)
+read -r c4 _ < <(run_delta "$proxy_runs_before" "$proxy_runs_after" on_connect4)
+[ "$c4" -ge 50 ] || fail "connect hook control: on_connect4 ran $c4 times for 50 requests through nginx"
+echo "connect hook runs for 50 requests through nginx: $c4"
 # Only the TCP probes count: background UDP (resolved, NTP) may run the UDP hooks meanwhile.
 read -r listen_runs _ < <(run_delta "$runs_before" "$runs_after" on_listen)
 read -r stop_runs _ < <(run_delta "$runs_before" "$runs_after" on_stop)

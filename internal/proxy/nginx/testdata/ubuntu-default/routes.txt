@@ -1,0 +1,2 @@
+*:80,[::]:80 names=_ path="/" static "/var/www/html" root=/var/www/html
+    @ /etc/nginx/sites-enabled/default:48

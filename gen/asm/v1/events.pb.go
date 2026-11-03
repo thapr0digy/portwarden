@@ -452,7 +452,9 @@ type ListenerEvent struct {
 	// The listener's exposure when the event was published (on CLOSED: its last one).
 	Exposure *Exposure `protobuf:"bytes,11,opt,name=exposure,proto3" json:"exposure,omitempty"`
 	// The host's public-IP candidates and cloud identity at publish time.
-	Host          *HostInfo `protobuf:"bytes,12,opt,name=host,proto3" json:"host,omitempty"`
+	Host *HostInfo `protobuf:"bytes,12,opt,name=host,proto3" json:"host,omitempty"`
+	// The proxy routes that end at this listener (it is their backend), at publish time.
+	BehindProxy   []*ProxyRef `protobuf:"bytes,13,rep,name=behind_proxy,json=behindProxy,proto3" json:"behind_proxy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -571,11 +573,19 @@ func (x *ListenerEvent) GetHost() *HostInfo {
 	return nil
 }
 
+func (x *ListenerEvent) GetBehindProxy() []*ProxyRef {
+	if x != nil {
+		return x.BehindProxy
+	}
+	return nil
+}
+
 type ListenerState struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Listener      *Listener              `protobuf:"bytes,1,opt,name=listener,proto3" json:"listener,omitempty"`
 	Processes     []*Process             `protobuf:"bytes,2,rep,name=processes,proto3" json:"processes,omitempty"`
 	Exposure      *Exposure              `protobuf:"bytes,3,opt,name=exposure,proto3" json:"exposure,omitempty"`
+	BehindProxy   []*ProxyRef            `protobuf:"bytes,4,rep,name=behind_proxy,json=behindProxy,proto3" json:"behind_proxy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -631,15 +641,24 @@ func (x *ListenerState) GetExposure() *Exposure {
 	return nil
 }
 
+func (x *ListenerState) GetBehindProxy() []*ProxyRef {
+	if x != nil {
+		return x.BehindProxy
+	}
+	return nil
+}
+
 type Snapshot struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
-	HostId        string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
-	RunId         string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	Seq           uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
-	TakenAt       *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=taken_at,json=takenAt,proto3" json:"taken_at,omitempty"`
-	Listeners     []*ListenerState       `protobuf:"bytes,6,rep,name=listeners,proto3" json:"listeners,omitempty"`
-	Host          *HostInfo              `protobuf:"bytes,7,opt,name=host,proto3" json:"host,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	EventId   string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	HostId    string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	RunId     string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	Seq       uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
+	TakenAt   *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=taken_at,json=takenAt,proto3" json:"taken_at,omitempty"`
+	Listeners []*ListenerState       `protobuf:"bytes,6,rep,name=listeners,proto3" json:"listeners,omitempty"`
+	Host      *HostInfo              `protobuf:"bytes,7,opt,name=host,proto3" json:"host,omitempty"`
+	// Every known proxy with its full route set.
+	Proxies       []*ProxyState `protobuf:"bytes,8,rep,name=proxies,proto3" json:"proxies,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -719,6 +738,13 @@ func (x *Snapshot) GetListeners() []*ListenerState {
 func (x *Snapshot) GetHost() *HostInfo {
 	if x != nil {
 		return x.Host
+	}
+	return nil
+}
+
+func (x *Snapshot) GetProxies() []*ProxyState {
+	if x != nil {
+		return x.Proxies
 	}
 	return nil
 }
@@ -1246,6 +1272,711 @@ func (x *HostEvent) GetPrevious() *HostInfo {
 	return nil
 }
 
+// Proxy is a reverse proxy instance (nginx, Apache, HAProxy, or an observed-only kind).
+type Proxy struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Stable across reloads and restarts: <kind>/<netns>/<config path or exe>.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// nginx, apache, haproxy, caddy, envoy, traefik.
+	Kind string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	// The master (the root of the proxy's process tree) first, then the other holders.
+	Processes []*Process `protobuf:"bytes,3,rep,name=processes,proto3" json:"processes,omitempty"`
+	// The proxy's own listeners.
+	Listeners []*Listener `protobuf:"bytes,4,rep,name=listeners,proto3" json:"listeners,omitempty"`
+	// The main configuration file ("" for observed-only kinds).
+	ConfigPath string `protobuf:"bytes,5,opt,name=config_path,json=configPath,proto3" json:"config_path,omitempty"`
+	// Every configuration file read, in include order.
+	ConfigFiles []string `protobuf:"bytes,6,rep,name=config_files,json=configFiles,proto3" json:"config_files,omitempty"`
+	// What could not be read or followed, e.g. "unreadable /etc/nginx/x.conf: permission denied".
+	Notes []string `protobuf:"bytes,7,rep,name=notes,proto3" json:"notes,omitempty"`
+	// How many processes the proxy has; processes lists the master and at most 15 others.
+	ProcessCount  uint32 `protobuf:"varint,8,opt,name=process_count,json=processCount,proto3" json:"process_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Proxy) Reset() {
+	*x = Proxy{}
+	mi := &file_asm_v1_events_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Proxy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Proxy) ProtoMessage() {}
+
+func (x *Proxy) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Proxy.ProtoReflect.Descriptor instead.
+func (*Proxy) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *Proxy) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Proxy) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *Proxy) GetProcesses() []*Process {
+	if x != nil {
+		return x.Processes
+	}
+	return nil
+}
+
+func (x *Proxy) GetListeners() []*Listener {
+	if x != nil {
+		return x.Listeners
+	}
+	return nil
+}
+
+func (x *Proxy) GetConfigPath() string {
+	if x != nil {
+		return x.ConfigPath
+	}
+	return ""
+}
+
+func (x *Proxy) GetConfigFiles() []string {
+	if x != nil {
+		return x.ConfigFiles
+	}
+	return nil
+}
+
+func (x *Proxy) GetNotes() []string {
+	if x != nil {
+		return x.Notes
+	}
+	return nil
+}
+
+func (x *Proxy) GetProcessCount() uint32 {
+	if x != nil {
+		return x.ProcessCount
+	}
+	return 0
+}
+
+// ProxyBackend is one place a route sends traffic to.
+type ProxyBackend struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// As written in the config ("127.0.0.1:8000", "unix:/run/php/php-fpm.sock", "app:8000",
+	// "$backend"), or the observed destination of an inferred backend.
+	Address string `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
+	// The resolved destination (empty when unresolved or a Unix socket).
+	Ip   string `protobuf:"bytes,2,opt,name=ip,proto3" json:"ip,omitempty"`
+	Port uint32 `protobuf:"varint,3,opt,name=port,proto3" json:"port,omitempty"`
+	// The Unix socket path, for a Unix-socket backend.
+	UnixPath string `protobuf:"bytes,4,opt,name=unix_path,json=unixPath,proto3" json:"unix_path,omitempty"`
+	// The listener this backend ends at, and its holders, when one matches.
+	Listener  *Listener  `protobuf:"bytes,5,opt,name=listener,proto3" json:"listener,omitempty"`
+	Processes []*Process `protobuf:"bytes,6,rep,name=processes,proto3" json:"processes,omitempty"`
+	// config: named in the configuration. seen: the proxy connected to it (observed
+	// connections). A backend seen but not configured is inferred.
+	Config      bool                   `protobuf:"varint,7,opt,name=config,proto3" json:"config,omitempty"`
+	Seen        bool                   `protobuf:"varint,8,opt,name=seen,proto3" json:"seen,omitempty"`
+	Connections uint64                 `protobuf:"varint,9,opt,name=connections,proto3" json:"connections,omitempty"`
+	LastSeen    *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
+	// Why it is not resolved or joined, e.g. "unresolved: variable $host", "no listener".
+	Note          string `protobuf:"bytes,11,opt,name=note,proto3" json:"note,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProxyBackend) Reset() {
+	*x = ProxyBackend{}
+	mi := &file_asm_v1_events_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProxyBackend) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProxyBackend) ProtoMessage() {}
+
+func (x *ProxyBackend) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProxyBackend.ProtoReflect.Descriptor instead.
+func (*ProxyBackend) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ProxyBackend) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *ProxyBackend) GetIp() string {
+	if x != nil {
+		return x.Ip
+	}
+	return ""
+}
+
+func (x *ProxyBackend) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+func (x *ProxyBackend) GetUnixPath() string {
+	if x != nil {
+		return x.UnixPath
+	}
+	return ""
+}
+
+func (x *ProxyBackend) GetListener() *Listener {
+	if x != nil {
+		return x.Listener
+	}
+	return nil
+}
+
+func (x *ProxyBackend) GetProcesses() []*Process {
+	if x != nil {
+		return x.Processes
+	}
+	return nil
+}
+
+func (x *ProxyBackend) GetConfig() bool {
+	if x != nil {
+		return x.Config
+	}
+	return false
+}
+
+func (x *ProxyBackend) GetSeen() bool {
+	if x != nil {
+		return x.Seen
+	}
+	return false
+}
+
+func (x *ProxyBackend) GetConnections() uint64 {
+	if x != nil {
+		return x.Connections
+	}
+	return 0
+}
+
+func (x *ProxyBackend) GetLastSeen() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastSeen
+	}
+	return nil
+}
+
+func (x *ProxyBackend) GetNote() string {
+	if x != nil {
+		return x.Note
+	}
+	return ""
+}
+
+// ProxyRoute is one routing rule: frontend (listen, names, path) to backends.
+type ProxyRoute struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Listen addresses as configured, normalised ("0.0.0.0:443", "[::]:443", "*:80").
+	Listen []string `protobuf:"bytes,1,rep,name=listen,proto3" json:"listen,omitempty"`
+	// The proxy's listeners this route is served on.
+	Frontends   []*Listener `protobuf:"bytes,2,rep,name=frontends,proto3" json:"frontends,omitempty"`
+	ServerNames []string    `protobuf:"bytes,3,rep,name=server_names,json=serverNames,proto3" json:"server_names,omitempty"`
+	// location / ProxyPass path / HAProxy use_backend condition.
+	Path string `protobuf:"bytes,4,opt,name=path,proto3" json:"path,omitempty"`
+	// proxy, fastcgi, uwsgi, scgi, grpc, memcached, static, return.
+	Kind string `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
+	// The target as written (proxy_pass argument, ProxyPass URL, backend name).
+	Target string `protobuf:"bytes,6,opt,name=target,proto3" json:"target,omitempty"`
+	// The upstream / balancer / HAProxy backend name, when the target names one.
+	Upstream string `protobuf:"bytes,7,opt,name=upstream,proto3" json:"upstream,omitempty"`
+	// The document root, for static routes.
+	Root string `protobuf:"bytes,8,opt,name=root,proto3" json:"root,omitempty"`
+	// file:line of the directive.
+	Source string `protobuf:"bytes,9,opt,name=source,proto3" json:"source,omitempty"`
+	// true when the route comes from observed connections only (not in the config).
+	Inferred      bool            `protobuf:"varint,10,opt,name=inferred,proto3" json:"inferred,omitempty"`
+	Notes         []string        `protobuf:"bytes,11,rep,name=notes,proto3" json:"notes,omitempty"`
+	Backends      []*ProxyBackend `protobuf:"bytes,12,rep,name=backends,proto3" json:"backends,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProxyRoute) Reset() {
+	*x = ProxyRoute{}
+	mi := &file_asm_v1_events_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProxyRoute) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProxyRoute) ProtoMessage() {}
+
+func (x *ProxyRoute) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProxyRoute.ProtoReflect.Descriptor instead.
+func (*ProxyRoute) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ProxyRoute) GetListen() []string {
+	if x != nil {
+		return x.Listen
+	}
+	return nil
+}
+
+func (x *ProxyRoute) GetFrontends() []*Listener {
+	if x != nil {
+		return x.Frontends
+	}
+	return nil
+}
+
+func (x *ProxyRoute) GetServerNames() []string {
+	if x != nil {
+		return x.ServerNames
+	}
+	return nil
+}
+
+func (x *ProxyRoute) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ProxyRoute) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ProxyRoute) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *ProxyRoute) GetUpstream() string {
+	if x != nil {
+		return x.Upstream
+	}
+	return ""
+}
+
+func (x *ProxyRoute) GetRoot() string {
+	if x != nil {
+		return x.Root
+	}
+	return ""
+}
+
+func (x *ProxyRoute) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *ProxyRoute) GetInferred() bool {
+	if x != nil {
+		return x.Inferred
+	}
+	return false
+}
+
+func (x *ProxyRoute) GetNotes() []string {
+	if x != nil {
+		return x.Notes
+	}
+	return nil
+}
+
+func (x *ProxyRoute) GetBackends() []*ProxyBackend {
+	if x != nil {
+		return x.Backends
+	}
+	return nil
+}
+
+// ProxyState is a proxy as carried in snapshots: its routes are not repeated there (a
+// snapshot must stay small); route_count and routes_digest identify its current route
+// set, which follows the snapshot as a proxy.routes event (trigger=snapshot).
+type ProxyState struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Proxy *Proxy                 `protobuf:"bytes,1,opt,name=proxy,proto3" json:"proxy,omitempty"`
+	// Unused in snapshots since the M4 fix wave (always empty).
+	Routes     []*ProxyRoute `protobuf:"bytes,2,rep,name=routes,proto3" json:"routes,omitempty"`
+	RouteCount uint32        `protobuf:"varint,3,opt,name=route_count,json=routeCount,proto3" json:"route_count,omitempty"`
+	// Hex SHA-256 (first 16 bytes) of the deterministic encoding of the routes.
+	RoutesDigest  string `protobuf:"bytes,4,opt,name=routes_digest,json=routesDigest,proto3" json:"routes_digest,omitempty"`
+	Truncated     bool   `protobuf:"varint,5,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProxyState) Reset() {
+	*x = ProxyState{}
+	mi := &file_asm_v1_events_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProxyState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProxyState) ProtoMessage() {}
+
+func (x *ProxyState) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProxyState.ProtoReflect.Descriptor instead.
+func (*ProxyState) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ProxyState) GetProxy() *Proxy {
+	if x != nil {
+		return x.Proxy
+	}
+	return nil
+}
+
+func (x *ProxyState) GetRoutes() []*ProxyRoute {
+	if x != nil {
+		return x.Routes
+	}
+	return nil
+}
+
+func (x *ProxyState) GetRouteCount() uint32 {
+	if x != nil {
+		return x.RouteCount
+	}
+	return 0
+}
+
+func (x *ProxyState) GetRoutesDigest() string {
+	if x != nil {
+		return x.RoutesDigest
+	}
+	return ""
+}
+
+func (x *ProxyState) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+// ProxyRoutes is published on asm.<host>.proxy.routes with a proxy's full route set
+// whenever it changes (config, reload, restart, a backend listener, newly seen traffic),
+// and with removed=true when the proxy is gone.
+type ProxyRoutes struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	EventId    string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	HostId     string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	RunId      string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	Seq        uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
+	ObservedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	Proxy      *Proxy                 `protobuf:"bytes,6,opt,name=proxy,proto3" json:"proxy,omitempty"`
+	Routes     []*ProxyRoute          `protobuf:"bytes,7,rep,name=routes,proto3" json:"routes,omitempty"`
+	// started, config, listener, traffic, recheck, stopped.
+	Trigger string    `protobuf:"bytes,8,opt,name=trigger,proto3" json:"trigger,omitempty"`
+	Removed bool      `protobuf:"varint,9,opt,name=removed,proto3" json:"removed,omitempty"`
+	Host    *HostInfo `protobuf:"bytes,10,opt,name=host,proto3" json:"host,omitempty"`
+	// The route set was cut to stay under the size limits (500 routes, half the server's
+	// max_payload): routes holds the first ones in order, total_routes how many there are.
+	Truncated     bool   `protobuf:"varint,11,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	TotalRoutes   uint32 `protobuf:"varint,12,opt,name=total_routes,json=totalRoutes,proto3" json:"total_routes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProxyRoutes) Reset() {
+	*x = ProxyRoutes{}
+	mi := &file_asm_v1_events_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProxyRoutes) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProxyRoutes) ProtoMessage() {}
+
+func (x *ProxyRoutes) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProxyRoutes.ProtoReflect.Descriptor instead.
+func (*ProxyRoutes) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ProxyRoutes) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *ProxyRoutes) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *ProxyRoutes) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ProxyRoutes) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *ProxyRoutes) GetObservedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ObservedAt
+	}
+	return nil
+}
+
+func (x *ProxyRoutes) GetProxy() *Proxy {
+	if x != nil {
+		return x.Proxy
+	}
+	return nil
+}
+
+func (x *ProxyRoutes) GetRoutes() []*ProxyRoute {
+	if x != nil {
+		return x.Routes
+	}
+	return nil
+}
+
+func (x *ProxyRoutes) GetTrigger() string {
+	if x != nil {
+		return x.Trigger
+	}
+	return ""
+}
+
+func (x *ProxyRoutes) GetRemoved() bool {
+	if x != nil {
+		return x.Removed
+	}
+	return false
+}
+
+func (x *ProxyRoutes) GetHost() *HostInfo {
+	if x != nil {
+		return x.Host
+	}
+	return nil
+}
+
+func (x *ProxyRoutes) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+func (x *ProxyRoutes) GetTotalRoutes() uint32 {
+	if x != nil {
+		return x.TotalRoutes
+	}
+	return 0
+}
+
+// ProxyRef names a proxy route that ends at a listener (on the backend's events).
+type ProxyRef struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	ProxyId string                 `protobuf:"bytes,1,opt,name=proxy_id,json=proxyId,proto3" json:"proxy_id,omitempty"`
+	Kind    string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	// The proxy's master process.
+	Proxy         *Process    `protobuf:"bytes,3,opt,name=proxy,proto3" json:"proxy,omitempty"`
+	Frontends     []*Listener `protobuf:"bytes,4,rep,name=frontends,proto3" json:"frontends,omitempty"`
+	ServerNames   []string    `protobuf:"bytes,5,rep,name=server_names,json=serverNames,proto3" json:"server_names,omitempty"`
+	Path          string      `protobuf:"bytes,6,opt,name=path,proto3" json:"path,omitempty"`
+	Config        bool        `protobuf:"varint,7,opt,name=config,proto3" json:"config,omitempty"`
+	Seen          bool        `protobuf:"varint,8,opt,name=seen,proto3" json:"seen,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProxyRef) Reset() {
+	*x = ProxyRef{}
+	mi := &file_asm_v1_events_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProxyRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProxyRef) ProtoMessage() {}
+
+func (x *ProxyRef) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProxyRef.ProtoReflect.Descriptor instead.
+func (*ProxyRef) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ProxyRef) GetProxyId() string {
+	if x != nil {
+		return x.ProxyId
+	}
+	return ""
+}
+
+func (x *ProxyRef) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ProxyRef) GetProxy() *Process {
+	if x != nil {
+		return x.Proxy
+	}
+	return nil
+}
+
+func (x *ProxyRef) GetFrontends() []*Listener {
+	if x != nil {
+		return x.Frontends
+	}
+	return nil
+}
+
+func (x *ProxyRef) GetServerNames() []string {
+	if x != nil {
+		return x.ServerNames
+	}
+	return nil
+}
+
+func (x *ProxyRef) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ProxyRef) GetConfig() bool {
+	if x != nil {
+		return x.Config
+	}
+	return false
+}
+
+func (x *ProxyRef) GetSeen() bool {
+	if x != nil {
+		return x.Seen
+	}
+	return false
+}
+
 var File_asm_v1_events_proto protoreflect.FileDescriptor
 
 const file_asm_v1_events_proto_rawDesc = "" +
@@ -1272,7 +2003,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"socketUnit\x12/\n" +
 	"\tcontainer\x18\t \x01(\v2\x11.asm.v1.ContainerR\tcontainer\x12\x1b\n" +
 	"\tcgroup_id\x18\n" +
-	" \x01(\x04R\bcgroupId\"\xe4\x03\n" +
+	" \x01(\x04R\bcgroupId\"\x99\x04\n" +
 	"\rListenerEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -1287,11 +2018,13 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x12previous_processes\x18\n" +
 	" \x03(\v2\x0f.asm.v1.ProcessR\x11previousProcesses\x12,\n" +
 	"\bexposure\x18\v \x01(\v2\x10.asm.v1.ExposureR\bexposure\x12$\n" +
-	"\x04host\x18\f \x01(\v2\x10.asm.v1.HostInfoR\x04host\"\x9a\x01\n" +
+	"\x04host\x18\f \x01(\v2\x10.asm.v1.HostInfoR\x04host\x123\n" +
+	"\fbehind_proxy\x18\r \x03(\v2\x10.asm.v1.ProxyRefR\vbehindProxy\"\xcf\x01\n" +
 	"\rListenerState\x12,\n" +
 	"\blistener\x18\x01 \x01(\v2\x10.asm.v1.ListenerR\blistener\x12-\n" +
 	"\tprocesses\x18\x02 \x03(\v2\x0f.asm.v1.ProcessR\tprocesses\x12,\n" +
-	"\bexposure\x18\x03 \x01(\v2\x10.asm.v1.ExposureR\bexposure\"\xf9\x01\n" +
+	"\bexposure\x18\x03 \x01(\v2\x10.asm.v1.ExposureR\bexposure\x123\n" +
+	"\fbehind_proxy\x18\x04 \x03(\v2\x10.asm.v1.ProxyRefR\vbehindProxy\"\xa7\x02\n" +
 	"\bSnapshot\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -1299,7 +2032,8 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x03seq\x18\x04 \x01(\x04R\x03seq\x125\n" +
 	"\btaken_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\atakenAt\x123\n" +
 	"\tlisteners\x18\x06 \x03(\v2\x15.asm.v1.ListenerStateR\tlisteners\x12$\n" +
-	"\x04host\x18\a \x01(\v2\x10.asm.v1.HostInfoR\x04host\"\x92\x02\n" +
+	"\x04host\x18\a \x01(\v2\x10.asm.v1.HostInfoR\x04host\x12,\n" +
+	"\aproxies\x18\b \x03(\v2\x12.asm.v1.ProxyStateR\aproxies\"\x92\x02\n" +
 	"\tHeartbeat\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -1349,7 +2083,77 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\vobserved_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"observedAt\x12$\n" +
 	"\x04host\x18\x06 \x01(\v2\x10.asm.v1.HostInfoR\x04host\x12,\n" +
-	"\bprevious\x18\a \x01(\v2\x10.asm.v1.HostInfoR\bprevious*G\n" +
+	"\bprevious\x18\a \x01(\v2\x10.asm.v1.HostInfoR\bprevious\"\x89\x02\n" +
+	"\x05Proxy\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\x12-\n" +
+	"\tprocesses\x18\x03 \x03(\v2\x0f.asm.v1.ProcessR\tprocesses\x12.\n" +
+	"\tlisteners\x18\x04 \x03(\v2\x10.asm.v1.ListenerR\tlisteners\x12\x1f\n" +
+	"\vconfig_path\x18\x05 \x01(\tR\n" +
+	"configPath\x12!\n" +
+	"\fconfig_files\x18\x06 \x03(\tR\vconfigFiles\x12\x14\n" +
+	"\x05notes\x18\a \x03(\tR\x05notes\x12#\n" +
+	"\rprocess_count\x18\b \x01(\rR\fprocessCount\"\xe1\x02\n" +
+	"\fProxyBackend\x12\x18\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x0e\n" +
+	"\x02ip\x18\x02 \x01(\tR\x02ip\x12\x12\n" +
+	"\x04port\x18\x03 \x01(\rR\x04port\x12\x1b\n" +
+	"\tunix_path\x18\x04 \x01(\tR\bunixPath\x12,\n" +
+	"\blistener\x18\x05 \x01(\v2\x10.asm.v1.ListenerR\blistener\x12-\n" +
+	"\tprocesses\x18\x06 \x03(\v2\x0f.asm.v1.ProcessR\tprocesses\x12\x16\n" +
+	"\x06config\x18\a \x01(\bR\x06config\x12\x12\n" +
+	"\x04seen\x18\b \x01(\bR\x04seen\x12 \n" +
+	"\vconnections\x18\t \x01(\x04R\vconnections\x127\n" +
+	"\tlast_seen\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen\x12\x12\n" +
+	"\x04note\x18\v \x01(\tR\x04note\"\xe3\x02\n" +
+	"\n" +
+	"ProxyRoute\x12\x16\n" +
+	"\x06listen\x18\x01 \x03(\tR\x06listen\x12.\n" +
+	"\tfrontends\x18\x02 \x03(\v2\x10.asm.v1.ListenerR\tfrontends\x12!\n" +
+	"\fserver_names\x18\x03 \x03(\tR\vserverNames\x12\x12\n" +
+	"\x04path\x18\x04 \x01(\tR\x04path\x12\x12\n" +
+	"\x04kind\x18\x05 \x01(\tR\x04kind\x12\x16\n" +
+	"\x06target\x18\x06 \x01(\tR\x06target\x12\x1a\n" +
+	"\bupstream\x18\a \x01(\tR\bupstream\x12\x12\n" +
+	"\x04root\x18\b \x01(\tR\x04root\x12\x16\n" +
+	"\x06source\x18\t \x01(\tR\x06source\x12\x1a\n" +
+	"\binferred\x18\n" +
+	" \x01(\bR\binferred\x12\x14\n" +
+	"\x05notes\x18\v \x03(\tR\x05notes\x120\n" +
+	"\bbackends\x18\f \x03(\v2\x14.asm.v1.ProxyBackendR\bbackends\"\xc1\x01\n" +
+	"\n" +
+	"ProxyState\x12#\n" +
+	"\x05proxy\x18\x01 \x01(\v2\r.asm.v1.ProxyR\x05proxy\x12*\n" +
+	"\x06routes\x18\x02 \x03(\v2\x12.asm.v1.ProxyRouteR\x06routes\x12\x1f\n" +
+	"\vroute_count\x18\x03 \x01(\rR\n" +
+	"routeCount\x12#\n" +
+	"\rroutes_digest\x18\x04 \x01(\tR\froutesDigest\x12\x1c\n" +
+	"\ttruncated\x18\x05 \x01(\bR\ttruncated\"\x93\x03\n" +
+	"\vProxyRoutes\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
+	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
+	"\x06run_id\x18\x03 \x01(\tR\x05runId\x12\x10\n" +
+	"\x03seq\x18\x04 \x01(\x04R\x03seq\x12;\n" +
+	"\vobserved_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"observedAt\x12#\n" +
+	"\x05proxy\x18\x06 \x01(\v2\r.asm.v1.ProxyR\x05proxy\x12*\n" +
+	"\x06routes\x18\a \x03(\v2\x12.asm.v1.ProxyRouteR\x06routes\x12\x18\n" +
+	"\atrigger\x18\b \x01(\tR\atrigger\x12\x18\n" +
+	"\aremoved\x18\t \x01(\bR\aremoved\x12$\n" +
+	"\x04host\x18\n" +
+	" \x01(\v2\x10.asm.v1.HostInfoR\x04host\x12\x1c\n" +
+	"\ttruncated\x18\v \x01(\bR\ttruncated\x12!\n" +
+	"\ftotal_routes\x18\f \x01(\rR\vtotalRoutes\"\xf3\x01\n" +
+	"\bProxyRef\x12\x19\n" +
+	"\bproxy_id\x18\x01 \x01(\tR\aproxyId\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\x12%\n" +
+	"\x05proxy\x18\x03 \x01(\v2\x0f.asm.v1.ProcessR\x05proxy\x12.\n" +
+	"\tfrontends\x18\x04 \x03(\v2\x10.asm.v1.ListenerR\tfrontends\x12!\n" +
+	"\fserver_names\x18\x05 \x03(\tR\vserverNames\x12\x12\n" +
+	"\x04path\x18\x06 \x01(\tR\x04path\x12\x16\n" +
+	"\x06config\x18\a \x01(\bR\x06config\x12\x12\n" +
+	"\x04seen\x18\b \x01(\bR\x04seen*G\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
@@ -1383,7 +2187,7 @@ func file_asm_v1_events_proto_rawDescGZIP() []byte {
 }
 
 var file_asm_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_asm_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_asm_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_asm_v1_events_proto_goTypes = []any{
 	(Kind)(0),                     // 0: asm.v1.Kind
 	(Source)(0),                   // 1: asm.v1.Source
@@ -1400,11 +2204,17 @@ var file_asm_v1_events_proto_goTypes = []any{
 	(*HostInfo)(nil),              // 12: asm.v1.HostInfo
 	(*ExposureEvent)(nil),         // 13: asm.v1.ExposureEvent
 	(*HostEvent)(nil),             // 14: asm.v1.HostEvent
-	(*timestamppb.Timestamp)(nil), // 15: google.protobuf.Timestamp
+	(*Proxy)(nil),                 // 15: asm.v1.Proxy
+	(*ProxyBackend)(nil),          // 16: asm.v1.ProxyBackend
+	(*ProxyRoute)(nil),            // 17: asm.v1.ProxyRoute
+	(*ProxyState)(nil),            // 18: asm.v1.ProxyState
+	(*ProxyRoutes)(nil),           // 19: asm.v1.ProxyRoutes
+	(*ProxyRef)(nil),              // 20: asm.v1.ProxyRef
+	(*timestamppb.Timestamp)(nil), // 21: google.protobuf.Timestamp
 }
 var file_asm_v1_events_proto_depIdxs = []int32{
 	4,  // 0: asm.v1.Process.container:type_name -> asm.v1.Container
-	15, // 1: asm.v1.ListenerEvent.observed_at:type_name -> google.protobuf.Timestamp
+	21, // 1: asm.v1.ListenerEvent.observed_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: asm.v1.ListenerEvent.kind:type_name -> asm.v1.Kind
 	1,  // 3: asm.v1.ListenerEvent.source:type_name -> asm.v1.Source
 	3,  // 4: asm.v1.ListenerEvent.listener:type_name -> asm.v1.Listener
@@ -1412,29 +2222,47 @@ var file_asm_v1_events_proto_depIdxs = []int32{
 	5,  // 6: asm.v1.ListenerEvent.previous_processes:type_name -> asm.v1.Process
 	10, // 7: asm.v1.ListenerEvent.exposure:type_name -> asm.v1.Exposure
 	12, // 8: asm.v1.ListenerEvent.host:type_name -> asm.v1.HostInfo
-	3,  // 9: asm.v1.ListenerState.listener:type_name -> asm.v1.Listener
-	5,  // 10: asm.v1.ListenerState.processes:type_name -> asm.v1.Process
-	10, // 11: asm.v1.ListenerState.exposure:type_name -> asm.v1.Exposure
-	15, // 12: asm.v1.Snapshot.taken_at:type_name -> google.protobuf.Timestamp
-	7,  // 13: asm.v1.Snapshot.listeners:type_name -> asm.v1.ListenerState
-	12, // 14: asm.v1.Snapshot.host:type_name -> asm.v1.HostInfo
-	15, // 15: asm.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
-	2,  // 16: asm.v1.Exposure.level:type_name -> asm.v1.ExposureLevel
-	11, // 17: asm.v1.HostInfo.public_ips:type_name -> asm.v1.PublicIP
-	15, // 18: asm.v1.ExposureEvent.observed_at:type_name -> google.protobuf.Timestamp
-	3,  // 19: asm.v1.ExposureEvent.listener:type_name -> asm.v1.Listener
-	5,  // 20: asm.v1.ExposureEvent.processes:type_name -> asm.v1.Process
-	10, // 21: asm.v1.ExposureEvent.exposure:type_name -> asm.v1.Exposure
-	10, // 22: asm.v1.ExposureEvent.previous:type_name -> asm.v1.Exposure
-	12, // 23: asm.v1.ExposureEvent.host:type_name -> asm.v1.HostInfo
-	15, // 24: asm.v1.HostEvent.observed_at:type_name -> google.protobuf.Timestamp
-	12, // 25: asm.v1.HostEvent.host:type_name -> asm.v1.HostInfo
-	12, // 26: asm.v1.HostEvent.previous:type_name -> asm.v1.HostInfo
-	27, // [27:27] is the sub-list for method output_type
-	27, // [27:27] is the sub-list for method input_type
-	27, // [27:27] is the sub-list for extension type_name
-	27, // [27:27] is the sub-list for extension extendee
-	0,  // [0:27] is the sub-list for field type_name
+	20, // 9: asm.v1.ListenerEvent.behind_proxy:type_name -> asm.v1.ProxyRef
+	3,  // 10: asm.v1.ListenerState.listener:type_name -> asm.v1.Listener
+	5,  // 11: asm.v1.ListenerState.processes:type_name -> asm.v1.Process
+	10, // 12: asm.v1.ListenerState.exposure:type_name -> asm.v1.Exposure
+	20, // 13: asm.v1.ListenerState.behind_proxy:type_name -> asm.v1.ProxyRef
+	21, // 14: asm.v1.Snapshot.taken_at:type_name -> google.protobuf.Timestamp
+	7,  // 15: asm.v1.Snapshot.listeners:type_name -> asm.v1.ListenerState
+	12, // 16: asm.v1.Snapshot.host:type_name -> asm.v1.HostInfo
+	18, // 17: asm.v1.Snapshot.proxies:type_name -> asm.v1.ProxyState
+	21, // 18: asm.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
+	2,  // 19: asm.v1.Exposure.level:type_name -> asm.v1.ExposureLevel
+	11, // 20: asm.v1.HostInfo.public_ips:type_name -> asm.v1.PublicIP
+	21, // 21: asm.v1.ExposureEvent.observed_at:type_name -> google.protobuf.Timestamp
+	3,  // 22: asm.v1.ExposureEvent.listener:type_name -> asm.v1.Listener
+	5,  // 23: asm.v1.ExposureEvent.processes:type_name -> asm.v1.Process
+	10, // 24: asm.v1.ExposureEvent.exposure:type_name -> asm.v1.Exposure
+	10, // 25: asm.v1.ExposureEvent.previous:type_name -> asm.v1.Exposure
+	12, // 26: asm.v1.ExposureEvent.host:type_name -> asm.v1.HostInfo
+	21, // 27: asm.v1.HostEvent.observed_at:type_name -> google.protobuf.Timestamp
+	12, // 28: asm.v1.HostEvent.host:type_name -> asm.v1.HostInfo
+	12, // 29: asm.v1.HostEvent.previous:type_name -> asm.v1.HostInfo
+	5,  // 30: asm.v1.Proxy.processes:type_name -> asm.v1.Process
+	3,  // 31: asm.v1.Proxy.listeners:type_name -> asm.v1.Listener
+	3,  // 32: asm.v1.ProxyBackend.listener:type_name -> asm.v1.Listener
+	5,  // 33: asm.v1.ProxyBackend.processes:type_name -> asm.v1.Process
+	21, // 34: asm.v1.ProxyBackend.last_seen:type_name -> google.protobuf.Timestamp
+	3,  // 35: asm.v1.ProxyRoute.frontends:type_name -> asm.v1.Listener
+	16, // 36: asm.v1.ProxyRoute.backends:type_name -> asm.v1.ProxyBackend
+	15, // 37: asm.v1.ProxyState.proxy:type_name -> asm.v1.Proxy
+	17, // 38: asm.v1.ProxyState.routes:type_name -> asm.v1.ProxyRoute
+	21, // 39: asm.v1.ProxyRoutes.observed_at:type_name -> google.protobuf.Timestamp
+	15, // 40: asm.v1.ProxyRoutes.proxy:type_name -> asm.v1.Proxy
+	17, // 41: asm.v1.ProxyRoutes.routes:type_name -> asm.v1.ProxyRoute
+	12, // 42: asm.v1.ProxyRoutes.host:type_name -> asm.v1.HostInfo
+	5,  // 43: asm.v1.ProxyRef.proxy:type_name -> asm.v1.Process
+	3,  // 44: asm.v1.ProxyRef.frontends:type_name -> asm.v1.Listener
+	45, // [45:45] is the sub-list for method output_type
+	45, // [45:45] is the sub-list for method input_type
+	45, // [45:45] is the sub-list for extension type_name
+	45, // [45:45] is the sub-list for extension extendee
+	0,  // [0:45] is the sub-list for field type_name
 }
 
 func init() { file_asm_v1_events_proto_init() }
@@ -1448,7 +2276,7 @@ func file_asm_v1_events_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_asm_v1_events_proto_rawDesc), len(file_asm_v1_events_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   12,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

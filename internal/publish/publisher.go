@@ -72,6 +72,7 @@ type Publisher struct {
 	mu       sync.Mutex // orders seq assignment with q.Push
 	seq      uint64
 	current  map[model.ListenerKey]state.Listener // listeners as of the last enqueued message
+	proxies  map[string]model.ProxyRoutes         // proxy route sets as of the last enqueued message
 	haveSnap bool
 	// snapOverflowMark is q.Overflowed() just after the last snapshot was queued. A
 	// higher count means a snapshot or change after it was lost to overflow.
@@ -126,6 +127,7 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	p := &Publisher{
 		hostID:  cfg.HostID,
 		current: make(map[model.ListenerKey]state.Listener),
+		proxies: make(map[string]model.ProxyRoutes),
 		runID:   ulid.Make().String(),
 		q:       q,
 		wake:    make(chan struct{}, 1),
@@ -230,16 +232,47 @@ func (p *Publisher) Changes(changes []state.Change) {
 	}
 }
 
-// Snapshot enqueues the full listener set and remembers it for resending after a reconnect.
-func (p *Publisher) Snapshot(listeners []state.Listener) {
+// Snapshot enqueues the full listener set and every proxy's route set, and remembers
+// them for resending after a reconnect.
+func (p *Publisher) Snapshot(listeners []state.Listener, proxies []model.ProxyRoutes) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.current = make(map[model.ListenerKey]state.Listener, len(listeners))
 	for _, l := range listeners {
 		p.current[l.Key] = copyListener(l)
 	}
+	p.proxies = make(map[string]model.ProxyRoutes, len(proxies))
+	for _, r := range proxies {
+		if !r.Removed {
+			p.proxies[r.Proxy.ID] = r.Clone()
+		}
+	}
 	p.haveSnap = true
-	p.enqueueSnapshot(listeners)
+	p.enqueueSnapshot(listeners, p.sortedProxiesLocked())
+}
+
+// ProxyRoutes enqueues one proxy.routes event per route set and folds it into the
+// current state (a removed proxy leaves it).
+func (p *Publisher) ProxyRoutes(sets []model.ProxyRoutes) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, r := range sets {
+		if r.Removed {
+			delete(p.proxies, r.Proxy.ID)
+		} else {
+			p.proxies[r.Proxy.ID] = r.Clone()
+		}
+		p.enqueueProxyRoutesLocked(r)
+	}
+}
+
+func (p *Publisher) sortedProxiesLocked() []model.ProxyRoutes {
+	out := make([]model.ProxyRoutes, 0, len(p.proxies))
+	for _, r := range p.proxies {
+		out = append(out, r)
+	}
+	slices.SortFunc(out, func(a, b model.ProxyRoutes) int { return strings.Compare(a.Proxy.ID, b.Proxy.ID) })
+	return out
 }
 
 // ExposureChanges enqueues one exposure.changed event per change and folds the new
@@ -380,18 +413,26 @@ func (p *Publisher) enqueueChange(c state.Change) {
 		PreviousProcesses: previous,
 		Exposure:          exposureToProto(c.Exposure),
 		Host:              p.hostProtoLocked(),
+		BehindProxy:       proxyRefsToProto(c.BehindProxy),
 	})
 }
 
-func (p *Publisher) enqueueSnapshot(listeners []state.Listener) {
+func (p *Publisher) enqueueSnapshot(listeners []state.Listener, proxies []model.ProxyRoutes) {
 	id, seq := p.nextIDLocked()
 	states := make([]*asmv1.ListenerState, 0, len(listeners))
 	for _, l := range listeners {
 		states = append(states, &asmv1.ListenerState{
-			Listener:  listenerToProto(l.Key),
-			Processes: processesToProto(l.Procs),
-			Exposure:  exposureToProto(l.Exposure),
+			Listener:    listenerToProto(l.Key),
+			Processes:   processesToProto(l.Procs),
+			Exposure:    exposureToProto(l.Exposure),
+			BehindProxy: proxyRefsToProto(l.BehindProxy),
 		})
+	}
+	// Route sets stay out of the snapshot (it must stay under max_payload whatever the
+	// proxies hold): it carries their counts and digests, and each set follows it.
+	var proxyStates []*asmv1.ProxyState
+	for _, r := range proxies {
+		proxyStates = append(proxyStates, proxyStateToProto(r))
 	}
 	p.enqueueLocked("snapshot", id, seq, &asmv1.Snapshot{
 		EventId:   id,
@@ -401,9 +442,14 @@ func (p *Publisher) enqueueSnapshot(listeners []state.Listener) {
 		TakenAt:   timestamppb.Now(),
 		Listeners: states,
 		Host:      p.hostProtoLocked(),
+		Proxies:   proxyStates,
 	})
 	// Read after the push: a drop the push itself caused is older than this snapshot.
 	p.snapOverflowMark = p.q.Overflowed()
+	for _, r := range proxies {
+		r.Trigger, r.At = model.ProxyTriggerSnapshot, time.Now()
+		p.enqueueProxyRoutesLocked(r)
+	}
 }
 
 func (p *Publisher) enqueueLocked(suffix, id string, seq uint64, msg proto.Message) {
@@ -423,12 +469,13 @@ func (p *Publisher) applyLocked(c state.Change) {
 	case model.Closed:
 		delete(p.current, c.Key)
 	case model.Opened, model.OwnerChanged:
-		p.current[c.Key] = copyListener(state.Listener{Key: c.Key, Procs: c.Procs, Exposure: c.Exposure})
+		p.current[c.Key] = copyListener(state.Listener{Key: c.Key, Procs: c.Procs, Exposure: c.Exposure, BehindProxy: c.BehindProxy})
 	}
 }
 
 func copyListener(l state.Listener) state.Listener {
-	return state.Listener{Key: l.Key, Procs: slices.Clone(l.Procs), Exposure: cloneExposure(l.Exposure)}
+	return state.Listener{Key: l.Key, Procs: slices.Clone(l.Procs), Exposure: cloneExposure(l.Exposure),
+		BehindProxy: slices.Clone(l.BehindProxy)}
 }
 
 func cloneExposure(e model.Exposure) model.Exposure {
@@ -473,7 +520,7 @@ func (p *Publisher) resnapshotLocked() {
 	slices.SortFunc(listeners, func(a, b state.Listener) int {
 		return strings.Compare(a.Key.String(), b.Key.String())
 	})
-	p.enqueueSnapshot(listeners)
+	p.enqueueSnapshot(listeners, p.sortedProxiesLocked())
 }
 
 // run is the single sender goroutine. A message that fails stays at the head and is

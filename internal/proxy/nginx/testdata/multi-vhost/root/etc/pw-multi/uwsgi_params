@@ -1,0 +1,1 @@
+uwsgi_param  QUERY_STRING       $query_string;

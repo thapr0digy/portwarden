@@ -1,0 +1,19 @@
+Included configuration files:
+  (*) /etc/pw-apache/apache2.conf
+    (15) /etc/pw-apache/mods-enabled/authz_core.load
+    (15) /etc/pw-apache/mods-enabled/lbmethod_byrequests.load
+    (15) /etc/pw-apache/mods-enabled/mpm_event.load
+    (15) /etc/pw-apache/mods-enabled/proxy.load
+    (15) /etc/pw-apache/mods-enabled/proxy_balancer.load
+    (15) /etc/pw-apache/mods-enabled/proxy_fcgi.load
+    (15) /etc/pw-apache/mods-enabled/proxy_http.load
+    (15) /etc/pw-apache/mods-enabled/proxy_wstunnel.load
+    (15) /etc/pw-apache/mods-enabled/rewrite.load
+    (15) /etc/pw-apache/mods-enabled/slotmem_shm.load
+    (16) /etc/pw-apache/ports.conf
+    (24) /etc/pw-apache/conf-enabled/security.conf
+    (25) /etc/pw-apache/sites-enabled/app.conf
+      (44) /etc/pw-apache/snippets/extra.conf
+    (44) /etc/pw-apache/sites-enabled/static.conf
+AH00112: Warning: DocumentRoot [/var/www/app] does not exist
+AH00112: Warning: DocumentRoot [/var/www/static] does not exist

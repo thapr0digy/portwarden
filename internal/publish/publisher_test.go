@@ -197,7 +197,7 @@ func TestOpenedLandsOnSubject(t *testing.T) {
 	startServer(t, port, t.TempDir())
 	p := newPublisher(t, port)
 
-	p.Snapshot(snapshotOf())
+	p.Snapshot(snapshotOf(), nil)
 	c := openedChange(8080)
 	p.Changes([]state.Change{c})
 
@@ -225,7 +225,7 @@ func TestSeqStrictlyIncreasesAcrossKinds(t *testing.T) {
 	startServer(t, port, t.TempDir())
 	p := newPublisher(t, port)
 
-	p.Snapshot(snapshotOf(80))
+	p.Snapshot(snapshotOf(80), nil)
 	p.Changes([]state.Change{openedChange(8080), closedChange(8080)})
 	p.Heartbeat(3)
 
@@ -254,7 +254,7 @@ func TestReconnectPublishesSnapshot(t *testing.T) {
 	s := startServer(t, port, store)
 	p := newPublisher(t, port)
 
-	p.Snapshot(snapshotOf(80))
+	p.Snapshot(snapshotOf(80), nil)
 	readStream(t, port, 1)
 
 	stop(s)
@@ -290,7 +290,7 @@ func TestStartsWithNATSDown(t *testing.T) {
 	}
 	t.Cleanup(func() { p.Close() })
 
-	p.Snapshot(snapshotOf(80))
+	p.Snapshot(snapshotOf(80), nil)
 	p.Changes([]state.Change{openedChange(8080)})
 	startServer(t, port, t.TempDir())
 
@@ -359,7 +359,7 @@ func TestResnapshotReflectsChangesMadeDuringOutage(t *testing.T) {
 	s := startServer(t, port, store)
 	p := newPublisher(t, port)
 
-	p.Snapshot(snapshotOf(80))
+	p.Snapshot(snapshotOf(80), nil)
 	readStream(t, port, 1)
 
 	stop(s)
@@ -431,7 +431,7 @@ func TestStreamManagementDeniedStillPublishes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { p.Close() })
-	p.Snapshot(snapshotOf())
+	p.Snapshot(snapshotOf(), nil)
 	p.Changes([]state.Change{openedChange(8080)})
 
 	tryAdmin := func() ([]got, bool) {
@@ -493,7 +493,7 @@ func TestStreamDeletedWhilePublishingIsReensured(t *testing.T) {
 	startServer(t, port, t.TempDir())
 	p := newPublisher(t, port)
 
-	p.Snapshot(snapshotOf())
+	p.Snapshot(snapshotOf(), nil)
 	readStream(t, port, 1)
 
 	admin, err := nats.Connect(natsURL(port))
@@ -577,7 +577,7 @@ func TestExistingStreamConfigIsNotChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { p.Close() })
-	p.Snapshot(snapshotOf(80))
+	p.Snapshot(snapshotOf(80), nil)
 	p.Changes([]state.Change{openedChange(8080)})
 	withAdmin(t, url, func(js jetstream.JetStream) { waitForMsgs(t, js, 2) })
 
@@ -618,7 +618,7 @@ func TestMissingStreamIsCreatedWithAgentConfig(t *testing.T) {
 	port := freePort(t)
 	startServer(t, port, t.TempDir())
 	p := newPublisher(t, port)
-	p.Snapshot(snapshotOf())
+	p.Snapshot(snapshotOf(), nil)
 	readStream(t, port, 1)
 
 	nc, err := nats.Connect(natsURL(port))
@@ -694,7 +694,7 @@ func TestSnapshotDroppedBeforeFirstConnectIsResent(t *testing.T) {
 	}
 	t.Cleanup(func() { p.Close() })
 
-	p.Snapshot(snapshotOf(80)) // seq 1, dropped by the third change
+	p.Snapshot(snapshotOf(80), nil) // seq 1, dropped by the third change
 	p.Changes([]state.Change{openedChange(8080), openedChange(8081), openedChange(8082)})
 	startServer(t, port, t.TempDir())
 
@@ -728,7 +728,7 @@ func TestDropWhileConnectedTriggersOneResnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { p.Close() })
-	p.Snapshot(snapshotOf(80))
+	p.Snapshot(snapshotOf(80), nil)
 	readStream(t, port, 1)
 
 	// Changes holds p.mu for the whole batch, so the sender cannot drain in between:
@@ -776,7 +776,7 @@ func TestNoResnapshotWithoutDrops(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { p.Close() })
-	p.Snapshot(snapshotOf(80))
+	p.Snapshot(snapshotOf(80), nil)
 	p.Changes([]state.Change{openedChange(8080), closedChange(8080)})
 	startServer(t, port, t.TempDir())
 	readStream(t, port, 3)
@@ -831,7 +831,7 @@ func TestUnmatchedPermissionViolationIsLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { p.Close() })
-	p.Snapshot(snapshotOf())
+	p.Snapshot(snapshotOf(), nil)
 
 	end := time.Now().Add(deadline)
 	for time.Now().Before(end) {
@@ -882,7 +882,7 @@ func TestOwnerChangedSubjectAndPrevious(t *testing.T) {
 	startServer(t, port, t.TempDir())
 	p := newPublisher(t, port)
 
-	p.Snapshot(snapshotOf(80))
+	p.Snapshot(snapshotOf(80), nil)
 	p.Changes([]state.Change{ownerChangedChange(80, 7, 8)})
 
 	msgs := readStream(t, port, 2)
@@ -908,7 +908,7 @@ func TestResnapshotIncludesOwnerChange(t *testing.T) {
 	s := startServer(t, port, store)
 	p := newPublisher(t, port)
 
-	p.Snapshot(snapshotOf(80))
+	p.Snapshot(snapshotOf(80), nil)
 	readStream(t, port, 1)
 
 	stop(s)

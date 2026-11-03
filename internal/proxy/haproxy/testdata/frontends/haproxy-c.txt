@@ -1,0 +1,5 @@
+[NOTICE]   (253220) : haproxy version is 2.8.30-0ubuntu0.24.04.1
+[NOTICE]   (253220) : path to executable is /usr/sbin/haproxy
+[WARNING]  (253220) : config : In proxy 'mysql', the 'default_backend' rule always has precedence over the servers, which will never be used.
+Warnings were found.
+Configuration file is valid

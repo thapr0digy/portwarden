@@ -5,11 +5,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/thapr0digy/portwarden/internal/model"
+	"github.com/thapr0digy/portwarden/internal/proxy"
 	"github.com/thapr0digy/portwarden/internal/state"
 )
 
@@ -25,8 +27,11 @@ type Snapshotter func() ([]model.Observation, error)
 // listener's Opened comes before its first ExposureChange.
 type Sink interface {
 	Changes([]state.Change)
-	Snapshot([]state.Listener)
+	// Snapshot carries every open listener and every known proxy's route set.
+	Snapshot([]state.Listener, []model.ProxyRoutes)
 	ExposureChanges([]state.ExposureChange)
+	// ProxyRoutes publishes route sets that changed (or were removed).
+	ProxyRoutes([]model.ProxyRoutes)
 }
 
 // Judge rates every listener's exposure under one reading of the host (its firewall
@@ -64,6 +69,15 @@ type Options struct {
 	// Judges delivers newer judges (the firewall or the interfaces changed); each one
 	// re-rates every listener. Ignored without Judge.
 	Judges <-chan Judge
+	// Proxies delivers the proxy mapper's views; each one is joined to the listener
+	// table and every proxy whose routes changed is published. nil: no proxy mapping.
+	Proxies <-chan proxy.Update
+	// ProxyListeners receives the open listeners after the baseline and after every
+	// listener change (the mapper's input). It must not block. nil: not called.
+	ProxyListeners func([]state.Listener)
+	// ProxyMinInterval is the least time between two proxy.routes of one proxy; a
+	// change inside it is published when it ends (removals go out at once). 0: none.
+	ProxyMinInterval time.Duration
 }
 
 const defaultDropsCheck = 10 * time.Second
@@ -105,16 +119,24 @@ func Run(ctx context.Context, src EventSource, snap Snapshotter, sink Sink, opts
 		table: table, sink: sink, snap: snap, enrich: enrich, opts: opts,
 		lastDrops: lastDrops, grace: stoppedTimer(), settle: stoppedTimer(),
 		dumps: make(chan dumpResult, 1), judge: opts.Judge,
-		levels: make(map[model.ListenerKey]model.Exposure),
+		levels:    make(map[model.ListenerKey]model.Exposure),
+		published: make(map[string]model.ProxyRoutes),
+		lastPub:   make(map[string]model.ProxyRoutes),
+		lastPubAt: make(map[string]time.Time),
+		pendingRt: make(map[string]string),
+		handledAt: make(map[string]time.Time),
+		routeT:    stoppedTimer(),
 	}
 	// The baseline's exposures travel in its snapshot; it causes no ExposureChanges,
 	// as it causes no Opened.
 	if l.judge != nil {
 		l.levels = l.judge.Judge(table.Snapshot())
 	}
+	l.feedMapper(table.Snapshot())
 	l.snapshot()
 	defer l.grace.Stop()
 	defer l.settle.Stop()
+	defer l.routeT.Stop()
 	for _, o := range buffered {
 		l.apply(enrich(o))
 	}
@@ -149,6 +171,23 @@ type loop struct {
 	// kept through a pending close so a restart inside the grace is no change.
 	judge  Judge
 	levels map[model.ListenerKey]model.Exposure
+
+	// The proxy mapping: the mapper's latest view, the route sets last published per
+	// proxy, the mapper time of each proxy's last handled change, and the routes ending
+	// at each listener.
+	proxyView proxy.Update
+	// published holds each proxy's current joined route set (snapshots carry it);
+	// lastPub/lastPubAt what was last sent on proxy.routes and when; pendingRt the
+	// trigger of a change held back by ProxyMinInterval, sent when routeT fires.
+	published map[string]model.ProxyRoutes
+	lastPub   map[string]model.ProxyRoutes
+	lastPubAt map[string]time.Time
+	pendingRt map[string]string
+	routeT    *time.Timer
+	routeC    <-chan time.Time
+	routeDue  time.Time
+	handledAt map[string]time.Time
+	behind    map[model.ListenerKey][]model.ProxyRef
 }
 
 type dumpResult struct {
@@ -162,6 +201,7 @@ func (l *loop) run(ctx context.Context, events <-chan model.Observation) error {
 	if l.judge != nil {
 		judges = l.opts.Judges
 	}
+	proxies := l.opts.Proxies
 	if l.opts.Recheck > 0 {
 		t := time.NewTicker(l.opts.Recheck)
 		defer t.Stop()
@@ -207,6 +247,16 @@ func (l *loop) run(ctx context.Context, events <-chan model.Observation) error {
 			}
 			l.judge = j
 			l.rejudge(nil, j.Trigger())
+		case u, ok := <-proxies:
+			if !ok {
+				proxies = nil
+				continue
+			}
+			l.proxyView = u
+			l.publishRoutes(l.rejoin(l.table.Snapshot()))
+		case now := <-l.routeC:
+			l.routeC = nil
+			l.publishRoutes(l.flushPending(now))
 		}
 	}
 }
@@ -219,11 +269,18 @@ func (l *loop) apply(o model.Observation) {
 // cause, and re-arms the grace timer at the table's next deadline, since every table
 // mutation can move it.
 func (l *loop) publish(changes []state.Change) {
+	var routes []model.ProxyRoutes
+	if len(changes) > 0 {
+		listeners := l.table.Snapshot()
+		routes = l.annotateProxies(changes, listeners)
+		l.feedMapper(listeners)
+	}
 	if len(changes) > 0 && l.judge != nil {
 		l.rejudge(changes, triggerListener)
 	} else {
 		publish(l.sink, changes)
 	}
+	l.publishRoutes(routes)
 	deadline, ok := l.table.NextDeadline()
 	if !ok {
 		l.grace.Stop()
@@ -286,13 +343,154 @@ func (l *loop) reconcile() {
 	l.snapshot()
 }
 
-// snapshot publishes the open listeners with their current exposure.
+// snapshot publishes the open listeners with their current exposure and proxy routes,
+// and every proxy's route set.
 func (l *loop) snapshot() {
 	listeners := l.table.Snapshot()
 	for i := range listeners {
 		listeners[i].Exposure = l.levels[listeners[i].Key]
+		listeners[i].BehindProxy = l.behind[listeners[i].Key]
 	}
-	l.sink.Snapshot(listeners)
+	l.sink.Snapshot(listeners, l.currentRoutes())
+}
+
+func (l *loop) currentRoutes() []model.ProxyRoutes {
+	if len(l.published) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(l.published))
+	for id := range l.published {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	out := make([]model.ProxyRoutes, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, l.published[id])
+	}
+	return out
+}
+
+func (l *loop) feedMapper(listeners []state.Listener) {
+	if l.opts.ProxyListeners != nil {
+		l.opts.ProxyListeners(listeners)
+	}
+}
+
+// annotateProxies rejoins the proxy routes to the changed table and sets each change's
+// BehindProxy (a closed listener keeps the routes it had). It returns the route sets to
+// publish after the changes.
+func (l *loop) annotateProxies(changes []state.Change, listeners []state.Listener) []model.ProxyRoutes {
+	if l.opts.Proxies == nil {
+		return nil
+	}
+	before := l.behind
+	routes := l.rejoin(listeners)
+	for i, c := range changes {
+		if c.Kind == model.Closed {
+			changes[i].BehindProxy = before[c.Key]
+		} else {
+			changes[i].BehindProxy = l.behind[c.Key]
+		}
+	}
+	return routes
+}
+
+// rejoin joins every proxy of the mapper's view to the listeners, refreshes the
+// behind_proxy index, and returns the route sets whose structure changed (with the
+// mapper's trigger when the mapper changed the proxy since, "listener" otherwise) and
+// the removals of proxies that are gone.
+func (l *loop) rejoin(listeners []state.Listener) []model.ProxyRoutes {
+	now := time.Now()
+	var out []model.ProxyRoutes
+	seen := make(map[string]bool, len(l.proxyView.States))
+	all := make([]model.ProxyRoutes, 0, len(l.proxyView.States))
+	for _, s := range l.proxyView.States {
+		id := s.Instance.ID
+		seen[id] = true
+		joined := proxy.Cap(proxy.Join(s, listeners, l.proxyView.NetnsAddrs))
+		trigger := model.ProxyTriggerListener
+		if s.At.After(l.handledAt[id]) {
+			trigger = s.Trigger
+			l.handledAt[id] = s.At
+		}
+		joined.Trigger, joined.At = trigger, now
+		l.published[id] = joined
+		all = append(all, joined)
+		prev, had := l.lastPub[id]
+		if had && prev.SameStructure(joined) {
+			delete(l.pendingRt, id)
+			continue
+		}
+		if held, ok := l.pendingRt[id]; ok {
+			trigger = held // a held-back change keeps the reason it was first held for
+		}
+		if gap := l.opts.ProxyMinInterval; had && now.Sub(l.lastPubAt[id]) < gap {
+			l.pendingRt[id] = trigger
+			l.scheduleRoutes(l.lastPubAt[id].Add(gap))
+			continue
+		}
+		joined.Trigger = trigger
+		out = append(out, l.sent(id, joined, now))
+	}
+	for id, prev := range l.published {
+		if seen[id] {
+			continue
+		}
+		for _, m := range []map[string]model.ProxyRoutes{l.published, l.lastPub} {
+			delete(m, id)
+		}
+		delete(l.lastPubAt, id)
+		delete(l.pendingRt, id)
+		delete(l.handledAt, id)
+		out = append(out, model.ProxyRoutes{Proxy: prev.Proxy, Removed: true, Trigger: model.ProxyTriggerStopped, At: now})
+	}
+	l.behind = proxy.BehindProxy(all)
+	slices.SortFunc(out, func(a, b model.ProxyRoutes) int { return strings.Compare(a.Proxy.ID, b.Proxy.ID) })
+	return out
+}
+
+// sent records r as published for id and returns it.
+func (l *loop) sent(id string, r model.ProxyRoutes, now time.Time) model.ProxyRoutes {
+	l.published[id] = r
+	l.lastPub[id], l.lastPubAt[id] = r, now
+	delete(l.pendingRt, id)
+	return r
+}
+
+func (l *loop) scheduleRoutes(at time.Time) {
+	if l.routeC != nil && !at.Before(l.routeDue) {
+		return
+	}
+	l.routeDue = at
+	l.routeT.Reset(time.Until(at))
+	l.routeC = l.routeT.C
+}
+
+// flushPending publishes the held-back changes whose interval has passed.
+func (l *loop) flushPending(now time.Time) []model.ProxyRoutes {
+	var out []model.ProxyRoutes
+	for id, trigger := range l.pendingRt {
+		due := l.lastPubAt[id].Add(l.opts.ProxyMinInterval)
+		if now.Before(due) {
+			l.scheduleRoutes(due)
+			continue
+		}
+		cur, ok := l.published[id]
+		if !ok || l.lastPub[id].SameStructure(cur) {
+			delete(l.pendingRt, id)
+			continue
+		}
+		cur.Trigger, cur.At = trigger, now
+		out = append(out, l.sent(id, cur, now))
+	}
+	slices.SortFunc(out, func(a, b model.ProxyRoutes) int { return strings.Compare(a.Proxy.ID, b.Proxy.ID) })
+	return out
+}
+
+func (l *loop) publishRoutes(routes []model.ProxyRoutes) {
+	if len(routes) > 0 {
+		l.sink.ProxyRoutes(routes)
+	}
 }
 
 // keepThroughFailedRead keeps a listener's last known level when the new judgement was

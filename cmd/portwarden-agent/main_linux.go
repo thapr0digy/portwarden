@@ -49,7 +49,8 @@ const (
 	imdsRetry        = 30 * time.Second
 	dmiDir           = "/sys/class/dmi/id"
 	defaultProxyPoll = 2 * time.Second
-	proxySettle      = 2 * time.Second // a changed proxy config is read once it held still this long
+	proxySettle      = 2 * time.Second  // a changed proxy config is read once it held still this long
+	proxyMinGap      = 10 * time.Second // at most one proxy.routes per proxy per this interval
 )
 
 type options struct {
@@ -240,6 +241,8 @@ func run(opts options, log *slog.Logger) error {
 		Settle:     recheckSettle,
 		Judge:      initialView,
 		Judges:     judges,
+		// Removals and first route sets go out at once; later changes at most once per gap.
+		ProxyMinInterval: proxyMinGap,
 	}
 	var proxyConns *probes.ProxyConns
 	if opts.proxyMap == "auto" {

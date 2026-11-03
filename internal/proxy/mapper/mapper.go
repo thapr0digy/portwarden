@@ -32,6 +32,10 @@ import (
 // behind by a config change stops showing as seen (or inferred) after it.
 const ObservedTTL = time.Hour
 
+// MaxProcs bounds the processes published per proxy: the master and 15 others
+// (ProcessCount says how many there are).
+const MaxProcs = 16
+
 // reloadSlack absorbs the coarse clocks behind a worker's start time (whole-second boot
 // time, 10 ms ticks): files changed less than this after the oldest worker started are
 // not called pending.
@@ -514,7 +518,8 @@ func (m *Mapper) update() proxy.Update {
 	for _, id := range ids {
 		t := m.proxies[id]
 		inst := t.inst.ProxyInstance
-		inst.Procs = slices.Clone(inst.Procs)
+		inst.ProcessCount = len(inst.Procs)
+		inst.Procs = slices.Clone(inst.Procs[:min(len(inst.Procs), MaxProcs)])
 		inst.Listeners = slices.Clone(inst.Listeners)
 		inst.Files = slices.Clone(t.res.Files)
 		inst.Notes = slices.Clone(t.res.Notes)

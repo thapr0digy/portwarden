@@ -189,6 +189,8 @@ message Proxy {
   repeated string config_files = 6;
   // What could not be read or followed, e.g. "unreadable /etc/nginx/x.conf: permission denied".
   repeated string notes = 7;
+  // How many processes the proxy has; processes lists the master and at most 15 others.
+  uint32 process_count = 8;
 }
 
 // ProxyBackend is one place a route sends traffic to.
@@ -239,10 +241,17 @@ message ProxyRoute {
   repeated ProxyBackend backends = 12;
 }
 
-// ProxyState is a proxy with its full route set, as carried in snapshots.
+// ProxyState is a proxy as carried in snapshots: its routes are not repeated there (a
+// snapshot must stay small); route_count and routes_digest identify its current route
+// set, which follows the snapshot as a proxy.routes event (trigger=snapshot).
 message ProxyState {
   Proxy proxy = 1;
+  // Unused in snapshots since the M4 fix wave (always empty).
   repeated ProxyRoute routes = 2;
+  uint32 route_count = 3;
+  // Hex SHA-256 (first 16 bytes) of the deterministic encoding of the routes.
+  string routes_digest = 4;
+  bool truncated = 5;
 }
 
 // ProxyRoutes is published on asm.<host>.proxy.routes with a proxy's full route set
@@ -260,6 +269,10 @@ message ProxyRoutes {
   string trigger = 8;
   bool removed = 9;
   HostInfo host = 10;
+  // The route set was cut to stay under the size limits (500 routes, half the server's
+  // max_payload): routes holds the first ones in order, total_routes how many there are.
+  bool truncated = 11;
+  uint32 total_routes = 12;
 }
 
 // ProxyRef names a proxy route that ends at a listener (on the backend's events).

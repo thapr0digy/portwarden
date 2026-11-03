@@ -258,6 +258,9 @@ func proxyLine(ev *asmv1.ProxyRoutes) string {
 		return b.String()
 	}
 	fmt.Fprintf(&b, " routes=%d", len(ev.GetRoutes()))
+	if ev.GetTruncated() {
+		fmt.Fprintf(&b, "/%d (truncated)", ev.GetTotalRoutes())
+	}
 	for _, r := range ev.GetRoutes() {
 		listen := strings.Join(r.GetListen(), ",")
 		if listen == "" {

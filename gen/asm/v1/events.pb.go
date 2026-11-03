@@ -1288,7 +1288,9 @@ type Proxy struct {
 	// Every configuration file read, in include order.
 	ConfigFiles []string `protobuf:"bytes,6,rep,name=config_files,json=configFiles,proto3" json:"config_files,omitempty"`
 	// What could not be read or followed, e.g. "unreadable /etc/nginx/x.conf: permission denied".
-	Notes         []string `protobuf:"bytes,7,rep,name=notes,proto3" json:"notes,omitempty"`
+	Notes []string `protobuf:"bytes,7,rep,name=notes,proto3" json:"notes,omitempty"`
+	// How many processes the proxy has; processes lists the master and at most 15 others.
+	ProcessCount  uint32 `protobuf:"varint,8,opt,name=process_count,json=processCount,proto3" json:"process_count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1370,6 +1372,13 @@ func (x *Proxy) GetNotes() []string {
 		return x.Notes
 	}
 	return nil
+}
+
+func (x *Proxy) GetProcessCount() uint32 {
+	if x != nil {
+		return x.ProcessCount
+	}
+	return 0
 }
 
 // ProxyBackend is one place a route sends traffic to.
@@ -1647,11 +1656,18 @@ func (x *ProxyRoute) GetBackends() []*ProxyBackend {
 	return nil
 }
 
-// ProxyState is a proxy with its full route set, as carried in snapshots.
+// ProxyState is a proxy as carried in snapshots: its routes are not repeated there (a
+// snapshot must stay small); route_count and routes_digest identify its current route
+// set, which follows the snapshot as a proxy.routes event (trigger=snapshot).
 type ProxyState struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Proxy         *Proxy                 `protobuf:"bytes,1,opt,name=proxy,proto3" json:"proxy,omitempty"`
-	Routes        []*ProxyRoute          `protobuf:"bytes,2,rep,name=routes,proto3" json:"routes,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Proxy *Proxy                 `protobuf:"bytes,1,opt,name=proxy,proto3" json:"proxy,omitempty"`
+	// Unused in snapshots since the M4 fix wave (always empty).
+	Routes     []*ProxyRoute `protobuf:"bytes,2,rep,name=routes,proto3" json:"routes,omitempty"`
+	RouteCount uint32        `protobuf:"varint,3,opt,name=route_count,json=routeCount,proto3" json:"route_count,omitempty"`
+	// Hex SHA-256 (first 16 bytes) of the deterministic encoding of the routes.
+	RoutesDigest  string `protobuf:"bytes,4,opt,name=routes_digest,json=routesDigest,proto3" json:"routes_digest,omitempty"`
+	Truncated     bool   `protobuf:"varint,5,opt,name=truncated,proto3" json:"truncated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1700,6 +1716,27 @@ func (x *ProxyState) GetRoutes() []*ProxyRoute {
 	return nil
 }
 
+func (x *ProxyState) GetRouteCount() uint32 {
+	if x != nil {
+		return x.RouteCount
+	}
+	return 0
+}
+
+func (x *ProxyState) GetRoutesDigest() string {
+	if x != nil {
+		return x.RoutesDigest
+	}
+	return ""
+}
+
+func (x *ProxyState) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
 // ProxyRoutes is published on asm.<host>.proxy.routes with a proxy's full route set
 // whenever it changes (config, reload, restart, a backend listener, newly seen traffic),
 // and with removed=true when the proxy is gone.
@@ -1713,9 +1750,13 @@ type ProxyRoutes struct {
 	Proxy      *Proxy                 `protobuf:"bytes,6,opt,name=proxy,proto3" json:"proxy,omitempty"`
 	Routes     []*ProxyRoute          `protobuf:"bytes,7,rep,name=routes,proto3" json:"routes,omitempty"`
 	// started, config, listener, traffic, recheck, stopped.
-	Trigger       string    `protobuf:"bytes,8,opt,name=trigger,proto3" json:"trigger,omitempty"`
-	Removed       bool      `protobuf:"varint,9,opt,name=removed,proto3" json:"removed,omitempty"`
-	Host          *HostInfo `protobuf:"bytes,10,opt,name=host,proto3" json:"host,omitempty"`
+	Trigger string    `protobuf:"bytes,8,opt,name=trigger,proto3" json:"trigger,omitempty"`
+	Removed bool      `protobuf:"varint,9,opt,name=removed,proto3" json:"removed,omitempty"`
+	Host    *HostInfo `protobuf:"bytes,10,opt,name=host,proto3" json:"host,omitempty"`
+	// The route set was cut to stay under the size limits (500 routes, half the server's
+	// max_payload): routes holds the first ones in order, total_routes how many there are.
+	Truncated     bool   `protobuf:"varint,11,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	TotalRoutes   uint32 `protobuf:"varint,12,opt,name=total_routes,json=totalRoutes,proto3" json:"total_routes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1818,6 +1859,20 @@ func (x *ProxyRoutes) GetHost() *HostInfo {
 		return x.Host
 	}
 	return nil
+}
+
+func (x *ProxyRoutes) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+func (x *ProxyRoutes) GetTotalRoutes() uint32 {
+	if x != nil {
+		return x.TotalRoutes
+	}
+	return 0
 }
 
 // ProxyRef names a proxy route that ends at a listener (on the backend's events).
@@ -2028,7 +2083,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\vobserved_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"observedAt\x12$\n" +
 	"\x04host\x18\x06 \x01(\v2\x10.asm.v1.HostInfoR\x04host\x12,\n" +
-	"\bprevious\x18\a \x01(\v2\x10.asm.v1.HostInfoR\bprevious\"\xe4\x01\n" +
+	"\bprevious\x18\a \x01(\v2\x10.asm.v1.HostInfoR\bprevious\"\x89\x02\n" +
 	"\x05Proxy\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12-\n" +
@@ -2037,7 +2092,8 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\vconfig_path\x18\x05 \x01(\tR\n" +
 	"configPath\x12!\n" +
 	"\fconfig_files\x18\x06 \x03(\tR\vconfigFiles\x12\x14\n" +
-	"\x05notes\x18\a \x03(\tR\x05notes\"\xe1\x02\n" +
+	"\x05notes\x18\a \x03(\tR\x05notes\x12#\n" +
+	"\rprocess_count\x18\b \x01(\rR\fprocessCount\"\xe1\x02\n" +
 	"\fProxyBackend\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x0e\n" +
 	"\x02ip\x18\x02 \x01(\tR\x02ip\x12\x12\n" +
@@ -2065,11 +2121,15 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\binferred\x18\n" +
 	" \x01(\bR\binferred\x12\x14\n" +
 	"\x05notes\x18\v \x03(\tR\x05notes\x120\n" +
-	"\bbackends\x18\f \x03(\v2\x14.asm.v1.ProxyBackendR\bbackends\"]\n" +
+	"\bbackends\x18\f \x03(\v2\x14.asm.v1.ProxyBackendR\bbackends\"\xc1\x01\n" +
 	"\n" +
 	"ProxyState\x12#\n" +
 	"\x05proxy\x18\x01 \x01(\v2\r.asm.v1.ProxyR\x05proxy\x12*\n" +
-	"\x06routes\x18\x02 \x03(\v2\x12.asm.v1.ProxyRouteR\x06routes\"\xd2\x02\n" +
+	"\x06routes\x18\x02 \x03(\v2\x12.asm.v1.ProxyRouteR\x06routes\x12\x1f\n" +
+	"\vroute_count\x18\x03 \x01(\rR\n" +
+	"routeCount\x12#\n" +
+	"\rroutes_digest\x18\x04 \x01(\tR\froutesDigest\x12\x1c\n" +
+	"\ttruncated\x18\x05 \x01(\bR\ttruncated\"\x93\x03\n" +
 	"\vProxyRoutes\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -2082,7 +2142,9 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\atrigger\x18\b \x01(\tR\atrigger\x12\x18\n" +
 	"\aremoved\x18\t \x01(\bR\aremoved\x12$\n" +
 	"\x04host\x18\n" +
-	" \x01(\v2\x10.asm.v1.HostInfoR\x04host\"\xf3\x01\n" +
+	" \x01(\v2\x10.asm.v1.HostInfoR\x04host\x12\x1c\n" +
+	"\ttruncated\x18\v \x01(\bR\ttruncated\x12!\n" +
+	"\ftotal_routes\x18\f \x01(\rR\vtotalRoutes\"\xf3\x01\n" +
 	"\bProxyRef\x12\x19\n" +
 	"\bproxy_id\x18\x01 \x01(\tR\aproxyId\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12%\n" +

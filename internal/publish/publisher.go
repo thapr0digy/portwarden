@@ -262,23 +262,7 @@ func (p *Publisher) ProxyRoutes(sets []model.ProxyRoutes) {
 		} else {
 			p.proxies[r.Proxy.ID] = r.Clone()
 		}
-		id, seq := p.nextIDLocked()
-		at := r.At
-		if at.IsZero() {
-			at = time.Now()
-		}
-		p.enqueueLocked("proxy.routes", id, seq, &asmv1.ProxyRoutes{
-			EventId:    id,
-			HostId:     p.hostID,
-			RunId:      p.runID,
-			Seq:        seq,
-			ObservedAt: timestamppb.New(at),
-			Proxy:      proxyToProto(r.Proxy),
-			Routes:     routesToProto(r.Routes),
-			Trigger:    r.Trigger,
-			Removed:    r.Removed,
-			Host:       p.hostProtoLocked(),
-		})
+		p.enqueueProxyRoutesLocked(r)
 	}
 }
 
@@ -444,9 +428,11 @@ func (p *Publisher) enqueueSnapshot(listeners []state.Listener, proxies []model.
 			BehindProxy: proxyRefsToProto(l.BehindProxy),
 		})
 	}
+	// Route sets stay out of the snapshot (it must stay under max_payload whatever the
+	// proxies hold): it carries their counts and digests, and each set follows it.
 	var proxyStates []*asmv1.ProxyState
 	for _, r := range proxies {
-		proxyStates = append(proxyStates, &asmv1.ProxyState{Proxy: proxyToProto(r.Proxy), Routes: routesToProto(r.Routes)})
+		proxyStates = append(proxyStates, proxyStateToProto(r))
 	}
 	p.enqueueLocked("snapshot", id, seq, &asmv1.Snapshot{
 		EventId:   id,
@@ -460,6 +446,10 @@ func (p *Publisher) enqueueSnapshot(listeners []state.Listener, proxies []model.
 	})
 	// Read after the push: a drop the push itself caused is older than this snapshot.
 	p.snapOverflowMark = p.q.Overflowed()
+	for _, r := range proxies {
+		r.Trigger, r.At = model.ProxyTriggerSnapshot, time.Now()
+		p.enqueueProxyRoutesLocked(r)
+	}
 }
 
 func (p *Publisher) enqueueLocked(suffix, id string, seq uint64, msg proto.Message) {

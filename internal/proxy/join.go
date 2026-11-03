@@ -289,7 +289,24 @@ func listenMatches(k model.ListenerKey, listen string) bool {
 	return a.Unmap() == k.Addr
 }
 
-// BehindProxy indexes the routes by the backend listener they end at.
+// MaxRefs bounds the behind_proxy entries of one listener.
+const MaxRefs = 32
+
+// MaxRoutes bounds the routes published for one proxy.
+const MaxRoutes = 500
+
+// Cap cuts a route set to MaxRoutes, keeping the first ones (config order, then the
+// inferred ones), and records the total.
+func Cap(r model.ProxyRoutes) model.ProxyRoutes {
+	if len(r.Routes) > MaxRoutes {
+		r.Truncated, r.TotalRoutes = true, len(r.Routes)
+		r.Routes = r.Routes[:MaxRoutes]
+	}
+	return r
+}
+
+// BehindProxy indexes the routes by the backend listener they end at (at most MaxRefs
+// per listener).
 func BehindProxy(sets []model.ProxyRoutes) map[model.ListenerKey][]model.ProxyRef {
 	out := make(map[model.ListenerKey][]model.ProxyRef)
 	for _, s := range sets {
@@ -306,7 +323,8 @@ func BehindProxy(sets []model.ProxyRoutes) map[model.ListenerKey][]model.ProxyRe
 					Frontends: r.Frontends, ServerNames: r.ServerNames, Path: r.Path,
 					Config: b.Config, Seen: b.Seen,
 				}
-				if !slices.ContainsFunc(out[*b.Listener], func(o model.ProxyRef) bool { return sameRef(o, ref) }) {
+				if len(out[*b.Listener]) < MaxRefs &&
+					!slices.ContainsFunc(out[*b.Listener], func(o model.ProxyRef) bool { return sameRef(o, ref) }) {
 					out[*b.Listener] = append(out[*b.Listener], ref)
 				}
 			}

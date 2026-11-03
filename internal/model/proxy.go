@@ -26,6 +26,9 @@ const (
 	ProxyTriggerTraffic  = "traffic"
 	ProxyTriggerRecheck  = "recheck"
 	ProxyTriggerStopped  = "stopped"
+	// ProxyTriggerSnapshot: the route set follows a snapshot, which carries only its
+	// digest.
+	ProxyTriggerSnapshot = "snapshot"
 )
 
 // ProxyInstance is one reverse proxy: its process tree, its listeners and its config.
@@ -41,6 +44,8 @@ type ProxyInstance struct {
 	ConfigPath string
 	Files      []string
 	Notes      []string
+	// ProcessCount is how many processes the proxy has (Procs may list fewer).
+	ProcessCount int
 }
 
 // Master is the root of the proxy's process tree (zero when unknown).
@@ -94,6 +99,9 @@ type ProxyRoutes struct {
 	Removed bool
 	Trigger string
 	At      time.Time
+	// Truncated: Routes holds the first of TotalRoutes routes.
+	Truncated   bool
+	TotalRoutes int
 }
 
 // ProxyRef names a proxy route that ends at a listener.
@@ -111,7 +119,8 @@ type ProxyRef struct {
 // SameStructure reports whether two route sets publish the same thing, ignoring the
 // connection counters, last-seen times, trigger and time, which change with traffic.
 func (r ProxyRoutes) SameStructure(o ProxyRoutes) bool {
-	if r.Removed != o.Removed || !r.Proxy.equal(o.Proxy) || len(r.Routes) != len(o.Routes) {
+	if r.Removed != o.Removed || r.Truncated != o.Truncated || r.TotalRoutes != o.TotalRoutes ||
+		!r.Proxy.equal(o.Proxy) || len(r.Routes) != len(o.Routes) {
 		return false
 	}
 	for i := range r.Routes {
@@ -126,7 +135,7 @@ func (p ProxyInstance) equal(o ProxyInstance) bool {
 	return p.ID == o.ID && p.Kind == o.Kind && p.NetNS == o.NetNS &&
 		slices.EqualFunc(p.Procs, o.Procs, Process.SameIdentity) &&
 		slices.Equal(p.Listeners, o.Listeners) && p.ConfigPath == o.ConfigPath &&
-		slices.Equal(p.Files, o.Files) && slices.Equal(p.Notes, o.Notes)
+		slices.Equal(p.Files, o.Files) && slices.Equal(p.Notes, o.Notes) && p.ProcessCount == o.ProcessCount
 }
 
 func (r ProxyRoute) sameStructure(o ProxyRoute) bool {

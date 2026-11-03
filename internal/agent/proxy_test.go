@@ -129,3 +129,40 @@ func TestSnapshotCarriesProxiesAndBehindProxy(t *testing.T) {
 		t.Fatalf("snapshot refs = %+v proxies = %+v", refs, proxies)
 	}
 }
+
+func TestProxyRoutesRateLimitedPerProxy(t *testing.T) {
+	updates := make(chan proxy.Update, 4)
+	baseline := []model.Observation{obs(model.Opened, 1, 8080, 812, model.SourceBaseline)}
+	h := startWith(t, baseline, nil, Options{Proxies: updates, ProxyMinInterval: 300 * time.Millisecond})
+	close(h.release)
+	h.snapshot()
+	start := time.Now()
+	updates <- proxy.Update{States: []proxy.State{nginxState(start, model.ProxyTriggerStarted)}}
+	h.proxyRoutes()
+	changed := nginxState(start.Add(time.Millisecond), model.ProxyTriggerConfig)
+	changed.Routes[0].Path = "/v2"
+	updates <- proxy.Update{States: []proxy.State{changed}}
+	routes := h.proxyRoutes()
+	if waited := time.Since(start); waited < 250*time.Millisecond {
+		t.Fatalf("second route set after %s, inside the interval", waited)
+	}
+	if routes[0].Trigger != model.ProxyTriggerConfig || routes[0].Routes[0].Path != "/v2" {
+		t.Fatalf("held-back routes = %+v", routes[0])
+	}
+}
+
+func TestRouteSetCapped(t *testing.T) {
+	updates := make(chan proxy.Update, 1)
+	h := startWith(t, nil, nil, Options{Proxies: updates})
+	close(h.release)
+	h.snapshot()
+	s := nginxState(time.Now(), model.ProxyTriggerStarted)
+	for len(s.Routes) < proxy.MaxRoutes+7 {
+		s.Routes = append(s.Routes, s.Routes[0])
+	}
+	updates <- proxy.Update{States: []proxy.State{s}}
+	r := h.proxyRoutes()[0]
+	if !r.Truncated || r.TotalRoutes != proxy.MaxRoutes+7 || len(r.Routes) != proxy.MaxRoutes {
+		t.Fatalf("truncated=%v total=%d routes=%d", r.Truncated, r.TotalRoutes, len(r.Routes))
+	}
+}

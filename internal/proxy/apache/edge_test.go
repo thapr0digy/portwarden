@@ -41,7 +41,7 @@ ProxyPass /if http://127.0.0.1:1001/
 		`path="/v" proxy`, // mod_version.c is static
 		`path="/a" proxy "http://127.0.0.1:2000/"`,
 		"-> 127.0.0.1 127.0.0.1:8000", // fcgi's default port
-		`path="/dot"`,                      // a directory Include reads dotfiles too
+		`path="/dot"`,                 // a directory Include reads dotfiles too
 		"*:* names= path=\"~ ^/(.*)$\" proxy \"http://%{HTTP_HOST}:81/$1\"\n    -> %{HTTP_HOST}:81 (unresolved: variable in %{HTTP_HOST}:81)",
 		"unresolved: balancer://nobody has no members",
 		"conditional: <if %{HTTP_HOST} == 'x'>",

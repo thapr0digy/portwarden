@@ -1,0 +1,33 @@
+*:80,[::]:8443,127.0.0.1:8080,127.0.0.1:8081 names= path="if is_api" proxy "api" upstream=api
+    -> 127.0.0.1:9000 127.0.0.1:9000
+    -> 127.0.0.1:9001 127.0.0.1:9001 (backup)
+    -> [::1]:9002 [::1]:9002
+    note: acl is_api path_beg /api
+    @ /etc/pw-haproxy/haproxy.cfg:21
+*:80,[::]:8443,127.0.0.1:8080,127.0.0.1:8081 names= path="if is_static !is_api" proxy "static_be" upstream=static_be
+    -> unix@/run/static.sock unix=/run/static.sock
+    -> /run/static2.sock unix=/run/static2.sock
+    note: acl is_static hdr(host) -i static.example.com
+    note: acl is_api path_beg /api
+    @ /etc/pw-haproxy/haproxy.cfg:22
+*:80,[::]:8443,127.0.0.1:8080,127.0.0.1:8081 names= path="" proxy "%[req.hdr(host),lower,map(/etc/pw-haproxy/hosts.map,web_be)]"
+    -> %[req.hdr(host),lower,map(/etc/pw-haproxy/hosts.map,web_be)] (unresolved: dynamic backend %[req.hdr(host),lower,map(/etc/pw-haproxy/hosts.map,web_be)])
+    note: unresolved: dynamic backend %[req.hdr(host),lower,map(/etc/pw-haproxy/hosts.map,web_be)]
+    @ /etc/pw-haproxy/haproxy.cfg:23
+*:80,[::]:8443,127.0.0.1:8080,127.0.0.1:8081 names= path="default" proxy "web_be" upstream=web_be
+    -> localhost:8000 127.0.0.1:8000 [::1]:8000
+    -> 127.0.0.1 (unresolved: no port (the client's destination port is used))
+    @ /etc/pw-haproxy/haproxy.cfg:15
+0.0.0.0:5432 names= path="default" proxy "pg" upstream=pg
+    -> ipv4@127.0.0.1:5433 127.0.0.1:5433
+    @ /etc/pw-haproxy/haproxy.cfg:26
+127.0.0.1:8090 names= path="default" proxy "fallback" upstream=fallback
+    -> app.internal:8080 (unresolved: hostname app.internal (no DNS lookups); server-template)
+    @ /etc/pw-haproxy/haproxy.cfg:31
+127.0.0.1:8404 names= path="default" proxy "fallback" upstream=fallback
+    -> app.internal:8080 (unresolved: hostname app.internal (no DNS lookups); server-template)
+    @ /etc/pw-haproxy/haproxy.cfg:56
+*:3307 names= path="default" proxy "fallback" upstream=fallback
+    -> app.internal:8080 (unresolved: hostname app.internal (no DNS lookups); server-template)
+    note: default_backend takes precedence over this section's servers
+    @ /etc/pw-haproxy/haproxy.cfg:61

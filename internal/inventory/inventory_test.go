@@ -16,14 +16,28 @@ import (
 const host = "h1"
 
 type fakeStore struct {
-	cursors map[string]Cursor
-	applied []Event
-	silent  map[string]time.Time
-	last    map[string]time.Time
+	cursors   map[string]Cursor
+	applied   []Event
+	silent    map[string]time.Time
+	last      map[string]time.Time
+	forgotten map[string]uint64
 }
 
 func newFake() *fakeStore {
-	return &fakeStore{cursors: map[string]Cursor{}, silent: map[string]time.Time{}, last: map[string]time.Time{}}
+	return &fakeStore{cursors: map[string]Cursor{}, silent: map[string]time.Time{}, last: map[string]time.Time{},
+		forgotten: map[string]uint64{}}
+}
+
+func (f *fakeStore) Forget(_ context.Context, h string, seq uint64) (bool, error) {
+	_, existed := f.cursors[h]
+	delete(f.cursors, h)
+	delete(f.last, h)
+	f.forgotten[h] = max(f.forgotten[h], seq)
+	return existed, nil
+}
+
+func (f *fakeStore) ForgottenSeq(_ context.Context, h string) (uint64, error) {
+	return f.forgotten[h], nil
 }
 
 func (f *fakeStore) Cursor(_ context.Context, h string) (Cursor, bool, error) {

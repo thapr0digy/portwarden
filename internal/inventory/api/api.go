@@ -1,11 +1,18 @@
-// Package api serves the inventory read-only over HTTP as JSON:
+// Package api serves the inventory over HTTP as JSON:
 //
-//	GET /healthz                                   (no auth) database reachable
-//	GET /v1/hosts                                  every host
-//	GET /v1/hosts/{id}                             one host
-//	GET /v1/listeners?host=&proto=&port=&addr=&min_level=&unit=&exe=&limit=
-//	GET /v1/exposure-history?host=&key=&limit=     one listener's level changes, newest first
-//	GET /v1/proxy-routes?host=&proxy=              proxies with their route sets
+//	GET    /healthz                                (no auth) database reachable
+//	GET    /v1/hosts?limit=&cursor=                hosts by id
+//	GET    /v1/hosts/{id}                          one host
+//	DELETE /v1/hosts/{id}                          forget a decommissioned host (M8)
+//	GET    /v1/listeners?host=&proto=&port=&addr=&min_level=&unit=&exe=&limit=&cursor=
+//	GET    /v1/exposure-history?host=&key=&limit=&cursor=  one listener's level changes, newest first
+//	GET    /v1/proxy-routes?host=&proxy=           proxies with their route sets
+//
+// Lists are keyset-paged (M8): at most limit rows (default 1000, at most 10 000); when
+// more follow, the response has "X-Next-Cursor: <cursor>" and "Link: <same query with
+// cursor=…>; rel="next"". The body stays a JSON array. A cursor is opaque and belongs to
+// its list (another list's, or a mangled one, is 400); keep the other parameters the same
+// from page to page.
 //
 // Every /v1 request needs "Authorization: Bearer <token>"; the token is compared in
 // constant time (over SHA-256 digests, so its length does not leak either).
@@ -32,9 +39,21 @@ const MinTokenLength = 16
 
 // Server is the API.
 type Server struct {
-	r     inventory.Reader
-	token [sha256.Size]byte
+	r      inventory.Reader
+	token  [sha256.Size]byte
+	forget func(ctx context.Context, host string) (inventory.ForgetResult, error)
 }
+
+// SetForget enables DELETE /v1/hosts/{id} (the consumer's Forget); without it the call
+// answers 503.
+func (s *Server) SetForget(f func(ctx context.Context, host string) (inventory.ForgetResult, error)) {
+	s.forget = f
+}
+
+const (
+	defaultPage = 1000
+	maxPage     = 10000
+)
 
 // New returns a server that requires token on /v1.
 func New(r inventory.Reader, token string) (*Server, error) {
@@ -51,6 +70,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.Handle("GET /v1/hosts", s.auth(s.hosts))
 	mux.Handle("GET /v1/hosts/{id}", s.auth(s.host))
+	mux.Handle("DELETE /v1/hosts/{id}", s.auth(s.forgetHost))
 	mux.Handle("GET /v1/listeners", s.auth(s.listeners))
 	mux.Handle("GET /v1/exposure-history", s.auth(s.history))
 	mux.Handle("GET /v1/proxy-routes", s.auth(s.proxies))
@@ -92,8 +112,64 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hosts(w http.ResponseWriter, r *http.Request) {
-	hs, err := s.r.Hosts(r.Context())
+	limit, err := pageLimit(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	q := inventory.HostQuery{Limit: limit + 1}
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		q.After = &inventory.HostCursor{}
+		if inventory.DecodeCursor(c, q.After) != nil {
+			writeError(w, http.StatusBadRequest, "cursor: invalid")
+			return
+		}
+	}
+	hs, err := s.r.Hosts(r.Context(), q)
+	if err == nil && len(hs) > limit {
+		hs = hs[:limit]
+		setNext(w, r, inventory.EncodeCursor(inventory.HostCursor{ID: hs[limit-1].ID}))
+	}
 	reply(w, hs, err)
+}
+
+func (s *Server) forgetHost(w http.ResponseWriter, r *http.Request) {
+	if s.forget == nil {
+		writeError(w, http.StatusServiceUnavailable, "forget is unavailable (no bus)")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	res, err := s.forget(ctx, r.PathValue("id"))
+	switch {
+	case errors.Is(err, inventory.ErrBadHost):
+		writeError(w, http.StatusBadRequest, "host id must be one plain subject token (and not reserved)")
+	case err != nil:
+		slog.Error("api: forget failed", "host", r.PathValue("id"), "err", err)
+		writeError(w, http.StatusServiceUnavailable, "forget failed; nothing or only part was done, run it again")
+	default:
+		writeJSON(w, http.StatusOK, res)
+	}
+}
+
+// pageLimit reads ?limit= (default 1000, 1 to 10 000).
+func pageLimit(r *http.Request) (int, error) {
+	n, err := intParam(r.URL.Query().Get("limit"), 1, maxPage)
+	if err != nil {
+		return 0, errors.New("limit: " + err.Error())
+	}
+	if n == 0 {
+		n = defaultPage
+	}
+	return n, nil
+}
+
+// setNext announces the next page: X-Next-Cursor, and a Link to the same query with it.
+func setNext(w http.ResponseWriter, r *http.Request, cursor string) {
+	q := r.URL.Query()
+	q.Set("cursor", cursor)
+	w.Header().Set("X-Next-Cursor", cursor)
+	w.Header().Set("Link", "<"+r.URL.Path+"?"+q.Encode()+`>; rel="next"`)
 }
 
 func (s *Server) host(w http.ResponseWriter, r *http.Request) {
@@ -121,11 +197,25 @@ func (s *Server) listeners(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "min_level: "+err.Error())
 		return
 	}
-	if f.Limit, err = intParam(q.Get("limit"), 1, 10000); err != nil {
-		writeError(w, http.StatusBadRequest, "limit: "+err.Error())
+	limit, err := pageLimit(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	f.Limit = limit + 1
+	if c := q.Get("cursor"); c != "" {
+		f.After = &inventory.ListenerCursor{}
+		if inventory.DecodeCursor(c, f.After) != nil {
+			writeError(w, http.StatusBadRequest, "cursor: invalid")
+			return
+		}
+	}
 	ls, err := s.r.Listeners(r.Context(), f)
+	if err == nil && len(ls) > limit {
+		ls = ls[:limit]
+		l := ls[limit-1]
+		setNext(w, r, inventory.EncodeCursor(inventory.ListenerCursor{Host: l.Host, Proto: l.Proto, Port: l.Port, Key: l.Key}))
+	}
 	reply(w, ls, err)
 }
 
@@ -136,12 +226,25 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "host and key are required")
 		return
 	}
-	limit, err := intParam(q.Get("limit"), 1, 10000)
+	limit, err := pageLimit(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "limit: "+err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	hs, err := s.r.History(r.Context(), host, key, limit)
+	hq := inventory.HistoryQuery{Host: host, Key: key, Limit: limit + 1}
+	if c := q.Get("cursor"); c != "" {
+		hq.After = &inventory.HistoryCursor{}
+		if inventory.DecodeCursor(c, hq.After) != nil {
+			writeError(w, http.StatusBadRequest, "cursor: invalid")
+			return
+		}
+	}
+	hs, err := s.r.History(r.Context(), hq)
+	if err == nil && len(hs) > limit {
+		hs = hs[:limit]
+		last := hs[limit-1]
+		setNext(w, r, inventory.EncodeCursor(inventory.HistoryCursor{At: last.At, ID: last.ID}))
+	}
 	reply(w, hs, err)
 }
 

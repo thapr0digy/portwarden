@@ -16,12 +16,26 @@ import (
 const token = "0123456789abcdef-test"
 
 type fakeReader struct {
-	filter inventory.ListenerFilter
-	fail   bool
+	filter  inventory.ListenerFilter
+	hostQ   inventory.HostQuery
+	histQ   inventory.HistoryQuery
+	fail    bool
+	hostIDs []string // served by Hosts, in order (default: just h1)
 }
 
-func (f *fakeReader) Hosts(context.Context) ([]inventory.HostView, error) {
-	return []inventory.HostView{{ID: "h1"}}, nil
+func (f *fakeReader) Hosts(_ context.Context, q inventory.HostQuery) ([]inventory.HostView, error) {
+	f.hostQ = q
+	ids := f.hostIDs
+	if ids == nil {
+		ids = []string{"h1"}
+	}
+	out := []inventory.HostView{}
+	for _, id := range ids {
+		if (q.After == nil || id > q.After.ID) && len(out) < q.Limit {
+			out = append(out, inventory.HostView{ID: id})
+		}
+	}
+	return out, nil
 }
 func (f *fakeReader) Host(_ context.Context, id string) (inventory.HostView, bool, error) {
 	return inventory.HostView{ID: id}, id == "h1", nil
@@ -33,7 +47,8 @@ func (f *fakeReader) Listeners(_ context.Context, lf inventory.ListenerFilter) (
 	}
 	return []inventory.ListenerView{{Host: "h1", Port: 22}}, nil
 }
-func (f *fakeReader) History(context.Context, string, string, int) ([]inventory.HistoryView, error) {
+func (f *fakeReader) History(_ context.Context, q inventory.HistoryQuery) ([]inventory.HistoryView, error) {
+	f.histQ = q
 	return []inventory.HistoryView{}, nil
 }
 func (f *fakeReader) Proxies(context.Context, string, string) ([]inventory.ProxyView, error) {
@@ -89,7 +104,8 @@ func TestListenerFilters(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
-	want := inventory.ListenerFilter{Host: "h1", Proto: "tcp", Port: 443, MinLevel: 3, Unit: "nginx.service", Exe: "/usr/sbin/nginx", Limit: 5}
+	// The API asks for one row more than the page (to know whether another follows).
+	want := inventory.ListenerFilter{Host: "h1", Proto: "tcp", Port: 443, MinLevel: 3, Unit: "nginx.service", Exe: "/usr/sbin/nginx", Limit: 6}
 	if f.filter != want {
 		t.Fatalf("filter %+v", f.filter)
 	}

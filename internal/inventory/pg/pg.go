@@ -233,6 +233,8 @@ func (s *Store) apply(ctx context.Context, e inventory.Event) error {
 		case *asmv1.Heartbeat:
 			_, err = tx.Exec(ctx, "UPDATE hosts SET last_heartbeat = GREATEST(last_heartbeat, $2), ringbuf_drops = $3, queue_drops = $4 WHERE host_id = $1",
 				host, at, int64(m.GetRingbufDrops()), int64(m.GetQueueDrops()))
+		case *asmv1.TamperEvent:
+			// Only its status is kept (below, with the other agent-only fields).
 		default:
 			err = fmt.Errorf("pg: unexpected message %T", e.Msg)
 		}
@@ -246,6 +248,11 @@ func (s *Store) apply(ctx context.Context, e inventory.Event) error {
 			if !inventory.ValidFirewallFingerprint(fp) {
 				s.warnBadFirewall(host, fp)
 			} else if err := setFirewall(ctx, tx, host, fp, at); err != nil {
+				return err
+			}
+		}
+		if st, ok := inventory.TamperOf(e.Msg); ok {
+			if err := setTamper(ctx, tx, host, st, at); err != nil {
 				return err
 			}
 		}
@@ -286,6 +293,17 @@ func setFirewall(ctx context.Context, tx pgx.Tx, host, fp string, at time.Time) 
 	}
 	_, err := tx.Exec(ctx, "UPDATE hosts SET firewall_fingerprint = $2, firewall_changed_at = $3, updated_at = now() WHERE host_id = $1",
 		host, clean(next.Fingerprint), next.ChangedAt)
+	return err
+}
+
+// setTamper stores a host's latest tamper status (the consumer's run and sequence order
+// keeps a late message from rolling it back).
+func setTamper(ctx context.Context, tx pgx.Tx, host string, st *asmv1.TamperStatus, at time.Time) error {
+	b, err := inventory.TamperJSON(st)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, "UPDATE hosts SET tamper = $2, tamper_at = $3 WHERE host_id = $1", host, json.RawMessage(b), at)
 	return err
 }
 

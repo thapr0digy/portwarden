@@ -187,7 +187,7 @@ COMMIT
 		{"tcp", 1500, firewall.Open, nil},       // via svc
 		{"tcp", 2000, firewall.Closed, nil},     // svc rejects
 		{"udp", 53, firewall.Undetermined, nil}, // source port 53: the client picks it
-		{"tcp", 25, firewall.Undetermined, nil}, // -m recent
+		{"tcp", 25, firewall.Closed, nil},       // -m recent --rcheck: a fresh source has no entry
 		{"tcp", 26, firewall.Closed, nil},       // mark is 0
 		{"tcp", 27, firewall.Open, nil},         // in the destination range
 		{"tcp", 28, firewall.Closed, nil},       // broadcast only
@@ -235,5 +235,64 @@ func TestNATDestination(t *testing.T) {
 		if got != want {
 			t.Errorf("%s: %q, want %q", in, got, want)
 		}
+	}
+}
+
+// ufw-limit.v4.txt: ufw with `ufw limit 22/tcp` and `ufw allow 8443/tcp` on Ubuntu 24.04
+// (the -m recent --set / --update --hitcount pair). A fresh outside source is under the
+// limit, so 22 is open.
+func TestUfwLimitFixture(t *testing.T) {
+	rs := load(t, "../testdata/ufw-limit.v4.txt", firewall.FamilyIP)
+	check(t, rs, []portCase{
+		{"tcp", 22, firewall.Open, nil},
+		{"tcp", 8443, firewall.Open, nil},
+		{"tcp", 80, firewall.Closed, nil},
+	})
+	if n := eval(rs, "tcp", 80).Notes(); len(n) != 0 {
+		t.Errorf("a limit on a LOG rule is no note: %v", n)
+	}
+}
+
+// fail2ban-ipset.v4.txt: fail2ban's ipset layout (a REJECT for sources in f2b-sshd
+// before the allow), recorded in a scratch netns with iptables-save.
+func TestFail2banIpsetFixture(t *testing.T) {
+	rs := load(t, "../testdata/fail2ban-ipset.v4.txt", firewall.FamilyIP)
+	check(t, rs, []portCase{
+		{"tcp", 22, firewall.Open, nil},   // an outside source is not in the ban set
+		{"tcp", 2222, firewall.Open, nil}, // ! --match-set src: not banned, accepted
+		{"tcp", 23, firewall.Closed, nil},
+	})
+}
+
+func TestRateAndConnLimits(t *testing.T) {
+	dump := `*filter
+:INPUT DROP [0:0]
+-A INPUT -p tcp -m tcp --dport 1 -m limit --limit 5/sec --limit-burst 10 -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 2 -m hashlimit --hashlimit-above 10/sec --hashlimit-mode srcip --hashlimit-name x -j DROP
+-A INPUT -p tcp -m tcp --dport 2 -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 3 -m connlimit --connlimit-above 5 --connlimit-mask 32 --connlimit-saddr -j REJECT
+-A INPUT -p tcp -m tcp --dport 3 -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 4 -m recent --rcheck --seconds 60 --name x --rdest -j DROP
+-A INPUT -p tcp -m tcp --dport 4 -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 5 --tcp-flags FIN,SYN,RST,ACK SYN -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 6 ! --tcp-flags SYN,ACK SYN -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 7 -m set --match-set allow dst -j ACCEPT
+COMMIT
+`
+	rs, err := Parse([]byte(dump), firewall.FamilyIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(t, rs, []portCase{
+		{"tcp", 1, firewall.Open, nil},
+		{"tcp", 2, firewall.Open, nil},
+		{"tcp", 3, firewall.Open, nil},
+		{"tcp", 4, firewall.Undetermined, nil}, // --rdest: the list is keyed on the destination
+		{"tcp", 5, firewall.Open, nil},
+		{"tcp", 6, firewall.Closed, nil},
+		{"tcp", 7, firewall.Undetermined, nil}, // a destination set
+	})
+	if n := eval(rs, "tcp", 1).Notes(); !slices.Equal(n, []string{"rate-limited"}) {
+		t.Errorf("notes %v", n)
 	}
 }

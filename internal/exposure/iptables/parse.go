@@ -202,6 +202,29 @@ type ruleParser struct {
 	module string // the last -m
 	chains map[string]*firewall.Chain
 	rule   firewall.Rule
+	recent *recentMatch
+}
+
+// recentMatch is a -m recent match being read.
+type recentMatch struct {
+	action string
+	neg    bool
+	rdest  bool
+}
+
+// flushRecent decides a pending -m recent: a fresh outside source has no entry in a
+// source-keyed list, so --set/--remove hold and --rcheck/--update do not. A list keyed
+// on the destination (--rdest) may already hold the host's address: maybe.
+func (p *ruleParser) flushRecent() {
+	r := p.recent
+	p.recent = nil
+	switch {
+	case r == nil:
+	case r.rdest:
+		p.add(firewall.Match{Field: firewall.FieldUnknown, Unknown: "recent --rdest"})
+	case (r.action == "--set" || r.action == "--remove") == r.neg:
+		p.add(never())
+	}
 }
 
 // never is a match nothing satisfies (an empty protocol set).
@@ -266,6 +289,7 @@ func parseRule(args []string, fam firewall.Family, chains map[string]*firewall.C
 		case "-f", "--fragment":
 			p.add(firewall.Match{Field: firewall.FieldUnknown, Unknown: "fragment"})
 		case "-m", "--match":
+			p.flushRecent()
 			v, err := p.value(opt)
 			if err != nil {
 				return p.rule, err
@@ -280,7 +304,12 @@ func parseRule(args []string, fam firewall.Family, chains map[string]*firewall.C
 			if !knownModules[v] {
 				p.add(firewall.Match{Field: firewall.FieldUnknown, Unknown: "-m " + v})
 			}
+			if v == "limit" {
+				// The first packet of a new connection is under any rate.
+				p.add(firewall.Match{Field: firewall.FieldAlways, Note: "rate-limited"})
+			}
 		case "-j", "--jump", "-g", "--goto":
+			p.flushRecent()
 			v, err := p.value(opt)
 			if err != nil {
 				return p.rule, err
@@ -298,6 +327,16 @@ func parseRule(args []string, fam firewall.Family, chains map[string]*firewall.C
 			}
 		}
 	}
+	p.flushRecent()
+	if target == nil {
+		// No verdict (LOG and the like): a rate limit here decides nothing worth noting.
+		for i, x := range p.rule.Exprs {
+			if m, ok := x.(firewall.Match); ok && m.Note != "" {
+				m.Note = ""
+				p.rule.Exprs[i] = m
+			}
+		}
+	}
 	p.rule.Exprs = append(p.rule.Exprs, target...)
 	return p.rule, nil
 }
@@ -306,6 +345,7 @@ var knownModules = map[string]bool{
 	"tcp": true, "udp": true, "multiport": true, "conntrack": true, "state": true,
 	"addrtype": true, "mark": true, "comment": true, "iprange": true, "pkttype": true,
 	"nfacct": true, "icmp": true, "icmp6": true, "icmpv6": true,
+	"recent": true, "limit": true, "hashlimit": true, "connlimit": true, "set": true,
 }
 
 var headerModules = map[string]bool{"rt": true, "frag": true, "hbh": true, "dst": true, "ah": true, "esp": true, "mh": true}
@@ -472,10 +512,150 @@ func (p *ruleParser) moduleOption(opt string, neg bool) error {
 	case "--icmp-type", "--icmpv6-type":
 		_, err := p.value(opt)
 		return err
+	case "--tcp-flags":
+		mask, err := p.value(opt)
+		if err != nil {
+			return err
+		}
+		comp, err := p.value(opt)
+		if err != nil {
+			return err
+		}
+		m, ok1 := tcpFlags(mask)
+		c, ok2 := tcpFlags(comp)
+		if !ok1 || !ok2 {
+			return fmt.Errorf("bad --tcp-flags %s %s", mask, comp)
+		}
+		p.add(firewall.Match{Field: firewall.FieldTCPFlags, Op: op(neg), Proto: "tcp", Mask: m, Mark: c})
+	default:
+		return p.statefulOption(opt, neg, unknown)
+	}
+	return nil
+}
+
+// statefulOption decides the per-source state modules for one outside source sending
+// the first packet of a new connection: it has no recent-list entry, no other
+// connection, is under every rate, and is in no source set.
+func (p *ruleParser) statefulOption(opt string, neg bool, unknown func() error) error {
+	matches := func(m bool) {
+		if m == neg {
+			p.add(never())
+		}
+	}
+	valueOf := func() error { _, err := p.value(opt); return err }
+	switch p.module {
+	case "recent":
+		// Decided in flushRecent, once every option is known (--rdest may follow).
+		switch opt {
+		case "--set", "--remove", "--rcheck", "--update":
+			p.recent = &recentMatch{action: opt, neg: neg}
+		case "--rdest":
+			if p.recent == nil {
+				p.recent = &recentMatch{}
+			}
+			p.recent.rdest = true
+		case "--rsource", "--reap", "--rttl":
+		case "--name", "--seconds", "--hitcount", "--mask":
+			return valueOf()
+		default:
+			return unknown()
+		}
+	case "limit":
+		switch opt {
+		case "--limit", "--limit-burst":
+			return valueOf()
+		default:
+			return unknown()
+		}
+	case "hashlimit":
+		switch opt {
+		case "--hashlimit-upto", "--hashlimit":
+			if err := valueOf(); err != nil {
+				return err
+			}
+			matches(true)
+			if !neg {
+				p.add(firewall.Match{Field: firewall.FieldAlways, Note: "rate-limited"})
+			}
+		case "--hashlimit-above":
+			if err := valueOf(); err != nil {
+				return err
+			}
+			matches(false)
+		case "--hashlimit-burst", "--hashlimit-mode", "--hashlimit-name", "--hashlimit-srcmask",
+			"--hashlimit-dstmask", "--hashlimit-htable-size", "--hashlimit-htable-max",
+			"--hashlimit-htable-expire", "--hashlimit-htable-gcinterval":
+			return valueOf()
+		default:
+			return unknown()
+		}
+	case "connlimit":
+		switch opt {
+		case "--connlimit-above", "--connlimit-upto":
+			v, err := p.value(opt)
+			if err != nil {
+				return err
+			}
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return fmt.Errorf("bad %s %q", opt, v)
+			}
+			// This connection is the source's only one.
+			if opt == "--connlimit-above" {
+				matches(1 > n)
+			} else {
+				matches(1 <= n)
+			}
+		case "--connlimit-mask":
+			return valueOf()
+		case "--connlimit-saddr":
+		case "--connlimit-daddr":
+			p.add(firewall.Match{Field: firewall.FieldUnknown, Unknown: "connlimit --connlimit-daddr"})
+		default:
+			return unknown()
+		}
+	case "set":
+		switch opt {
+		case "--match-set":
+			name, err := p.value(opt)
+			if err != nil {
+				return err
+			}
+			flags, err := p.value(opt)
+			if err != nil {
+				return err
+			}
+			// Keyed first on the source: an outside source is not in the set.
+			if strings.HasPrefix(flags, "src") {
+				matches(false)
+			} else {
+				p.add(firewall.Match{Field: firewall.FieldUnknown, Unknown: "set " + name + " " + flags})
+			}
+		case "--return-nomatch", "--update-counters", "--update-subcounters":
+		default:
+			return unknown()
+		}
 	default:
 		return unknown()
 	}
 	return nil
+}
+
+var tcpFlagNames = map[string]uint32{
+	"FIN": firewall.TCPFin, "SYN": firewall.TCPSyn, "RST": firewall.TCPRst, "PSH": firewall.TCPPsh,
+	"ACK": firewall.TCPAck, "URG": firewall.TCPUrg, "ALL": 0x3f, "NONE": 0,
+}
+
+func tcpFlags(v string) (uint32, bool) {
+	var bits uint32
+	for _, name := range strings.Split(v, ",") {
+		b, ok := tcpFlagNames[strings.ToUpper(name)]
+		if !ok {
+			return 0, false
+		}
+		bits |= b
+	}
+	return bits, true
 }
 
 // l4 is the transport protocol port options apply to: -p, else the module name.

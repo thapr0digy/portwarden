@@ -436,3 +436,13 @@ message ProbeRequest {
   // exposure (a level change), cloud (a cloud verdict) or reprobe (periodic).
   string reason = 9;
 }
+
+// HostForgotten is published by the inventory on pwb.inventory.<host>.forgotten when an
+// operator forgets a host (M8: a decommissioned server). Consumers drop the host's state
+// and skip every message of the host stored in the stream before this one (by stream
+// sequence); a later message from the host makes it a new host.
+message HostForgotten {
+  string event_id = 1;
+  string host_id = 2;
+  google.protobuf.Timestamp at = 3;
+}

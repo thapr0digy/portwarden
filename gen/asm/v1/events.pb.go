@@ -2732,6 +2732,70 @@ func (x *ProbeRequest) GetReason() string {
 	return ""
 }
 
+// HostForgotten is published by the inventory on pwb.inventory.<host>.forgotten when an
+// operator forgets a host (M8: a decommissioned server). Consumers drop the host's state
+// and skip every message of the host stored in the stream before this one (by stream
+// sequence); a later message from the host makes it a new host.
+type HostForgotten struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	HostId        string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	At            *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=at,proto3" json:"at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HostForgotten) Reset() {
+	*x = HostForgotten{}
+	mi := &file_asm_v1_events_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostForgotten) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostForgotten) ProtoMessage() {}
+
+func (x *HostForgotten) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostForgotten.ProtoReflect.Descriptor instead.
+func (*HostForgotten) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *HostForgotten) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *HostForgotten) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *HostForgotten) GetAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.At
+	}
+	return nil
+}
+
 var File_asm_v1_events_proto protoreflect.FileDescriptor
 
 const file_asm_v1_events_proto_rawDesc = "" +
@@ -2996,7 +3060,11 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\taddresses\x18\x06 \x03(\tR\taddresses\x12\x14\n" +
 	"\x05ports\x18\a \x03(\rR\x05ports\x12\x14\n" +
 	"\x05proto\x18\b \x01(\tR\x05proto\x12\x16\n" +
-	"\x06reason\x18\t \x01(\tR\x06reason*G\n" +
+	"\x06reason\x18\t \x01(\tR\x06reason\"o\n" +
+	"\rHostForgotten\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
+	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12*\n" +
+	"\x02at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x02at*G\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
@@ -3030,7 +3098,7 @@ func file_asm_v1_events_proto_rawDescGZIP() []byte {
 }
 
 var file_asm_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_asm_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_asm_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_asm_v1_events_proto_goTypes = []any{
 	(Kind)(0),                     // 0: asm.v1.Kind
 	(Source)(0),                   // 1: asm.v1.Source
@@ -3058,12 +3126,13 @@ var file_asm_v1_events_proto_goTypes = []any{
 	(*ProxyRoutes)(nil),           // 23: asm.v1.ProxyRoutes
 	(*ProxyRef)(nil),              // 24: asm.v1.ProxyRef
 	(*ProbeRequest)(nil),          // 25: asm.v1.ProbeRequest
-	nil,                           // 26: asm.v1.TamperStatus.ProgRunCountsEntry
-	(*timestamppb.Timestamp)(nil), // 27: google.protobuf.Timestamp
+	(*HostForgotten)(nil),         // 26: asm.v1.HostForgotten
+	nil,                           // 27: asm.v1.TamperStatus.ProgRunCountsEntry
+	(*timestamppb.Timestamp)(nil), // 28: google.protobuf.Timestamp
 }
 var file_asm_v1_events_proto_depIdxs = []int32{
 	4,  // 0: asm.v1.Process.container:type_name -> asm.v1.Container
-	27, // 1: asm.v1.ListenerEvent.observed_at:type_name -> google.protobuf.Timestamp
+	28, // 1: asm.v1.ListenerEvent.observed_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: asm.v1.ListenerEvent.kind:type_name -> asm.v1.Kind
 	1,  // 3: asm.v1.ListenerEvent.source:type_name -> asm.v1.Source
 	3,  // 4: asm.v1.ListenerEvent.listener:type_name -> asm.v1.Listener
@@ -3076,57 +3145,58 @@ var file_asm_v1_events_proto_depIdxs = []int32{
 	5,  // 11: asm.v1.ListenerState.processes:type_name -> asm.v1.Process
 	13, // 12: asm.v1.ListenerState.exposure:type_name -> asm.v1.Exposure
 	24, // 13: asm.v1.ListenerState.behind_proxy:type_name -> asm.v1.ProxyRef
-	27, // 14: asm.v1.Snapshot.taken_at:type_name -> google.protobuf.Timestamp
+	28, // 14: asm.v1.Snapshot.taken_at:type_name -> google.protobuf.Timestamp
 	7,  // 15: asm.v1.Snapshot.listeners:type_name -> asm.v1.ListenerState
 	15, // 16: asm.v1.Snapshot.host:type_name -> asm.v1.HostInfo
 	22, // 17: asm.v1.Snapshot.proxies:type_name -> asm.v1.ProxyState
-	27, // 18: asm.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
+	28, // 18: asm.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
 	11, // 19: asm.v1.Heartbeat.tamper:type_name -> asm.v1.TamperStatus
-	27, // 20: asm.v1.TamperFlag.since:type_name -> google.protobuf.Timestamp
+	28, // 20: asm.v1.TamperFlag.since:type_name -> google.protobuf.Timestamp
 	10, // 21: asm.v1.TamperStatus.flags:type_name -> asm.v1.TamperFlag
-	27, // 22: asm.v1.TamperStatus.checked_at:type_name -> google.protobuf.Timestamp
-	26, // 23: asm.v1.TamperStatus.prog_run_counts:type_name -> asm.v1.TamperStatus.ProgRunCountsEntry
-	27, // 24: asm.v1.TamperEvent.observed_at:type_name -> google.protobuf.Timestamp
+	28, // 22: asm.v1.TamperStatus.checked_at:type_name -> google.protobuf.Timestamp
+	27, // 23: asm.v1.TamperStatus.prog_run_counts:type_name -> asm.v1.TamperStatus.ProgRunCountsEntry
+	28, // 24: asm.v1.TamperEvent.observed_at:type_name -> google.protobuf.Timestamp
 	11, // 25: asm.v1.TamperEvent.status:type_name -> asm.v1.TamperStatus
 	10, // 26: asm.v1.TamperEvent.raised:type_name -> asm.v1.TamperFlag
 	10, // 27: asm.v1.TamperEvent.cleared:type_name -> asm.v1.TamperFlag
 	2,  // 28: asm.v1.Exposure.level:type_name -> asm.v1.ExposureLevel
 	14, // 29: asm.v1.HostInfo.public_ips:type_name -> asm.v1.PublicIP
-	27, // 30: asm.v1.ExposureEvent.observed_at:type_name -> google.protobuf.Timestamp
+	28, // 30: asm.v1.ExposureEvent.observed_at:type_name -> google.protobuf.Timestamp
 	3,  // 31: asm.v1.ExposureEvent.listener:type_name -> asm.v1.Listener
 	5,  // 32: asm.v1.ExposureEvent.processes:type_name -> asm.v1.Process
 	13, // 33: asm.v1.ExposureEvent.exposure:type_name -> asm.v1.Exposure
 	13, // 34: asm.v1.ExposureEvent.previous:type_name -> asm.v1.Exposure
 	15, // 35: asm.v1.ExposureEvent.host:type_name -> asm.v1.HostInfo
-	27, // 36: asm.v1.ExposureConfirmation.observed_at:type_name -> google.protobuf.Timestamp
+	28, // 36: asm.v1.ExposureConfirmation.observed_at:type_name -> google.protobuf.Timestamp
 	3,  // 37: asm.v1.ExposureConfirmation.listener:type_name -> asm.v1.Listener
 	13, // 38: asm.v1.ExposureConfirmation.exposure:type_name -> asm.v1.Exposure
-	27, // 39: asm.v1.HostEvent.observed_at:type_name -> google.protobuf.Timestamp
+	28, // 39: asm.v1.HostEvent.observed_at:type_name -> google.protobuf.Timestamp
 	15, // 40: asm.v1.HostEvent.host:type_name -> asm.v1.HostInfo
 	15, // 41: asm.v1.HostEvent.previous:type_name -> asm.v1.HostInfo
 	5,  // 42: asm.v1.Proxy.processes:type_name -> asm.v1.Process
 	3,  // 43: asm.v1.Proxy.listeners:type_name -> asm.v1.Listener
 	3,  // 44: asm.v1.ProxyBackend.listener:type_name -> asm.v1.Listener
 	5,  // 45: asm.v1.ProxyBackend.processes:type_name -> asm.v1.Process
-	27, // 46: asm.v1.ProxyBackend.last_seen:type_name -> google.protobuf.Timestamp
+	28, // 46: asm.v1.ProxyBackend.last_seen:type_name -> google.protobuf.Timestamp
 	3,  // 47: asm.v1.ProxyRoute.frontends:type_name -> asm.v1.Listener
 	20, // 48: asm.v1.ProxyRoute.backends:type_name -> asm.v1.ProxyBackend
 	19, // 49: asm.v1.ProxyState.proxy:type_name -> asm.v1.Proxy
 	21, // 50: asm.v1.ProxyState.routes:type_name -> asm.v1.ProxyRoute
-	27, // 51: asm.v1.ProxyRoutes.observed_at:type_name -> google.protobuf.Timestamp
+	28, // 51: asm.v1.ProxyRoutes.observed_at:type_name -> google.protobuf.Timestamp
 	19, // 52: asm.v1.ProxyRoutes.proxy:type_name -> asm.v1.Proxy
 	21, // 53: asm.v1.ProxyRoutes.routes:type_name -> asm.v1.ProxyRoute
 	15, // 54: asm.v1.ProxyRoutes.host:type_name -> asm.v1.HostInfo
 	5,  // 55: asm.v1.ProxyRef.proxy:type_name -> asm.v1.Process
 	3,  // 56: asm.v1.ProxyRef.frontends:type_name -> asm.v1.Listener
-	27, // 57: asm.v1.ProbeRequest.requested_at:type_name -> google.protobuf.Timestamp
+	28, // 57: asm.v1.ProbeRequest.requested_at:type_name -> google.protobuf.Timestamp
 	3,  // 58: asm.v1.ProbeRequest.listener:type_name -> asm.v1.Listener
 	2,  // 59: asm.v1.ProbeRequest.level:type_name -> asm.v1.ExposureLevel
-	60, // [60:60] is the sub-list for method output_type
-	60, // [60:60] is the sub-list for method input_type
-	60, // [60:60] is the sub-list for extension type_name
-	60, // [60:60] is the sub-list for extension extendee
-	0,  // [0:60] is the sub-list for field type_name
+	28, // 60: asm.v1.HostForgotten.at:type_name -> google.protobuf.Timestamp
+	61, // [61:61] is the sub-list for method output_type
+	61, // [61:61] is the sub-list for method input_type
+	61, // [61:61] is the sub-list for extension type_name
+	61, // [61:61] is the sub-list for extension extendee
+	0,  // [0:61] is the sub-list for field type_name
 }
 
 func init() { file_asm_v1_events_proto_init() }
@@ -3142,7 +3212,7 @@ func file_asm_v1_events_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_asm_v1_events_proto_rawDesc), len(file_asm_v1_events_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   24,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

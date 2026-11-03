@@ -85,6 +85,11 @@ func TestPublishAndDurable(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("got %d messages, want 1 (dedupe)", n)
 	}
+	// PublishSeq reports the message's stream sequence (the forget watermark).
+	seq, err := p.PublishSeq(ctx, ForgottenSubject("h1"), NewEventID(), &asmv1.HostForgotten{HostId: "h1"})
+	if err != nil || seq != 2 {
+		t.Fatalf("PublishSeq = %d, %v; want 2", seq, err)
+	}
 	// Re-creating keeps the position: nothing is redelivered.
 	c, err = Durable(ctx, js, natsauth.ConsumerVerifier, DurableOptions{Filters: []string{"pwb.verifier.*.exposure"}, DeliverNew: true})
 	if err != nil {
@@ -102,13 +107,15 @@ func TestParseBackendSubjects(t *testing.T) {
 		CloudSubject("h"):        {"cloud", "h", "exposure"},
 		VerifierSubject("h"):     {"verifier", "h", "exposure"},
 		ProbeSubject("h"):        {"probe", "h", "request"},
+		ForgottenSubject("h"):    {"inventory", "h", "forgotten"},
 	} {
 		got, ok := Parse(subj)
 		if !ok || got != want {
 			t.Errorf("%s: %+v %v", subj, got, ok)
 		}
 	}
-	for _, bad := range []string{"pwb.agent.h.exposure", "pwb.cloud.h.other", "pwb.cloud..exposure", "pwb.cloud.h", "x.y"} {
+	for _, bad := range []string{"pwb.agent.h.exposure", "pwb.cloud.h.other", "pwb.cloud..exposure", "pwb.cloud.h", "x.y",
+		"pwb.inventory.h.exposure", "pwb.cloud.h.forgotten", "pwb.inventory..forgotten"} {
 		if _, ok := Parse(bad); ok {
 			t.Errorf("%s parsed", bad)
 		}

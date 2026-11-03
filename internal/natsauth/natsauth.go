@@ -10,8 +10,9 @@
 //   - inventory, alerter, verifier: backend services. Each may read the ASM_EVENTS stream
 //     through its own named durable consumers only, and subscribe only to its own inboxes
 //     _INBOX_<service>.>. None may publish under asm.>. The inventory publishes cloud
-//     verdicts (pwb.cloud.<host>.exposure) and probe requests (pwb.probe.<host>.request)
-//     and fetches single stream messages (gap reload); the verifier publishes its results
+//     verdicts (pwb.cloud.<host>.exposure), probe requests (pwb.probe.<host>.request) and
+//     forgotten hosts (pwb.inventory.<host>.forgotten, M8), and fetches single stream
+//     messages (gap reload); the verifier publishes its results
 //     (pwb.verifier.<host>.exposure). The alerter publishes nothing on the bus.
 //   - admin: creates and manages the stream ($JS.API.>), never given to a host.
 package natsauth
@@ -60,6 +61,7 @@ const (
 	cloudVerdicts     = "pwb.cloud.*.exposure"
 	probeRequests     = "pwb.probe.*.request"
 	verifierResults   = "pwb.verifier.*.exposure"
+	forgottenHosts    = "pwb.inventory.*.forgotten"
 )
 
 // HostSubjects are the subject kinds an agent publishes under asm.<host>.
@@ -123,7 +125,7 @@ func Permissions(r Role, host string) (publish, subscribe []string, err error) {
 		}
 		switch r {
 		case RoleInventory:
-			pub = append(pub, streamMsgGet, directGetPlain, directGetWildcard, cloudVerdicts, probeRequests)
+			pub = append(pub, streamMsgGet, directGetPlain, directGetWildcard, cloudVerdicts, probeRequests, forgottenHosts)
 		case RoleVerifier:
 			pub = append(pub, verifierResults)
 		}

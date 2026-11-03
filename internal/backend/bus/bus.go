@@ -201,27 +201,35 @@ func NewEventID() string { return ulid.Make().String() }
 // Publish sends msg with Nats-Msg-Id = id (JetStream dedupes retries) and retries a
 // failure up to 3 times within ctx.
 func (p *Publisher) Publish(ctx context.Context, subject, id string, msg proto.Message) error {
+	_, err := p.PublishSeq(ctx, subject, id, msg)
+	return err
+}
+
+// PublishSeq is Publish that also returns the message's stream sequence (from the
+// JetStream ack; for a deduplicated retry, the sequence of the stored original).
+func (p *Publisher) PublishSeq(ctx context.Context, subject, id string, msg proto.Message) (uint64, error) {
 	data, err := proto.Marshal(msg)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var last error
 	for attempt := range 3 {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return errors.Join(ctx.Err(), last)
+				return 0, errors.Join(ctx.Err(), last)
 			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
 			}
 		}
 		pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		_, last = p.js.PublishMsg(pctx, &nats.Msg{Subject: subject, Data: data}, jetstream.WithMsgID(id))
+		var ack *jetstream.PubAck
+		ack, last = p.js.PublishMsg(pctx, &nats.Msg{Subject: subject, Data: data}, jetstream.WithMsgID(id))
 		cancel()
 		if last == nil {
-			return nil
+			return ack.Sequence, nil
 		}
 	}
-	return fmt.Errorf("publish %s: %w", subject, last)
+	return 0, fmt.Errorf("publish %s: %w", subject, last)
 }
 
 // Backend namespaces (pwb.<origin>.<host>.<kind>). No host may publish there, so the
@@ -231,11 +239,18 @@ const (
 	OriginCloud    = "cloud"
 	OriginVerifier = "verifier"
 	OriginProbe    = "probe"
+	// OriginInventory is the inventory's control namespace (M8: forgotten hosts).
+	OriginInventory = "inventory"
 	// KindVerdict is the kind of pwb.cloud and pwb.verifier messages; KindProbeRequest
-	// of pwb.probe ones.
+	// of pwb.probe ones; KindForgotten of pwb.inventory ones.
 	KindVerdict      = "exposure"
 	KindProbeRequest = "request"
+	KindForgotten    = "forgotten"
 )
+
+// ForgottenSubject is where the inventory announces that an operator forgot a host
+// (a HostForgotten).
+func ForgottenSubject(host string) string { return "pwb.inventory." + host + "." + KindForgotten }
 
 // CloudSubject is where the inventory's cloud look-up publishes a host's verdicts.
 func CloudSubject(host string) string { return "pwb.cloud." + host + "." + KindVerdict }
@@ -260,7 +275,8 @@ func Parse(subject string) (Parsed, bool) {
 	}
 	switch {
 	case (parts[1] == OriginCloud || parts[1] == OriginVerifier) && parts[3] == KindVerdict,
-		parts[1] == OriginProbe && parts[3] == KindProbeRequest:
+		parts[1] == OriginProbe && parts[3] == KindProbeRequest,
+		parts[1] == OriginInventory && parts[3] == KindForgotten:
 		return Parsed{Origin: parts[1], Host: parts[2], Kind: parts[3]}, true
 	}
 	return Parsed{}, false

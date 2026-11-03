@@ -1,0 +1,46 @@
+*:80,[::]:80 names=api.example.com,api2.example.com path="/" proxy "http://app" upstream=app
+    -> 127.0.0.1:8000 127.0.0.1:8000
+    -> 127.0.0.1:8001 127.0.0.1:8001 (backup)
+    -> unix:/run/app.sock unix=/run/app.sock
+    @ /etc/pw-multi/sites-enabled/api.conf:8
+*:80,[::]:80 names=api.example.com,api2.example.com path="/v2/" proxy "http://api_v2/" upstream=api_v2
+    -> [::1]:9002 [::1]:9002
+    -> localhost:9003 127.0.0.1:9003 [::1]:9003 (down)
+    @ /etc/pw-multi/sites-enabled/api.conf:14
+*:80,[::]:80 names=api.example.com,api2.example.com path="= /admin" proxy "http://127.0.0.1:9000/admin"
+    -> 127.0.0.1:9000 127.0.0.1:9000
+    @ /etc/pw-multi/sites-enabled/api.conf:18
+*:80,[::]:80 names=api.example.com,api2.example.com path="~ \\.php$" fastcgi "unix:/run/php/php8.3-fpm.sock"
+    -> unix:/run/php/php8.3-fpm.sock unix=/run/php/php8.3-fpm.sock
+    @ /etc/pw-multi/sites-enabled/api.conf:24
+*:80,[::]:80 names=api.example.com,api2.example.com path="/grpc" grpc "grpc://127.0.0.1:50051"
+    -> 127.0.0.1:50051 127.0.0.1:50051
+    @ /etc/pw-multi/sites-enabled/api.conf:28
+*:80,[::]:80 names=api.example.com,api2.example.com path="/py" uwsgi "127.0.0.1:3031"
+    -> 127.0.0.1:3031 127.0.0.1:3031
+    @ /etc/pw-multi/sites-enabled/api.conf:33
+*:80,[::]:80 names=api.example.com,api2.example.com path="/scgi" scgi "127.0.0.1:4000"
+    -> 127.0.0.1:4000 127.0.0.1:4000
+    @ /etc/pw-multi/sites-enabled/api.conf:37
+*:80,[::]:80 names=api.example.com,api2.example.com path="/cache" memcached "127.0.0.1:11211"
+    -> 127.0.0.1:11211 127.0.0.1:11211
+    @ /etc/pw-multi/sites-enabled/api.conf:42
+*:80,[::]:80 names=api.example.com,api2.example.com path="/static/" static "/srv/static/" root=/srv/static/
+    @ /etc/pw-multi/sites-enabled/api.conf:45
+*:80,[::]:80 names=api.example.com,api2.example.com path="/api" proxy "http://localhost:7001"
+    -> localhost:7001 127.0.0.1:7001 [::1]:7001
+    @ /etc/pw-multi/sites-enabled/api.conf:53
+*:80,[::]:80 names=api.example.com,api2.example.com path="/api/internal" proxy "http://127.0.0.1:7000"
+    -> 127.0.0.1:7000 127.0.0.1:7000
+    @ /etc/pw-multi/sites-enabled/api.conf:51
+*:443,[::]:443 names=_ path="" return "444"
+    @ /etc/pw-multi/sites-enabled/tls.conf:7
+127.0.0.1:8081 names=internal.local path="/" static "/var/www/internal" root=/var/www/internal
+    @ /etc/pw-multi/sites-enabled/tls.conf:14
+*:15432 names= path="" proxy "pg" upstream=pg
+    -> 127.0.0.1:5432 127.0.0.1:5432
+    -> 10.0.0.9:5432 10.0.0.9:5432 (backup)
+    @ /etc/pw-multi/nginx.conf:24
+127.0.0.1:1053/udp names= path="" proxy "127.0.0.53:53"
+    -> 127.0.0.53:53 127.0.0.53:53
+    @ /etc/pw-multi/nginx.conf:28

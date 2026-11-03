@@ -1,0 +1,33 @@
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/" proxy "http://$backend"
+    -> 127.0.0.1:8000 127.0.0.1:8000
+    -> 127.0.0.1:8002 127.0.0.1:8002
+    -> 127.0.0.1:8003 127.0.0.1:8003
+    @ /etc/pw-vars/nginx.conf:36
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/pool" proxy "http://$pool" upstream=blue,green
+    -> 127.0.0.1:8100 127.0.0.1:8100
+    -> 127.0.0.1:8200 127.0.0.1:8200
+    @ /etc/pw-vars/nginx.conf:40
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/legacy" proxy "http://$legacy"
+    -> 127.0.0.1:8300 127.0.0.1:8300
+    @ /etc/pw-vars/nginx.conf:44
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/dyn" proxy "http://$host$request_uri"
+    -> http://$host$request_uri (unresolved: variable $host)
+    note: unresolved: variable $host
+    @ /etc/pw-vars/nginx.conf:48
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/sock" proxy "http://unix:/run/sock/app.sock:/"
+    -> unix:/run/sock/app.sock unix=/run/sock/app.sock
+    @ /etc/pw-vars/nginx.conf:52
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/cond" proxy "http://127.0.0.1:8400"
+    -> 127.0.0.1:8400 127.0.0.1:8400
+    note: conditional: if ($request_method = POST)
+    @ /etc/pw-vars/nginx.conf:57
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/cond" proxy "http://127.0.0.1:8401"
+    -> 127.0.0.1:8401 127.0.0.1:8401
+    @ /etc/pw-vars/nginx.conf:59
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/except" proxy "http://127.0.0.1:8500"
+    -> 127.0.0.1:8500 127.0.0.1:8500
+    note: conditional: limit_except GET
+    @ /etc/pw-vars/nginx.conf:64
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="@fallback" proxy "http://127.0.0.1:8600"
+    -> 127.0.0.1:8600 127.0.0.1:8600
+    @ /etc/pw-vars/nginx.conf:70

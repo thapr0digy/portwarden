@@ -15,7 +15,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/backend/liveness"
 )
 
-func engine(t *testing.T, r Rules) *Engine {
+func engine(t *testing.T, r Rules) *Engine { //nolint:unparam
 	t.Helper()
 	if err := r.Validate(); err != nil {
 		t.Fatal(err)
@@ -37,82 +37,118 @@ func exposure(port uint32, prev, lvl asmv1.ExposureLevel, origin string) *asmv1.
 }
 
 const (
-	bound = asmv1.ExposureLevel_EXPOSURE_BOUND
-	open  = asmv1.ExposureLevel_EXPOSURE_HOST_FIREWALL_OPEN
-	cloud = asmv1.ExposureLevel_EXPOSURE_CLOUD_OPEN
-	local = asmv1.ExposureLevel_EXPOSURE_LOCAL
+	bound     = asmv1.ExposureLevel_EXPOSURE_BOUND
+	open      = asmv1.ExposureLevel_EXPOSURE_HOST_FIREWALL_OPEN
+	cloudOpen = asmv1.ExposureLevel_EXPOSURE_CLOUD_OPEN
+	local     = asmv1.ExposureLevel_EXPOSURE_LOCAL
 )
 
-func TestNewlyReachableOncePerListener(t *testing.T) {
-	e := engine(t, Rules{PageOnConfirmed: true, DedupeWindow: time.Hour})
-	now := time.Now()
-	d := e.Exposure("h1", exposure(8092, 0, open, ""), now)
-	if d.Alert == nil || d.Alert.Kind != KindNewlyReachable || d.Alert.Level != "host_firewall_open" || d.Alert.PreviousLevel != "" ||
-		len(d.Alert.PublicIPs) != 1 || d.Alert.Origin != "agent" {
-		t.Fatalf("opened at level 2: %+v", d)
-	}
-	// The verifier confirms it a moment later: same listener, same window -> suppressed.
-	c := e.Confirmation("h1", &asmv1.ExposureConfirmation{Result: "confirmed", Listener: exposure(8092, 0, 0, "").Listener, Target: "10.0.0.1:8092"}, now.Add(time.Second))
-	if c.Alert != nil || c.Suppressed != "dedupe" {
-		t.Fatalf("confirmation: %+v", c)
-	}
-	// The cloud's level 3 on top of level 2 is not newly reachable.
-	if d := e.Exposure("h1", exposure(8092, open, cloud, "cloud"), now); d.Alert != nil || d.Suppressed != "" {
-		t.Fatalf("2->3: %+v", d)
-	}
-	// Not reaching the threshold, or already above it.
-	for _, ev := range []*asmv1.ExposureEvent{exposure(1, 0, bound, ""), exposure(2, 0, local, ""), exposure(3, open, bound, "")} {
-		if d := e.Exposure("h1", ev, now); d.Alert != nil {
-			t.Fatalf("paged %+v", ev)
+var bg = context.Background()
+
+func mustD(t *testing.T) func(Decision, error) Decision {
+	return func(d Decision, err error) Decision {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	// An LB path at level 1 -> 3 from the cloud pages.
-	if d := e.Exposure("h1", exposure(8080, bound, cloud, "cloud"), now); d.Alert == nil || d.Alert.Origin != "cloud" {
-		t.Fatalf("lb path: %+v", d)
-	}
-	// After the window the same listener pages again.
-	if d := e.Exposure("h1", exposure(8092, bound, open, ""), now.Add(2*time.Hour)); d.Alert == nil {
-		t.Fatal("no page after the dedupe window")
-	}
-	e.Expire(now.Add(5 * time.Hour))
-	if len(e.paged) != 0 {
-		t.Fatalf("expire left %v", e.paged)
+		return d
 	}
 }
 
-func TestConfirmationAndIgnore(t *testing.T) {
-	e := engine(t, Rules{PageOnConfirmed: true, Ignore: []Ignore{{Proto: "tcp", Port: 22}}})
-	l := &asmv1.Listener{Proto: "udp", Addr: "0.0.0.0", Port: 53, Key: "k53"}
-	if d := e.Confirmation("h", &asmv1.ExposureConfirmation{Result: "no_response", Listener: l}, time.Now()); d.Alert != nil {
+func confirmation(port uint32, result string) *asmv1.ExposureConfirmation {
+	return &asmv1.ExposureConfirmation{Result: result, Listener: exposure(port, 0, 0, "").Listener, Target: "10.0.0.1:" + strconv.Itoa(int(port))}
+}
+
+func TestNewlyReachableOncePerListener(t *testing.T) {
+	e, st, d := engine(t, Rules{PageOnConfirmed: true, DedupeWindow: time.Hour}), NewMemState(), mustD(t)
+	now := time.Now()
+	r := d(e.Exposure(bg, st, "h1", "", exposure(8092, 0, open, ""), now))
+	if r.Alert == nil || r.Alert.Kind != KindNewlyReachable || r.Alert.Level != "host_firewall_open" || r.Alert.PreviousLevel != "" ||
+		len(r.Alert.PublicIPs) != 1 || r.Alert.Origin != "agent" || len(st.Queue) != 1 {
+		t.Fatalf("opened at level 2: %+v", r)
+	}
+	// The verifier confirms it a moment later: same listener, same window -> suppressed.
+	if c := d(e.Confirmation(bg, st, "h1", confirmation(8092, "confirmed"), now.Add(time.Second))); c.Alert != nil || c.Suppressed != "dedupe" {
+		t.Fatalf("confirmation: %+v", c)
+	}
+	if r := d(e.Exposure(bg, st, "h1", "cloud", exposure(8092, open, cloudOpen, ""), now)); r.Alert != nil || r.Suppressed != "" {
+		t.Fatalf("2->3: %+v", r)
+	}
+	for _, ev := range []*asmv1.ExposureEvent{exposure(1, 0, bound, ""), exposure(2, 0, local, ""), exposure(3, open, bound, "")} {
+		if r := d(e.Exposure(bg, st, "h1", "", ev, now)); r.Alert != nil {
+			t.Fatalf("paged %+v", ev)
+		}
+	}
+	if r := d(e.Exposure(bg, st, "h1", "cloud", exposure(8080, bound, cloudOpen, ""), now)); r.Alert == nil || r.Alert.Origin != "cloud" {
+		t.Fatalf("lb path: %+v", r)
+	}
+	if r := d(e.Exposure(bg, st, "h1", "", exposure(8092, bound, open, ""), now.Add(2*time.Hour))); r.Alert == nil {
+		t.Fatal("no page after the dedupe window")
+	}
+}
+
+// A confirmation pages only on a transition to confirmed: a reprobe that keeps the
+// verdict never pages, even after the dedupe window or a restart (the state is durable).
+func TestConfirmedOnlyOnTransition(t *testing.T) {
+	e, st, d := engine(t, Rules{PageOnConfirmed: true, DedupeWindow: time.Hour}), NewMemState(), mustD(t)
+	now := time.Now()
+	if r := d(e.Confirmation(bg, st, "h", confirmation(53, "no_response"), now)); r.Alert != nil {
 		t.Fatal("no_response paged")
 	}
-	d := e.Confirmation("h", &asmv1.ExposureConfirmation{Result: "confirmed", Listener: l, Probe: "dns", Target: "1.2.3.4:53"}, time.Now())
-	if d.Alert == nil || d.Alert.Kind != KindConfirmed || d.Alert.Probe.Probe != "dns" {
-		t.Fatalf("%+v", d)
+	if r := d(e.Confirmation(bg, st, "h", confirmation(53, "confirmed"), now)); r.Alert == nil || r.Alert.Kind != KindConfirmed {
+		t.Fatalf("first confirmed: %+v", r)
 	}
-	if d := e.Exposure("h", exposure(22, 0, open, ""), time.Now()); d.Alert != nil || d.Suppressed != "ignore" {
-		t.Fatalf("ignored port: %+v", d)
+	later := now.Add(48 * time.Hour)
+	e2 := engine(t, Rules{PageOnConfirmed: true, DedupeWindow: time.Hour}) // a restarted alerter, same state
+	if r := d(e2.Confirmation(bg, st, "h", confirmation(53, "confirmed"), later)); r.Alert != nil || r.Suppressed != "not a transition" {
+		t.Fatalf("reprobe paged: %+v", r)
+	}
+	d(e2.Confirmation(bg, st, "h", confirmation(53, "unreachable"), later))
+	if r := d(e2.Confirmation(bg, st, "h", confirmation(53, "confirmed"), later.Add(2*time.Hour))); r.Alert == nil {
+		t.Fatal("unreachable -> confirmed did not page")
+	}
+}
+
+func TestIgnore(t *testing.T) {
+	e, st, d := engine(t, Rules{PageOnConfirmed: true, Ignore: []Ignore{{Proto: "tcp", Port: 22}}}), NewMemState(), mustD(t)
+	if r := d(e.Exposure(bg, st, "h", "", exposure(22, 0, open, ""), time.Now())); r.Alert != nil || r.Suppressed != "ignore" {
+		t.Fatalf("ignored port: %+v", r)
 	}
 	if err := (&Rules{PageLevel: "huge"}).Validate(); err == nil {
 		t.Fatal("bad page_level accepted")
 	}
 }
 
-func TestSilence(t *testing.T) {
-	e := engine(t, Rules{PageOnSilence: true})
+func TestSilenceAcrossRestarts(t *testing.T) {
+	e, st, d := engine(t, Rules{PageOnSilence: true}), NewMemState(), mustD(t)
 	now := time.Now()
-	if d := e.Liveness(liveness.Transition{Host: "h", Silent: false, At: now}); d.Alert != nil {
+	if r := d(e.Heard(bg, st, "h", now)); r.Alert != nil {
 		t.Fatal("recovery without a silence page")
 	}
-	d := e.Liveness(liveness.Transition{Host: "h", Silent: true, LastSeen: now.Add(-2 * time.Minute), At: now})
-	if d.Alert == nil || d.Alert.Kind != KindHostSilent || d.Alert.LastHeartbeat == nil {
-		t.Fatalf("%+v", d)
+	r := d(e.Silent(bg, st, liveness.Transition{Host: "h", Silent: true, LastSeen: now.Add(-2 * time.Minute), At: now}))
+	if r.Alert == nil || r.Alert.Kind != KindHostSilent || r.Alert.LastHeartbeat == nil {
+		t.Fatalf("%+v", r)
 	}
-	if d := e.Liveness(liveness.Transition{Host: "h", Silent: true, At: now}); d.Alert != nil {
+	e2 := engine(t, Rules{PageOnSilence: true}) // restarted: the host is still silent
+	if r := d(e2.Silent(bg, st, liveness.Transition{Host: "h", Silent: true, At: now})); r.Alert != nil {
 		t.Fatal("silence paged twice")
 	}
-	if d := e.Liveness(liveness.Transition{Host: "h", Silent: false, At: now}); d.Alert == nil || d.Alert.Kind != KindHostRecovered {
-		t.Fatalf("recovery: %+v", d)
+	if r := d(e2.Heard(bg, st, "h", now)); r.Alert == nil || r.Alert.Kind != KindHostRecovered {
+		t.Fatalf("recovery: %+v", r)
+	}
+	if r := d(e2.Feed(bg, st, liveness.FeedStalled, now)); r.Alert == nil || r.Alert.Kind != KindFeedStalled {
+		t.Fatalf("feed: %+v", r)
+	}
+}
+
+func TestCheckURLAndFreshness(t *testing.T) {
+	if CheckURL("http://x/", false) == nil || CheckURL("https://x/", false) != nil || CheckURL("http://x/", true) != nil || CheckURL("nope", true) == nil {
+		t.Fatal("CheckURL")
+	}
+	secret, body, now := []byte("s"), []byte("{}"), time.Now()
+	sig := Sign(secret, now.Unix(), body)
+	if !VerifyFresh(secret, now.Unix(), body, sig, now, time.Minute) || VerifyFresh(secret, now.Unix(), body, sig, now.Add(time.Hour), time.Minute) {
+		t.Fatal("VerifyFresh")
 	}
 }
 

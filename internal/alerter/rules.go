@@ -5,8 +5,8 @@
 package alerter
 
 import (
+	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
@@ -20,13 +20,15 @@ const (
 	KindConfirmed      = "confirmed"
 	KindHostSilent     = "host_silent"
 	KindHostRecovered  = "host_recovered"
+	KindFeedStalled    = "backend_feed_stalled"
+	KindFeedRecovered  = "backend_feed_recovered"
 )
 
 // Alert is the webhook payload.
 type Alert struct {
 	ID            string     `json:"id"`
 	Kind          string     `json:"kind"`
-	Host          string     `json:"host"`
+	Host          string     `json:"host,omitempty"`
 	At            time.Time  `json:"at"`
 	Summary       string     `json:"summary"`
 	Listener      *Listener  `json:"listener,omitempty"`
@@ -103,34 +105,54 @@ func (r *Rules) Validate() error {
 	return nil
 }
 
+// State is the alerter's durable state: dedupe marks, the last probe result per
+// listener, and the outbox of pages to deliver. Engine calls happen inside one State
+// transaction, so a decision, its marks and its page are stored together (and the NATS
+// message is acked only after that).
+type State interface {
+	LastPaged(ctx context.Context, key string) (time.Time, bool, error)
+	SetPaged(ctx context.Context, key string, at time.Time) error
+	ClearPaged(ctx context.Context, key string) error
+	ProbeResult(ctx context.Context, key string) (string, error)
+	SetProbeResult(ctx context.Context, key, result string, at time.Time) error
+	Enqueue(ctx context.Context, a *Alert) error
+}
+
 // Engine applies the rules. One page per listener per dedupe window covers both newly
-// reachable and confirmed (a confirmation of a listener just paged for is logged as
-// suppressed); one per host for silence, reset when the host recovers. Not safe for
-// concurrent use.
+// reachable and confirmed. A confirmation pages only when the listener's previous probe
+// result was not confirmed (reprobes that keep the verdict never page). One page per host
+// for silence, until the host is heard again. One page when the backend's own feed
+// stalls. Stateless itself: everything lives in State.
 type Engine struct {
 	rules Rules
-	paged map[string]time.Time
 	newID func() string
 }
 
 // NewEngine returns an engine; rules must be validated.
 func NewEngine(rules Rules, newID func() string) *Engine {
-	return &Engine{rules: rules, paged: map[string]time.Time{}, newID: newID}
+	return &Engine{rules: rules, newID: newID}
 }
 
-// Decision is an engine outcome: an alert to send, or why none.
+// DedupeWindow is the rules' window.
+func (e *Engine) DedupeWindow() time.Duration { return e.rules.DedupeWindow }
+
+// Decision is an engine outcome: an alert queued, or why none.
 type Decision struct {
 	Alert *Alert
-	// Suppressed names the rule that held a matching alert back ("dedupe", "ignore").
+	// Suppressed names the rule that held a matching alert back ("dedupe", "ignore",
+	// "not a transition").
 	Suppressed string
 }
 
-func (e *Engine) dedupe(key string, now time.Time) bool {
-	if at, ok := e.paged[key]; ok && now.Sub(at) < e.rules.DedupeWindow {
-		return true
+func (e *Engine) dedupe(ctx context.Context, st State, key string, now time.Time) (bool, error) {
+	at, ok, err := st.LastPaged(ctx, key)
+	if err != nil {
+		return false, err
 	}
-	e.paged[key] = now
-	return false
+	if ok && now.Sub(at) < e.rules.DedupeWindow {
+		return true, nil
+	}
+	return false, st.SetPaged(ctx, key, now)
 }
 
 func (e *Engine) ignored(host string, l *asmv1.Listener) bool {
@@ -143,19 +165,26 @@ func (e *Engine) ignored(host string, l *asmv1.Listener) bool {
 	return false
 }
 
-// Exposure judges an exposure.changed event.
-func (e *Engine) Exposure(host string, ev *asmv1.ExposureEvent, now time.Time) Decision {
+func (e *Engine) queue(ctx context.Context, st State, a *Alert) (Decision, error) {
+	if err := st.Enqueue(ctx, a); err != nil {
+		return Decision{}, err
+	}
+	return Decision{Alert: a}, nil
+}
+
+// Exposure judges an exposure.changed event (agent) or cloud verdict (origin from the
+// subject).
+func (e *Engine) Exposure(ctx context.Context, st State, host, origin string, ev *asmv1.ExposureEvent, now time.Time) (Decision, error) {
 	lvl, prev := int(ev.GetExposure().GetLevel()), int(ev.GetPrevious().GetLevel())
 	if lvl < e.rules.pageLevelNumeric || prev >= e.rules.pageLevelNumeric {
-		return Decision{}
+		return Decision{}, nil
 	}
 	if e.ignored(host, ev.GetListener()) {
-		return Decision{Suppressed: "ignore"}
+		return Decision{Suppressed: "ignore"}, nil
 	}
-	if e.dedupe("listener:"+host+"/"+ev.GetListener().GetKey(), now) {
-		return Decision{Suppressed: "dedupe"}
+	if dup, err := e.dedupe(ctx, st, "listener:"+host+"/"+ev.GetListener().GetKey(), now); err != nil || dup {
+		return Decision{Suppressed: "dedupe"}, err
 	}
-	origin := ev.GetOrigin()
 	if origin == "" {
 		origin = "agent"
 	}
@@ -166,58 +195,91 @@ func (e *Engine) Exposure(host string, ev *asmv1.ExposureEvent, now time.Time) D
 		a.PreviousLevel = model.ExposureLevel(prev).String()
 	}
 	a.Summary = fmt.Sprintf("%s %s:%d on %s is newly reachable (%s)", a.Listener.Proto, a.Listener.Addr, a.Listener.Port, host, a.Level)
-	return Decision{Alert: a}
+	return e.queue(ctx, st, a)
 }
 
-// Confirmation judges an exposure.confirmed event.
-func (e *Engine) Confirmation(host string, ev *asmv1.ExposureConfirmation, now time.Time) Decision {
+// Confirmation judges a verifier result. Every result is recorded; only a transition to
+// confirmed can page.
+func (e *Engine) Confirmation(ctx context.Context, st State, host string, ev *asmv1.ExposureConfirmation, now time.Time) (Decision, error) {
+	key := host + "/" + ev.GetListener().GetKey()
+	prev, err := st.ProbeResult(ctx, key)
+	if err != nil {
+		return Decision{}, err
+	}
+	if err := st.SetProbeResult(ctx, key, ev.GetResult(), now); err != nil {
+		return Decision{}, err
+	}
 	if !e.rules.PageOnConfirmed || ev.GetResult() != "confirmed" {
-		return Decision{}
+		return Decision{}, nil
+	}
+	if prev == "confirmed" {
+		return Decision{Suppressed: "not a transition"}, nil
 	}
 	if e.ignored(host, ev.GetListener()) {
-		return Decision{Suppressed: "ignore"}
+		return Decision{Suppressed: "ignore"}, nil
 	}
-	if e.dedupe("listener:"+host+"/"+ev.GetListener().GetKey(), now) {
-		return Decision{Suppressed: "dedupe"}
+	if dup, err := e.dedupe(ctx, st, "listener:"+key, now); err != nil || dup {
+		return Decision{Suppressed: "dedupe"}, err
 	}
 	a := &Alert{ID: e.newID(), Kind: KindConfirmed, Host: host, At: now, Listener: listener(ev.GetListener()),
 		Level: model.ExposureConfirmed.String(), Origin: "verifier", Evidence: ev.GetExposure().GetEvidence(),
 		Probe: &Probe{Target: ev.GetTarget(), Probe: ev.GetProbe(), Banner: ev.GetBanner(), Checker: ev.GetChecker()}}
 	a.Summary = fmt.Sprintf("%s %s:%d on %s is reachable from outside (%s %s)", a.Listener.Proto, a.Listener.Addr, a.Listener.Port,
 		host, ev.GetProbe(), ev.GetTarget())
-	return Decision{Alert: a}
+	return e.queue(ctx, st, a)
 }
 
-// Liveness judges a silent / recovered transition.
-func (e *Engine) Liveness(t liveness.Transition) Decision {
+// Silent judges a host going silent.
+func (e *Engine) Silent(ctx context.Context, st State, t liveness.Transition) (Decision, error) {
 	if !e.rules.PageOnSilence {
-		return Decision{}
+		return Decision{}, nil
+	}
+	key := "silent:" + t.Host
+	if _, paged, err := st.LastPaged(ctx, key); err != nil || paged {
+		return Decision{Suppressed: "dedupe"}, err
+	}
+	if err := st.SetPaged(ctx, key, t.At); err != nil {
+		return Decision{}, err
 	}
 	last := t.LastSeen
-	key := "silent:" + t.Host
-	if !t.Silent {
-		if _, paged := e.paged[key]; !paged {
-			return Decision{}
-		}
-		delete(e.paged, key)
-		return Decision{Alert: &Alert{ID: e.newID(), Kind: KindHostRecovered, Host: t.Host, At: t.At, LastHeartbeat: &last,
-			Summary: fmt.Sprintf("host %s is sending heartbeats again", t.Host)}}
-	}
-	if _, paged := e.paged[key]; paged {
-		return Decision{Suppressed: "dedupe"}
-	}
-	e.paged[key] = t.At
-	return Decision{Alert: &Alert{ID: e.newID(), Kind: KindHostSilent, Host: t.Host, At: t.At, LastHeartbeat: &last,
-		Summary: fmt.Sprintf("host %s is silent: no heartbeat since %s", t.Host, last.UTC().Format(time.RFC3339))}}
+	return e.queue(ctx, st, &Alert{ID: e.newID(), Kind: KindHostSilent, Host: t.Host, At: t.At, LastHeartbeat: &last,
+		Summary: fmt.Sprintf("host %s is silent: no heartbeat since %s", t.Host, last.UTC().Format(time.RFC3339))})
 }
 
-// Expire forgets listener pages older than the dedupe window (bounded memory).
-func (e *Engine) Expire(now time.Time) {
-	for k, at := range e.paged {
-		if strings.HasPrefix(k, "listener:") && now.Sub(at) >= e.rules.DedupeWindow {
-			delete(e.paged, k)
-		}
+// Heard judges a live heartbeat: it ends a paged silence (persisted, so this works across
+// restarts) with a recovery page.
+func (e *Engine) Heard(ctx context.Context, st State, host string, now time.Time) (Decision, error) {
+	key := "silent:" + host
+	_, paged, err := st.LastPaged(ctx, key)
+	if err != nil || !paged {
+		return Decision{}, err
 	}
+	if err := st.ClearPaged(ctx, key); err != nil {
+		return Decision{}, err
+	}
+	return e.queue(ctx, st, &Alert{ID: e.newID(), Kind: KindHostRecovered, Host: host, At: now, LastHeartbeat: &now,
+		Summary: fmt.Sprintf("host %s is sending heartbeats again", host)})
+}
+
+// Feed judges the backend's own feed: one page when it stalls (instead of one per host),
+// one when it recovers.
+func (e *Engine) Feed(ctx context.Context, st State, ev liveness.FeedEvent, now time.Time) (Decision, error) {
+	const key = "feed"
+	switch ev {
+	case liveness.FeedStalled:
+		if err := st.SetPaged(ctx, key, now); err != nil {
+			return Decision{}, err
+		}
+		return e.queue(ctx, st, &Alert{ID: e.newID(), Kind: KindFeedStalled, At: now,
+			Summary: "the alerter receives nothing from any host (NATS down, or the whole fleet silent); host silence is not judged until it recovers"})
+	case liveness.FeedRecovered:
+		if err := st.ClearPaged(ctx, key); err != nil {
+			return Decision{}, err
+		}
+		return e.queue(ctx, st, &Alert{ID: e.newID(), Kind: KindFeedRecovered, At: now,
+			Summary: "the alerter receives host messages again; host silence is judged again after one silent_after"})
+	}
+	return Decision{}, nil
 }
 
 func listener(l *asmv1.Listener) *Listener {

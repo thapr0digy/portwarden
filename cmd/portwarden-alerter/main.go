@@ -1,7 +1,10 @@
-// portwarden-alerter pages on newly reachable listeners (exposure.changed reaching the
-// page level from below, from the agent or the cloud look-up), on the outside checker's
-// confirmations, and on host silence. Each alert is written as one JSON line to stdout
-// and, when a webhook is configured, POSTed with an HMAC signature. See README "Backend".
+// portwarden-alerter pages on newly reachable listeners (an agent exposure.changed or a
+// cloud verdict reaching the page level from below), on the outside checker's
+// transitions to confirmed, on host silence, and once when its own feed stalls. Every
+// decision and its page are stored in PostgreSQL in one transaction before the NATS
+// message is acked; an outbox worker delivers pages (one JSON line on stdout each, and a
+// signed webhook POST) with retries across restarts. Run one instance. See README
+// "Backend".
 package main
 
 import (
@@ -22,6 +25,7 @@ import (
 
 	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
 	"github.com/thapr0digy/portwarden/internal/alerter"
+	"github.com/thapr0digy/portwarden/internal/alerter/pgstate"
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
 	"github.com/thapr0digy/portwarden/internal/backend/liveness"
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
@@ -30,8 +34,10 @@ import (
 
 // Config is the JSON config file (--config).
 type Config struct {
-	NATS  svc.NATS `json:"nats"`
-	Rules struct {
+	NATS svc.NATS `json:"nats"`
+	// PostgresDSNFile holds the state database's DSN; PORTWARDEN_ALERTER_DSN wins.
+	PostgresDSNFile string `json:"postgres_dsn_file"`
+	Rules           struct {
 		PageLevel       string           `json:"page_level"`
 		PageOnConfirmed *bool            `json:"page_on_confirmed"`
 		PageOnSilence   *bool            `json:"page_on_silence"`
@@ -40,10 +46,12 @@ type Config struct {
 		Ignore          []alerter.Ignore `json:"ignore"`
 	} `json:"rules"`
 	Webhook struct {
-		URL         string       `json:"url"`
-		SecretFile  string       `json:"secret_file"`
-		Timeout     svc.Duration `json:"timeout"`
-		MaxAttempts int          `json:"max_attempts"`
+		URL        string       `json:"url"`
+		SecretFile string       `json:"secret_file"`
+		Timeout    svc.Duration `json:"timeout"`
+		// MaxAttempts per page, across restarts (default 20; backoff 1 s doubling to 5 min).
+		MaxAttempts   int  `json:"max_attempts"`
+		AllowInsecure bool `json:"allow_insecure"`
 	} `json:"webhook"`
 }
 
@@ -71,56 +79,84 @@ func run(path string) error {
 	}
 	var hook *alerter.Webhook
 	if cfg.Webhook.URL != "" {
+		if err := alerter.CheckURL(cfg.Webhook.URL, cfg.Webhook.AllowInsecure); err != nil {
+			return err
+		}
 		secret, err := svc.Secret("PORTWARDEN_ALERTER_WEBHOOK_SECRET", cfg.Webhook.SecretFile)
 		if err != nil {
 			return fmt.Errorf("webhook secret: %w", err)
 		}
-		hook = alerter.NewWebhook(cfg.Webhook.URL, []byte(secret), cfg.Webhook.Timeout.D(5*time.Second), cfg.Webhook.MaxAttempts)
+		hook = alerter.NewWebhook(cfg.Webhook.URL, []byte(secret), cfg.Webhook.Timeout.D(5*time.Second), 1)
 	} else {
 		slog.Warn("no webhook configured: alerts go to stdout only")
+	}
+	dsn, err := svc.Secret("PORTWARDEN_ALERTER_DSN", cfg.PostgresDSNFile)
+	if err != nil {
+		return fmt.Errorf("postgres dsn: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleAlerter, "portwarden-alerter", nil))
+	store, err := pgstate.Open(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	silentAfter := cfg.Rules.SilentAfter.D(90 * time.Second)
+	a := &app{engine: alerter.NewEngine(rules, bus.NewEventID), store: store, live: liveness.New(silentAfter),
+		feed: liveness.NewFeed(silentAfter, time.Now()), hook: hook, maxAttempts: cfg.Webhook.MaxAttempts}
+	if a.maxAttempts <= 0 {
+		a.maxAttempts = 20
+	}
+	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleAlerter, "portwarden-alerter", a.connected))
 	if err != nil {
 		return err
 	}
 	defer nc.Close()
-	if _, err := svc.WaitStream(ctx, js); err != nil {
-		return err
-	}
-
-	a := &app{engine: alerter.NewEngine(rules, bus.NewEventID), live: liveness.New(cfg.Rules.SilentAfter.D(90 * time.Second)),
-		out: make(chan *alerter.Alert, 1000), hook: hook}
-	go a.deliver(ctx)
-	go a.watchSilence(ctx)
-
-	hb, err := heartbeatConsumer(ctx, js)
+	stream, err := svc.WaitStream(ctx, js)
 	if err != nil {
 		return err
 	}
-	go func() {
+
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	wg.Go(func() { a.deliver(ctx) })
+	wg.Go(func() { a.watch(ctx) })
+
+	hb, err := heartbeatConsumer(ctx, js, stream, a)
+	if err != nil {
+		return err
+	}
+	wg.Go(func() {
 		if err := svc.Consume(ctx, hb, a.heartbeat, svc.ConsumeOptions{}); err != nil && ctx.Err() == nil {
 			slog.Error("heartbeat consumer stopped", "err", err)
 			stop()
 		}
-	}()
+	})
 	ex, err := bus.Durable(ctx, js, natsauth.ConsumerAlerter, bus.DurableOptions{
-		Filters:    []string{"asm.*." + bus.KindExposureChanged, "asm.*." + bus.KindExposureConfirmed},
+		Filters:    []string{"asm.*." + bus.KindExposureChanged, "pwb.cloud.*." + bus.KindVerdict, "pwb.verifier.*." + bus.KindVerdict},
 		DeliverNew: true, // a first start does not page for the stream's history
 	})
 	if err != nil {
 		return err
 	}
 	slog.Info("alerter running", "page_level", rules.PageLevel, "dedupe_window", rules.DedupeWindow.String(),
-		"silent_after", a.live.After.String(), "webhook", hook != nil)
+		"silent_after", silentAfter.String(), "webhook", hook != nil)
 	return svc.Consume(ctx, ex, a.exposure, svc.ConsumeOptions{})
 }
 
-// heartbeatConsumer re-creates the heartbeat consumer from each host's last heartbeat,
-// so a host that went silent while the alerter was down is still noticed.
-func heartbeatConsumer(ctx context.Context, js jetstream.JetStream) (jetstream.Consumer, error) {
+// heartbeatConsumer re-creates the heartbeat consumer from each host's last heartbeat, so
+// a host that died while the alerter was down is still noticed. Messages up to the
+// stream's last sequence at creation are a replay: they only seed liveness.
+func heartbeatConsumer(ctx context.Context, js jetstream.JetStream, stream jetstream.Stream, a *app) (jetstream.Consumer, error) {
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	a.replayUpTo = info.State.LastSeq
 	if err := js.DeleteConsumer(ctx, natsauth.StreamName, natsauth.ConsumerAlerterHB); err != nil && !errors.Is(err, jetstream.ErrConsumerNotFound) {
 		return nil, fmt.Errorf("reset heartbeat consumer: %w", err)
 	}
@@ -131,108 +167,192 @@ func heartbeatConsumer(ctx context.Context, js jetstream.JetStream) (jetstream.C
 }
 
 type app struct {
-	mu     sync.Mutex // guards engine and live
-	engine *alerter.Engine
-	live   *liveness.Tracker
-	out    chan *alerter.Alert
-	hook   *alerter.Webhook
+	engine      *alerter.Engine
+	store       *pgstate.Store
+	hook        *alerter.Webhook
+	maxAttempts int
+	replayUpTo  uint64
+
+	mu   sync.Mutex // guards live and feed (all on the alerter's own clock)
+	live *liveness.Tracker
+	feed *liveness.Feed
 }
 
-func (a *app) heartbeat(_ context.Context, m jetstream.Msg) error {
+func (a *app) connected(ok bool) {
+	a.mu.Lock()
+	a.feed.SetConnected(ok, time.Now())
+	a.mu.Unlock()
+}
+
+func (a *app) decide(ctx context.Context, what string, f func(alerter.State) (alerter.Decision, error)) error {
+	var d alerter.Decision
+	if err := a.store.InTx(ctx, func(st alerter.State) error {
+		var err error
+		d, err = f(st)
+		return err
+	}); err != nil {
+		return err
+	}
+	if d.Suppressed != "" {
+		slog.Info("alert suppressed", "what", what, "rule", d.Suppressed)
+	}
+	if d.Alert != nil {
+		slog.Info("alert queued", "id", d.Alert.ID, "kind", d.Alert.Kind, "host", d.Alert.Host, "summary", d.Alert.Summary)
+	}
+	return nil
+}
+
+func (a *app) heartbeat(ctx context.Context, m jetstream.Msg) error {
 	host, _, ok := bus.ParseSubject(m.Subject())
 	if !ok {
 		return nil
 	}
-	md, err := m.Metadata()
-	if err != nil {
-		return nil
+	now := time.Now()
+	replay := false
+	if md, err := m.Metadata(); err == nil && md.Sequence.Stream <= a.replayUpTo {
+		replay = true
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if t := a.live.Seen(host, md.Timestamp, time.Now()); t != nil {
-		a.decide(a.engine.Liveness(*t), "host recovered")
+	a.live.Seen(host, now, now)
+	if !replay {
+		a.feed.Received(now)
 	}
-	return nil
+	a.mu.Unlock()
+	if replay {
+		return nil
+	}
+	return a.decide(ctx, "heartbeat "+host, func(st alerter.State) (alerter.Decision, error) {
+		return a.engine.Heard(ctx, st, host, now)
+	})
 }
 
-func (a *app) watchSilence(ctx context.Context) {
+// watch checks the feed and host silence every 5 s.
+func (a *app) watch(ctx context.Context) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
+	prune := time.NewTicker(time.Hour)
+	defer prune.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-prune.C:
+			if err := a.store.Prune(ctx, time.Now(), a.engine.DedupeWindow()); err != nil {
+				slog.Warn("prune", "err", err)
+			}
 		case now := <-t.C:
 			a.mu.Lock()
-			for _, tr := range a.live.Check(now) {
-				a.decide(a.engine.Liveness(tr), "host silent")
+			ev, judge := a.feed.Check(now)
+			var silent []liveness.Transition
+			if judge {
+				silent = a.live.Check(now)
 			}
-			a.engine.Expire(now)
 			a.mu.Unlock()
+			if ev != liveness.FeedNoChange {
+				a.retry(ctx, "feed", func(st alerter.State) (alerter.Decision, error) { return a.engine.Feed(ctx, st, ev, now) })
+			}
+			for _, tr := range silent {
+				a.retry(ctx, "host silent "+tr.Host, func(st alerter.State) (alerter.Decision, error) { return a.engine.Silent(ctx, st, tr) })
+			}
 		}
 	}
 }
 
-func (a *app) exposure(_ context.Context, m jetstream.Msg) error {
-	host, kind, ok := bus.ParseSubject(m.Subject())
+// retry stores a decision that has no NATS message to fall back on, until it succeeds.
+func (a *app) retry(ctx context.Context, what string, f func(alerter.State) (alerter.Decision, error)) {
+	for backoff := time.Second; ; backoff = min(backoff*2, 30*time.Second) {
+		err := a.decide(ctx, what, f)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		slog.Warn("storing a decision failed; retrying", "what", what, "err", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+	}
+}
+
+func (a *app) exposure(ctx context.Context, m jetstream.Msg) error {
+	p, ok := bus.Parse(m.Subject())
 	if !ok {
 		return nil
 	}
 	now := time.Now()
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	switch kind {
-	case bus.KindExposureChanged:
+	switch {
+	case p.Origin == bus.OriginAgent && p.Kind == bus.KindExposureChanged, p.Origin == bus.OriginCloud:
 		var ev asmv1.ExposureEvent
-		if err := proto.Unmarshal(m.Data(), &ev); err != nil || (ev.GetHostId() != "" && ev.GetHostId() != host) {
-			slog.Warn("skipping bad exposure event", "subject", m.Subject(), "err", err)
-			return nil
+		if err := proto.Unmarshal(m.Data(), &ev); err != nil {
+			return svc.Permanent(err)
 		}
-		a.decide(a.engine.Exposure(host, &ev, now), "exposure "+ev.GetListener().GetKey())
-	case bus.KindExposureConfirmed:
+		if (ev.GetHostId() != "" && ev.GetHostId() != p.Host) || (p.Origin == bus.OriginAgent && ev.GetOrigin() != "") {
+			return svc.Permanent(errors.New("forged exposure event (host or origin)"))
+		}
+		return a.decide(ctx, "exposure "+ev.GetListener().GetKey(), func(st alerter.State) (alerter.Decision, error) {
+			return a.engine.Exposure(ctx, st, p.Host, p.Origin, &ev, now)
+		})
+	case p.Origin == bus.OriginVerifier:
 		var ev asmv1.ExposureConfirmation
-		if err := proto.Unmarshal(m.Data(), &ev); err != nil || (ev.GetHostId() != "" && ev.GetHostId() != host) {
-			slog.Warn("skipping bad confirmation", "subject", m.Subject(), "err", err)
-			return nil
+		if err := proto.Unmarshal(m.Data(), &ev); err != nil {
+			return svc.Permanent(err)
 		}
-		a.decide(a.engine.Confirmation(host, &ev, now), "confirmation "+ev.GetListener().GetKey())
+		if ev.GetHostId() != "" && ev.GetHostId() != p.Host {
+			return svc.Permanent(errors.New("forged confirmation (host)"))
+		}
+		return a.decide(ctx, "confirmation "+ev.GetListener().GetKey(), func(st alerter.State) (alerter.Decision, error) {
+			return a.engine.Confirmation(ctx, st, p.Host, &ev, now)
+		})
 	}
 	return nil
 }
 
-// decide queues an alert (never blocking the consumer: a full queue drops it, logged).
-func (a *app) decide(d alerter.Decision, what string) {
-	if d.Suppressed != "" {
-		slog.Info("alert suppressed", "what", what, "rule", d.Suppressed)
-	}
-	if d.Alert == nil {
-		return
-	}
-	select {
-	case a.out <- d.Alert:
-	default:
-		slog.Error("alert queue full; alert dropped", "alert", d.Alert.ID, "summary", d.Alert.Summary)
-	}
-}
-
+// deliver sends due pages from the outbox: one JSON line on stdout per page, then the
+// webhook with retries (backoff 1 s doubling to 5 min, at most maxAttempts, across
+// restarts); a permanent webhook error gives up at once.
 func (a *app) deliver(ctx context.Context) {
 	enc := json.NewEncoder(os.Stdout)
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	printed := map[string]bool{}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case al := <-a.out:
-			if err := enc.Encode(al); err != nil {
-				slog.Warn("stdout", "err", err)
+		case <-t.C:
+		}
+		due, err := a.store.Due(ctx, time.Now(), 50)
+		if err != nil {
+			slog.Warn("outbox read failed", "err", err)
+			continue
+		}
+		for _, p := range due {
+			if !printed[p.ID] {
+				_ = enc.Encode(p.Alert)
+				printed[p.ID] = true
 			}
-			slog.Info("alert", "id", al.ID, "kind", al.Kind, "host", al.Host, "summary", al.Summary)
 			if a.hook == nil {
+				_ = a.store.Delivered(ctx, p.ID, time.Now())
 				continue
 			}
-			if err := a.hook.Send(ctx, al); err != nil {
-				slog.Error("alert not delivered to the webhook", "id", al.ID, "err", err)
+			permanent, err := a.hook.SendOnce(ctx, &p.Alert)
+			if err == nil {
+				slog.Info("alert delivered", "id", p.ID)
+				if derr := a.store.Delivered(ctx, p.ID, time.Now()); derr != nil {
+					slog.Warn("marking a page delivered failed (it may be sent again)", "id", p.ID, "err", derr)
+				}
+				delete(printed, p.ID)
+				continue
+			}
+			giveUp := permanent || p.Attempts+1 >= a.maxAttempts
+			backoff := min(time.Second<<min(p.Attempts, 10), 5*time.Minute)
+			if giveUp {
+				slog.Error("alert not delivered; giving up", "id", p.ID, "attempts", p.Attempts+1, "err", err)
 			} else {
-				slog.Info("alert delivered", "id", al.ID)
+				slog.Warn("webhook delivery failed; will retry", "id", p.ID, "attempt", p.Attempts+1, "err", err, "in", backoff)
+			}
+			if ferr := a.store.Failed(ctx, p.ID, time.Now().Add(backoff), giveUp, err.Error()); ferr != nil {
+				slog.Warn("outbox update failed", "err", ferr)
 			}
 		}
 	}

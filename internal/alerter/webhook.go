@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 )
@@ -34,9 +35,32 @@ func Sign(secret []byte, ts int64, body []byte) string {
 	return "sha256=" + hex.EncodeToString(m.Sum(nil))
 }
 
-// Verify checks a signature header (for receivers and tests).
+// Verify checks a signature header (for receivers and tests). Receivers should use
+// VerifyFresh, which also refuses replays of old requests.
 func Verify(secret []byte, ts int64, body []byte, header string) bool {
 	return hmac.Equal([]byte(Sign(secret, ts, body)), []byte(header))
+}
+
+// VerifyFresh checks the signature and that ts is within maxSkew of now.
+func VerifyFresh(secret []byte, ts int64, body []byte, header string, now time.Time, maxSkew time.Duration) bool {
+	d := now.Sub(time.Unix(ts, 0))
+	return d <= maxSkew && d >= -maxSkew && Verify(secret, ts, body, header)
+}
+
+// CheckURL refuses a webhook URL that is not https, unless allowInsecure (alert bodies
+// and the signature would cross the network in cleartext).
+func CheckURL(raw string, allowInsecure bool) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("webhook url %q is not a URL", raw)
+	}
+	switch {
+	case u.Scheme == "https":
+		return nil
+	case u.Scheme == "http" && allowInsecure:
+		return nil
+	}
+	return fmt.Errorf("webhook url %q must be https (set allow_insecure for plain http)", raw)
 }
 
 // Webhook delivers alerts by POST. Each alert is tried at most MaxAttempts times with
@@ -74,6 +98,17 @@ func NewWebhook(url string, secret []byte, timeout time.Duration, attempts int) 
 }
 
 var errPermanent = errors.New("permanent")
+
+// SendOnce makes one delivery attempt. permanent reports a failure retrying cannot fix
+// (a 4xx other than 408/429, a bad request).
+func (w *Webhook) SendOnce(ctx context.Context, a *Alert) (permanent bool, err error) {
+	body, err := json.Marshal(a)
+	if err != nil {
+		return true, err
+	}
+	err = w.post(ctx, a.ID, body)
+	return errors.Is(err, errPermanent), err
+}
 
 // Send delivers one alert, retrying as configured.
 func (w *Webhook) Send(ctx context.Context, a *Alert) error {

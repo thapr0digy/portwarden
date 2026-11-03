@@ -104,8 +104,25 @@ const (
 	FieldNFProto                    // Names: ipv4, ipv6
 	FieldDAddrType                  // Names: local, unicast, multicast, broadcast, …
 	FieldMark                       // Mark, MarkMask
+	FieldTCPFlags                   // Mark (value) and Mask, or Any: the first packet is SYN
+	FieldAlways                     // always matches; used with Note for decided state (a rate limit the first packet passes)
 	FieldUnknown                    // always maybe; Match.Unknown says what it was
 )
+
+// TCP flag bits as nftables numbers them.
+const (
+	TCPFin uint32 = 1 << iota
+	TCPSyn
+	TCPRst
+	TCPPsh
+	TCPAck
+	TCPUrg
+	TCPEcn
+	TCPCwr
+)
+
+// tcpSYN is the first packet's flags.
+const tcpSYN = TCPSyn
 
 // Op is a match operator.
 type Op int
@@ -136,6 +153,10 @@ type Match struct {
 	// Unknown describes a match the model cannot decide ("limit", "xt addrtype", …); with
 	// FieldUnknown it is always maybe.
 	Unknown string
+	// Any: FieldTCPFlags matches when any bit of Mark is set (nft "tcp flags syn").
+	Any bool
+	// Note is recorded on the path when the match holds (e.g. "rate-limited").
+	Note string
 }
 
 // VMap jumps (or accepts, drops, …) by looking the packet's Key field up in a verdict
@@ -143,6 +164,9 @@ type Match struct {
 type VMap struct {
 	Key   Match // Field, Proto and Family say what is looked up; its values are ignored
 	Elems []VMapElem
+	// Unknown is set for a map the model cannot read (a concatenated key, a missing
+	// map): the packet may get any verdict from it or fall through.
+	Unknown string
 }
 
 // VMapElem is one element of a verdict map: the values of Key that select Verdict.

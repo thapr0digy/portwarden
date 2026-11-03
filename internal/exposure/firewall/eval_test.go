@@ -320,3 +320,39 @@ func TestEvaluateAcceptLocationIsTheLastHook(t *testing.T) {
 		t.Fatalf("explicit input accept: %q", r.Outcomes[0].Where)
 	}
 }
+
+func TestEvaluateUnknownVMapIsNeverClosed(t *testing.T) {
+	in := base("input", HookInput, 0, VerdictDrop, rule(VMap{Unknown: "vmap on concat"}))
+	r := decide(t, &Ruleset{Chains: []*Chain{in}}, pkt("tcp", 22))
+	if r.Decision() != Undetermined || !slices.Contains(r.MaybeReasons(), "vmap on concat") {
+		t.Fatalf("unreadable vmap: %+v", r)
+	}
+}
+
+func TestEvaluateTCPFlagsAndNotes(t *testing.T) {
+	notSyn := Match{Field: FieldTCPFlags, Op: OpNe, Proto: "tcp", Mark: TCPSyn, Mask: TCPFin | TCPSyn | TCPRst | TCPAck}
+	in := base("input", HookInput, 0, VerdictDrop,
+		rule(notSyn, drop()),
+		rule(Match{Field: FieldTCPFlags, Proto: "tcp", Any: true, Mark: TCPSyn}, dport("tcp", 29), accept()),
+		rule(dport("tcp", 26), Match{Field: FieldAlways, Note: "rate-limited"}, accept()),
+		rule(Match{Field: FieldSAddr, Family: FamilyIP, Pfx: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}}, dport("tcp", 5432), accept()),
+	)
+	rs := &Ruleset{Chains: []*Chain{in}}
+	if got := decide(t, rs, pkt("tcp", 29)).Decision(); got != Open {
+		t.Fatalf("a SYN passes the not-syn drop and matches flags syn: %v", got)
+	}
+	if got := decide(t, rs, pkt("udp", 29)).Decision(); got != Closed {
+		t.Fatalf("udp has no tcp flags: %v", got)
+	}
+	r := decide(t, rs, pkt("tcp", 26))
+	if r.Decision() != Open || !slices.Equal(r.Notes(), []string{"rate-limited"}) {
+		t.Fatalf("rate limited: %+v", r)
+	}
+	r = decide(t, rs, pkt("tcp", 5432))
+	if r.Decision() != Closed || !slices.Equal(r.Notes(), []string{"source-restricted:inet filter input"}) {
+		t.Fatalf("allowlisted port: %+v", r)
+	}
+	if n := decide(t, rs, pkt("tcp", 5433)).Notes(); len(n) != 0 {
+		t.Fatalf("an allow rule for another port is no restriction: %v", n)
+	}
+}

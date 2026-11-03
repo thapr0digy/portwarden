@@ -41,6 +41,10 @@ type Outcome struct {
 	Origin, Where string
 	// Maybe lists what the path depended on that the model could not decide.
 	Maybe []string
+	// Notes lists decided facts on the path: "rate-limited" (a limit the first packet
+	// passes) and "source-restricted:<chain>" (an accept skipped only because the
+	// source is not listed).
+	Notes []string
 	// Undecidable is set for a verdict that leaves the packet's fate open (queue), or a
 	// destination the model lost track of (a NAT target it cannot read).
 	Undecidable bool
@@ -86,6 +90,16 @@ func (r Result) Decision() Decision {
 		return Closed
 	}
 	return Undetermined
+}
+
+// Notes is every distinct note of the outcomes, sorted.
+func (r Result) Notes() []string {
+	var out []string
+	for _, o := range r.Outcomes {
+		out = append(out, o.Notes...)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // MaybeReasons is every distinct reason the outcomes depended on, sorted.
@@ -171,24 +185,37 @@ type state struct {
 	whereHook     Hook
 	// maybe is a sorted, comma-joined list of undecidable expressions on this path.
 	maybe string
+	// notes is a sorted, comma-joined list of decided facts worth telling (a rate limit
+	// the first packet passes, an accept only for listed sources).
+	notes string
 	// lost: a NAT target the model cannot read rewrote the destination.
 	lost bool
 }
 
 func (s state) withMaybe(reason string) state {
-	if reason == "" {
-		return s
+	s.maybe = addToList(s.maybe, reason)
+	return s
+}
+
+func (s state) withNote(note string) state {
+	s.notes = addToList(s.notes, note)
+	return s
+}
+
+// addToList adds item to a sorted, comma-joined list.
+func addToList(list, item string) string {
+	if item == "" {
+		return list
 	}
-	parts := strings.Split(s.maybe, ",")
-	if s.maybe == "" {
+	parts := strings.Split(list, ",")
+	if list == "" {
 		parts = nil
 	}
-	if !slices.Contains(parts, reason) {
-		parts = append(parts, reason)
+	if !slices.Contains(parts, item) {
+		parts = append(parts, item)
 		slices.Sort(parts)
 	}
-	s.maybe = strings.Join(parts, ",")
-	return s
+	return strings.Join(parts, ",")
 }
 
 func (s state) outcome(accept, undecidable bool) Outcome {
@@ -198,6 +225,9 @@ func (s state) outcome(accept, undecidable bool) Outcome {
 	}
 	if s.maybe != "" {
 		o.Maybe = strings.Split(s.maybe, ",")
+	}
+	if s.notes != "" {
+		o.Notes = strings.Split(s.notes, ",")
 	}
 	return o
 }
@@ -312,7 +342,7 @@ func (e *evaluator) chain(c *Chain, in []state, depth int) (terms []terminal, th
 // those that go on to the next rule, and those that returned from the chain.
 func (e *evaluator) rule(c *Chain, r *Rule, s state, depth int) (terms []terminal, next, returned []state) {
 	cur := []state{s}
-	for _, x := range r.Exprs {
+	for i, x := range r.Exprs {
 		if len(cur) == 0 {
 			return terms, next, returned
 		}
@@ -322,11 +352,14 @@ func (e *evaluator) rule(c *Chain, r *Rule, s state, depth int) (terms []termina
 			for _, st := range cur {
 				switch m, why := x.eval(st.pkt, e.env); m {
 				case yes:
-					keep = append(keep, st)
+					keep = append(keep, st.withNote(x.Note))
 				case no:
+					if x.Field == FieldSAddr && x.Op == OpEq && e.wouldAccept(r.Exprs[i+1:], st.pkt) {
+						st = st.withNote("source-restricted:" + c.Where())
+					}
 					next = append(next, st)
 				default:
-					keep = append(keep, st.withMaybe(why))
+					keep = append(keep, st.withMaybe(why).withNote(x.Note))
 					next = append(next, st.withMaybe(why))
 				}
 			}
@@ -353,6 +386,17 @@ func (e *evaluator) rule(c *Chain, r *Rule, s state, depth int) (terms []termina
 				return terms, next, returned
 			}
 		case VMap:
+			if x.Unknown != "" {
+				// A verdict map the model cannot read: it may decide the packet's fate
+				// (undecidable) or match nothing and fall through.
+				for i := range cur {
+					cur[i] = cur[i].withMaybe(x.Unknown)
+					st := cur[i]
+					st.origin, st.where = c.Origin, c.Where()
+					terms = append(terms, terminal{st, VerdictQueue, c})
+				}
+				continue
+			}
 			var rest []state
 			for _, st := range cur {
 				pending := []state{st}
@@ -385,6 +429,22 @@ func (e *evaluator) rule(c *Chain, r *Rule, s state, depth int) (terms []termina
 		}
 	}
 	return terms, append(next, cur...), returned
+}
+
+// wouldAccept reports whether the rest of a rule, whose source match just failed, would
+// otherwise accept the packet: no remaining match says no and it ends in accept.
+func (e *evaluator) wouldAccept(rest []Expr, p pktState) bool {
+	for _, x := range rest {
+		switch x := x.(type) {
+		case Match:
+			if m, _ := x.eval(p, e.env); m == no {
+				return false
+			}
+		case Verdict:
+			return x.Kind == VerdictAccept
+		}
+	}
+	return false
 }
 
 func (e *evaluator) verdict(c *Chain, v Verdict, s state, depth int) (terms []terminal, next, returned []state) {
@@ -474,7 +534,8 @@ func dedupeOutcomes(in []Outcome) []Outcome {
 
 func outcomeEqual(a, b Outcome) bool {
 	return a.Accept == b.Accept && a.Forwarded == b.Forwarded && a.DAddr == b.DAddr && a.DPort == b.DPort &&
-		a.Origin == b.Origin && a.Where == b.Where && a.Undecidable == b.Undecidable && slices.Equal(a.Maybe, b.Maybe)
+		a.Origin == b.Origin && a.Where == b.Where && a.Undecidable == b.Undecidable &&
+		slices.Equal(a.Maybe, b.Maybe) && slices.Equal(a.Notes, b.Notes)
 }
 
 // tri is a three-valued match result.
@@ -517,6 +578,8 @@ func (m Match) applies(p pktState) bool {
 		return m.Proto == "" || m.Proto == p.proto
 	case FieldSAddr, FieldDAddr, FieldL4Proto:
 		return m.Family == 0 || m.Family == p.family
+	case FieldTCPFlags:
+		return p.proto == "tcp"
 	}
 	return true
 }
@@ -579,6 +642,15 @@ func (m Match) contains(p pktState, env Env) (tri, string) {
 		return boolTri(slices.Contains(m.Names, name)), ""
 	case FieldDAddrType:
 		return addrTypeIn(m.Names, p.daddr, env)
+	case FieldTCPFlags:
+		// The first packet of a new TCP connection carries SYN alone.
+		const flags = tcpSYN
+		if m.Any {
+			return boolTri(flags&m.Mark != 0), ""
+		}
+		return boolTri(flags&m.Mask == m.Mark&m.Mask), ""
+	case FieldAlways:
+		return yes, ""
 	case FieldMark:
 		if !p.markKnown {
 			return maybe, "mark"

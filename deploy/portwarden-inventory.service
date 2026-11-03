@@ -1,5 +1,6 @@
 [Unit]
 Description=Portwarden inventory (ASM_EVENTS -> PostgreSQL, read-only API, host silence, cloud look-up)
+Documentation=https://github.com/thapr0digy/portwarden
 Wants=network-online.target
 After=network-online.target
 
@@ -11,7 +12,7 @@ Type=simple
 LoadCredential=nats.nk:/etc/portwarden/nats/inventory.nk
 LoadCredential=dsn:/etc/portwarden/inventory.dsn
 LoadCredential=token:/etc/portwarden/inventory.token
-ExecStart=/usr/local/bin/portwarden-inventory --config /etc/portwarden/inventory.json
+ExecStart=/usr/bin/portwarden-inventory --config /etc/portwarden/inventory.json
 DynamicUser=yes
 NoNewPrivileges=yes
 CapabilityBoundingSet=
@@ -20,14 +21,28 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+PrivateUsers=yes
+PrivateIPC=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+ProtectKernelLogs=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+UMask=0077
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
+RemoveIPC=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
 Restart=always
 RestartSec=5s
 

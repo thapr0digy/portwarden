@@ -1,5 +1,6 @@
 [Unit]
 Description=Portwarden alerter (newly reachable listeners, confirmations, host silence -> webhook)
+Documentation=https://github.com/thapr0digy/portwarden
 Wants=network-online.target
 After=network-online.target
 
@@ -11,7 +12,7 @@ LoadCredential=nats.nk:/etc/portwarden/nats/alerter.nk
 LoadCredential=webhook.secret:/etc/portwarden/alerter.webhook-secret
 LoadCredential=dsn:/etc/portwarden/alerter.dsn
 # One instance only: it recreates its heartbeat consumer at start.
-ExecStart=/usr/local/bin/portwarden-alerter --config /etc/portwarden/alerter.json
+ExecStart=/usr/bin/portwarden-alerter --config /etc/portwarden/alerter.json
 DynamicUser=yes
 NoNewPrivileges=yes
 CapabilityBoundingSet=
@@ -20,14 +21,28 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+PrivateUsers=yes
+PrivateIPC=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+ProtectKernelLogs=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+UMask=0077
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
+RemoveIPC=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
 Restart=always
 RestartSec=5s
 

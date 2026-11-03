@@ -5,12 +5,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 bin=$(mktemp -d)
-trap 'rm -rf "$bin"' EXIT
+trap 'rm -rf "${bin:?}"' EXIT
 go build -o "$bin/portwarden-agent" ./cmd/portwarden-agent
 
 id portwarden-agent >/dev/null 2>&1 ||
 	sudo useradd --system --no-create-home --shell /usr/sbin/nologin portwarden-agent
-sudo install -m 0755 "$bin/portwarden-agent" /usr/local/bin/portwarden-agent
+# /usr/bin, as the .deb installs it (earlier versions of this script used /usr/local/bin).
+sudo install -m 0755 "$bin/portwarden-agent" /usr/bin/portwarden-agent
 sudo install -m 0644 deploy/portwarden-agent.service /etc/systemd/system/portwarden-agent.service
 sudo systemctl daemon-reload
 sudo systemctl enable portwarden-agent

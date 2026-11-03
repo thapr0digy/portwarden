@@ -55,8 +55,12 @@ func (s *Store) Hosts(ctx context.Context, q inventory.HostQuery) ([]inventory.H
 	if q.After != nil {
 		after, from = q.After.ID, true
 	}
-	rows, err := s.pool.Query(ctx, "SELECT "+hostColumns+" FROM hosts h WHERE (NOT $1 OR h.host_id > $2) ORDER BY h.host_id LIMIT $3",
-		from, after, clampLimit(q.Limit))
+	var limit any = clampLimit(q.Limit)
+	if q.All {
+		limit = nil // LIMIT NULL: every host
+	}
+	rows, err := s.pool.Query(ctx, "SELECT "+hostColumns+" FROM hosts h WHERE (NOT $1 OR h.host_id > $2) ORDER BY h.host_id LIMIT $3::bigint",
+		from, after, limit)
 	if err != nil {
 		return nil, err
 	}

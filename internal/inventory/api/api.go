@@ -8,7 +8,8 @@
 //	GET    /v1/exposure-history?host=&key=&limit=&cursor=  one listener's level changes, newest first
 //	GET    /v1/proxy-routes?host=&proxy=           proxies with their route sets
 //
-// Lists are keyset-paged (M8): at most limit rows (default 1000, at most 10 000); when
+// Lists are keyset-paged (M8): at most limit rows (default 1000, at most 10 000; /v1/hosts
+// without limit and cursor returns every host, as before); when
 // more follow, the response has "X-Next-Cursor: <cursor>" and "Link: <same query with
 // cursor=…>; rel="next"". The body stays a JSON array. A cursor is opaque and belongs to
 // its list (another list's, or a mangled one, is 400); keep the other parameters the same
@@ -112,6 +113,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hosts(w http.ResponseWriter, r *http.Request) {
+	if q := r.URL.Query(); !q.Has("limit") && !q.Has("cursor") {
+		// Unpaged, as before M8: every host.
+		hs, err := s.r.Hosts(r.Context(), inventory.HostQuery{All: true})
+		reply(w, hs, err)
+		return
+	}
 	limit, err := pageLimit(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

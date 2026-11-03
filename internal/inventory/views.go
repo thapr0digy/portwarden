@@ -81,10 +81,11 @@ type ListenerFilter struct {
 	After *ListenerCursor
 }
 
-// HostQuery pages /v1/hosts.
+// HostQuery pages /v1/hosts; All returns every host (no limit, no cursor).
 type HostQuery struct {
 	Limit int
 	After *HostCursor
+	All   bool
 }
 
 // HistoryQuery selects one listener's exposure changes, newest first.

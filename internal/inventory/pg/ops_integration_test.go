@@ -275,3 +275,26 @@ func TestPaging(t *testing.T) {
 		}
 	}
 }
+
+func TestHostsAllIsUnbounded(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	for i := range 1005 {
+		if err := ensureHostTx(ctx, s, "h-"+strconv.Itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, err := s.Hosts(ctx, inventory.HostQuery{All: true})
+	if err != nil || len(all) != 1005 {
+		t.Fatalf("all hosts: %d %v", len(all), err)
+	}
+	page, err := s.Hosts(ctx, inventory.HostQuery{})
+	if err != nil || len(page) != 1000 {
+		t.Fatalf("default page: %d %v", len(page), err)
+	}
+}
+
+func ensureHostTx(ctx context.Context, s *Store, h string) error {
+	_, err := s.pool.Exec(ctx, "INSERT INTO hosts (host_id) VALUES ($1)", h)
+	return err
+}

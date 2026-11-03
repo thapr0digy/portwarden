@@ -31,7 +31,7 @@ func (f *fakeReader) Hosts(_ context.Context, q inventory.HostQuery) ([]inventor
 	}
 	out := []inventory.HostView{}
 	for _, id := range ids {
-		if (q.After == nil || id > q.After.ID) && len(out) < q.Limit {
+		if (q.After == nil || id > q.After.ID) && (q.All || len(out) < q.Limit) {
 			out = append(out, inventory.HostView{ID: id})
 		}
 	}

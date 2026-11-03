@@ -63,10 +63,16 @@ func TestHostsPaging(t *testing.T) {
 	if got := hostIDs(t, rec); len(got) != 2 || rec.Header().Get("X-Next-Cursor") != "" {
 		t.Fatalf("exact page: %v next %q", got, rec.Header().Get("X-Next-Cursor"))
 	}
-	// No limit: the default page (1000), asked as 1001.
-	get(t, h, "/v1/hosts", token)
-	if f.hostQ.Limit != 1001 || f.hostQ.After != nil {
-		t.Fatalf("default query %+v", f.hostQ)
+	// Neither limit nor cursor: every host, unpaged, as before M8 (no silent truncation).
+	f.hostIDs = []string{"a", "b", "c"}
+	rec = get(t, h, "/v1/hosts", token)
+	if got := hostIDs(t, rec); len(got) != 3 || !f.hostQ.All || rec.Header().Get("X-Next-Cursor") != "" {
+		t.Fatalf("unpaged: %v %+v next %q", got, f.hostQ, rec.Header().Get("X-Next-Cursor"))
+	}
+	// A cursor alone pages with the default limit (1000, asked as 1001).
+	get(t, h, "/v1/hosts?cursor="+inventory.EncodeCursor(inventory.HostCursor{ID: "a"}), token)
+	if f.hostQ.Limit != 1001 || f.hostQ.All || f.hostQ.After == nil {
+		t.Fatalf("cursor only: %+v", f.hostQ)
 	}
 }
 

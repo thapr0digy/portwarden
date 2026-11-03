@@ -19,7 +19,9 @@ import (
 const streamName = "ASM_EVENTS"
 
 type options struct {
-	natsURL string
+	natsURL   string
+	natsCreds string
+	natsNkey  string
 	host    string
 	since   time.Duration
 }
@@ -28,6 +30,8 @@ func parseFlags(args []string) (options, error) {
 	var o options
 	fs := flag.NewFlagSet("portwarden-watch", flag.ContinueOnError)
 	fs.StringVar(&o.natsURL, "nats-url", "nats://127.0.0.1:4222", "NATS server URL")
+	fs.StringVar(&o.natsCreds, "nats-creds", "", "NATS credentials file")
+	fs.StringVar(&o.natsNkey, "nats-nkey", "", "NATS nkey user seed file (the user needs stream read and consumer rights, e.g. the admin)")
 	fs.StringVar(&o.host, "host", "*", "host id (contents of /etc/machine-id) to watch, or * for all hosts")
 	fs.DurationVar(&o.since, "since", 10*time.Minute, "replay messages from this long ago (0s = only new messages)")
 	if err := fs.Parse(args); err != nil {
@@ -35,6 +39,9 @@ func parseFlags(args []string) (options, error) {
 	}
 	if o.since < 0 {
 		return o, fmt.Errorf("--since must not be negative, got %s", o.since)
+	}
+	if o.natsCreds != "" && o.natsNkey != "" {
+		return o, errors.New("--nats-creds and --nats-nkey are exclusive")
 	}
 	if o.host == "" {
 		return o, errors.New("--host must not be empty")
@@ -60,7 +67,18 @@ func main() {
 }
 
 func run(ctx context.Context, opts options) error {
-	nc, err := nats.Connect(opts.natsURL, nats.Name("portwarden-watch"))
+	copts := []nats.Option{nats.Name("portwarden-watch")}
+	if opts.natsCreds != "" {
+		copts = append(copts, nats.UserCredentials(opts.natsCreds))
+	}
+	if opts.natsNkey != "" {
+		nk, err := nats.NkeyOptionFromSeed(opts.natsNkey)
+		if err != nil {
+			return fmt.Errorf("nkey: %w", err)
+		}
+		copts = append(copts, nk)
+	}
+	nc, err := nats.Connect(opts.natsURL, copts...)
 	if err != nil {
 		return fmt.Errorf("connect %s: %w", opts.natsURL, err)
 	}

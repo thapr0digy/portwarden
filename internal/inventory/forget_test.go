@@ -123,6 +123,13 @@ func TestForgottenHostLeftoversSkipped(t *testing.T) {
 	if len(f.applied) != before {
 		t.Fatalf("applied %d leftovers of the forgotten host", len(f.applied)-before)
 	}
+	// A verdict the cloud look-up or verifier started before the forget may be stored after
+	// the announcement: while the host has not come back it is dropped too (backend events
+	// are only ever about hosts the inventory holds).
+	handleAt(t, c, "pwb.cloud."+host+".exposure", &asmv1.ExposureEvent{HostId: host, Listener: &asmv1.Listener{Key: "k"}}, 20)
+	if len(f.applied) != before {
+		t.Fatal("a late verdict for the forgotten host was applied")
+	}
 	// The host comes back: a new host, from whatever seq its agent is at.
 	handleAt(t, c, "asm."+host+".heartbeat", &asmv1.Heartbeat{HostId: host, RunId: "01A", Seq: 3}, 21)
 	if len(f.applied) != before+1 || f.cursors[host].LastSeq != 3 {

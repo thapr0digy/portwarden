@@ -180,6 +180,25 @@ func (c *Consumer) Forget(ctx context.Context, host string) (ForgetResult, error
 	return ForgetResult{Host: host, Existed: existed, StreamSeq: seq}, nil
 }
 
+// staleVerdict reports whether a backend event (a cloud or verifier verdict) concerns a
+// forgotten host: stored before its announcement, or after it while the host has not come
+// back (a look-up or probe started before the forget). Backend events are only ever about
+// hosts the inventory holds, so neither may recreate one.
+func (c *Consumer) staleVerdict(ctx context.Context, host string, streamSeq uint64) (bool, error) {
+	mark, err := c.Store.ForgottenSeq(ctx, host)
+	if err != nil || mark == 0 {
+		return false, err
+	}
+	if streamSeq != 0 && streamSeq < mark {
+		return true, nil
+	}
+	if _, known, err := c.Store.Cursor(ctx, host); err != nil || known {
+		return false, err
+	}
+	slog.Info("inventory: skipping a verdict for a forgotten host that has not come back", "host", host, "stream_seq", streamSeq)
+	return true, nil
+}
+
 // leftover reports whether a message stored at streamSeq predates the host's forget
 // watermark (0, a message without stream metadata, is never a leftover).
 func (c *Consumer) leftover(ctx context.Context, host string, streamSeq uint64) (bool, error) {
@@ -221,7 +240,7 @@ func (c *Consumer) Handle(ctx context.Context, subject string, data []byte, m Me
 		return svc.Permanent(fmt.Errorf("host_id %q differs from the subject's host", h))
 	}
 	if p.Origin != bus.OriginAgent {
-		if old, err := c.leftover(ctx, p.Host, m.StreamSeq); err != nil || old {
+		if stale, err := c.staleVerdict(ctx, p.Host, m.StreamSeq); err != nil || stale {
 			return err
 		}
 		if err := c.Store.Apply(ctx, Event{Meta: m, Msg: msg}); err != nil {

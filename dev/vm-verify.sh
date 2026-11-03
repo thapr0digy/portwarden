@@ -20,6 +20,9 @@
 # (VMVERIFY_KEEP=1 keeps it). Prints the matrix's per-leg summary; exits non-zero when
 # any leg fails.
 set -euo pipefail
+# One brace group, read whole before it runs: the checkout under test may be edited (or
+# its branch switched) during the hour this runs, and bash reads a script as it goes.
+{
 cd "$(dirname "$0")/.."
 src=$PWD
 root=${VMVERIFY_ROOT:-$HOME/projects/portwarden}
@@ -122,3 +125,4 @@ echo "vm-verify: running dev/matrix.sh on legs: $legs"
 rc=0
 VMLOCK_COMMAND="dev/vm-verify.sh ($legs) from $src, copy $copy" MATRIX_LEGS=$legs "$copy/dev/matrix.sh" || rc=$?
 exit "$rc"
+}

@@ -149,6 +149,15 @@ func Find(listeners []state.Listener, p Procs, selfMountNS uint64, enrich func(m
 		out = append(out, *inst)
 	}
 	slices.SortFunc(out, func(a, b Instance) int { return strings.Compare(a.ID, b.ID) })
+	// Two instances of one config in one netns (one is shutting down, or a stray
+	// test run): the later masters get "#<pid>" so every ID stays unique.
+	used := make(map[string]bool, len(out))
+	for i := range out {
+		if used[out[i].ID] {
+			out[i].ID += "#" + strconv.FormatUint(uint64(out[i].Master().PID), 10)
+		}
+		used[out[i].ID] = true
+	}
 	return out
 }
 

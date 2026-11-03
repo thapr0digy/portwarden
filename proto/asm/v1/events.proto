@@ -109,6 +109,50 @@ message Heartbeat {
   // (boot_id, run_number) instead of the run_id's wall-clock time.
   string boot_id = 9;
   uint64 run_number = 10;
+  // The agent's tamper checks as of its last pass (M6); unset from agents without them.
+  TamperStatus tamper = 11;
+}
+
+// TamperFlag is one tamper signal the agent's self-checks (design §9) currently see.
+message TamperFlag {
+  // probe_detached, program_replaced, map_replaced, ptraced, binary_replaced,
+  // binary_missing, unit_changed, counter_reset, events_dropped.
+  string kind = 1;
+  // What it is about: a program name (on_listen), a file path, a counter name, "self".
+  string subject = 2;
+  // e.g. "link 12 now runs program 99 (tag 0a1b...), loaded 41 (tag 9f8e...)".
+  string detail = 3;
+  // When the agent first saw it (this run).
+  google.protobuf.Timestamp since = 4;
+}
+
+// TamperStatus is the result of the agent's last tamper pass.
+message TamperStatus {
+  // Every flag currently raised; empty when all checks pass.
+  repeated TamperFlag flags = 1;
+  google.protobuf.Timestamp checked_at = 2;
+  // The checks that ran, e.g. "probes", "self_exe", "unit", "ptrace", "counters".
+  repeated string checks = 3;
+  // Checks that could not read their evidence this pass ("unit: no systemd unit"); never
+  // a tamper signal by themselves.
+  repeated string unknown = 4;
+  // Per-program run counts, only while kernel.bpf_stats_enabled is 1.
+  map<string, uint64> prog_run_counts = 5;
+  uint64 ringbuf_drops = 6;
+}
+
+// TamperEvent is published on asm.<host>.tamper whenever a flag is raised or cleared.
+message TamperEvent {
+  string event_id = 1;
+  string host_id = 2;
+  string run_id = 3;
+  uint64 seq = 4;
+  google.protobuf.Timestamp observed_at = 5;
+  TamperStatus status = 6;
+  repeated TamperFlag raised = 7;
+  repeated TamperFlag cleared = 8;
+  string boot_id = 9;
+  uint64 run_number = 10;
 }
 
 // ExposureLevel is the design's exposure level plus one (0 is unset): it only rises as

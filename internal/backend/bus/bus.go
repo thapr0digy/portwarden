@@ -115,6 +115,7 @@ const (
 	KindSnapshot          = "snapshot"
 	KindHeartbeat         = "heartbeat"
 	KindHostChanged       = "host.changed"
+	KindTamper            = "tamper"
 )
 
 // ParseSubject splits "asm.<host>.<kind>" into host and kind.

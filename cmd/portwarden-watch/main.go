@@ -22,8 +22,8 @@ type options struct {
 	natsURL   string
 	natsCreds string
 	natsNkey  string
-	host    string
-	since   time.Duration
+	host      string
+	since     time.Duration
 }
 
 func parseFlags(args []string) (options, error) {

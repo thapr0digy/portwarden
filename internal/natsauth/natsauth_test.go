@@ -126,6 +126,9 @@ func TestPermissionMatrix(t *testing.T) {
 	if err := publish(a, "asm."+hostA+".heartbeat"); err != nil {
 		t.Fatalf("host A must publish under its own prefix: %v", err)
 	}
+	if err := publish(a, "asm."+hostA+".tamper"); err != nil {
+		t.Fatalf("host A must publish its tamper events: %v", err)
+	}
 	if err := publish(a, "asm."+hostB+".heartbeat"); err == nil {
 		t.Fatal("host A published under host B's prefix")
 	}

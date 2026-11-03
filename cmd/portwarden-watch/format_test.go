@@ -340,3 +340,24 @@ func TestHostSuffixRegion(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestFormatFirewallFingerprint(t *testing.T) {
+	fp := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	empty := ""
+	hb := &asmv1.Heartbeat{HostId: hostID, RunId: "r1", Seq: 9, At: at, FirewallFingerprint: &fp,
+		Tamper: &asmv1.TamperStatus{Checks: []string{"probes"}}}
+	got, _ := formatEvent("asm."+hostID+".heartbeat", mustMarshal(t, hb))
+	if want := "2026-10-30T14:02:11.418Z 01234567 seq=9 HEARTBEAT drops=0/0 tamper=ok fw=0123456789ab"; got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+	hb.FirewallFingerprint = &empty // the firewall is not fully readable
+	got, _ = formatEvent("asm."+hostID+".heartbeat", mustMarshal(t, hb))
+	if want := "2026-10-30T14:02:11.418Z 01234567 seq=9 HEARTBEAT drops=0/0 tamper=ok fw=-"; got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+	snap := &asmv1.Snapshot{HostId: hostID, RunId: "r1", Seq: 1, TakenAt: at, Host: &asmv1.HostInfo{FirewallFingerprint: &fp}}
+	got, _ = formatEvent("asm."+hostID+".snapshot", mustMarshal(t, snap))
+	if want := "2026-10-30T14:02:11.418Z 01234567 seq=1 SNAPSHOT n=0 tcp=0 udp=0 fw=0123456789ab"; got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}

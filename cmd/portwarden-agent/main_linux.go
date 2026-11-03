@@ -284,6 +284,7 @@ func run(opts options, log *slog.Logger) error {
 		return fmt.Errorf("publisher: %w", err)
 	}
 	pubRef.Store(pub)
+	pub.SetFirewall(initialView.FirewallDigest())
 	pub.SetHost(hostInfo.Host())
 
 	judges := make(chan agent.Judge, 1)
@@ -292,6 +293,8 @@ func run(opts options, log *slog.Logger) error {
 			hostInfo.SetInterfaces(ifs)
 		}
 		hostInfo.SetConditions(v.Conditions())
+		// Before the view is judged, so its exposure events carry its fingerprint.
+		pub.SetFirewall(v.FirewallDigest())
 		offerLatest(judges, v)
 	})
 	if opts.imds == "auto" {

@@ -97,6 +97,10 @@ type Publisher struct {
 	host    model.HostInfo
 	hostSet bool
 
+	// firewall is the firewall fingerprint (SetFirewall) stamped on host blocks and
+	// heartbeats; nil until the first exposure view.
+	firewall *string
+
 	// tamper is the last tamper status (SetTamper), carried on heartbeats; nil until the
 	// first pass.
 	tamper *asmv1.TamperStatus
@@ -361,16 +365,37 @@ func (p *Publisher) SetHost(h model.HostInfo) {
 		RunId:   p.runID, BootId: p.bootID, RunNumber: p.runNumber,
 		Seq:        seq,
 		ObservedAt: timestamppb.Now(),
-		Host:       hostToProto(p.host),
+		Host:       p.hostProtoLocked(),
 		Previous:   hostToProto(prev),
 	})
+}
+
+// SetFirewall replaces the firewall fingerprint (exposure.View.FirewallDigest; "" while
+// the firewall cannot be read in full) stamped on later host blocks and heartbeats. A
+// change on its own publishes nothing: the next heartbeat carries it, so a busy ruleset
+// (a ban list) costs no extra messages and host.changed keeps meaning the host block.
+func (p *Publisher) SetFirewall(digest string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.firewall = &digest
 }
 
 func (p *Publisher) hostProtoLocked() *asmv1.HostInfo {
 	if !p.hostSet {
 		return nil
 	}
-	return hostToProto(p.host)
+	h := hostToProto(p.host)
+	h.FirewallFingerprint = p.firewallLocked()
+	return h
+}
+
+// firewallLocked is the fingerprint for a message: a copy, nil before the first view.
+func (p *Publisher) firewallLocked() *string {
+	if p.firewall == nil {
+		return nil
+	}
+	fp := *p.firewall
+	return &fp
 }
 
 // Heartbeat enqueues a liveness message carrying the ring buffer's and the spool's
@@ -389,6 +414,8 @@ func (p *Publisher) Heartbeat(ringbufDrops uint64) {
 		RingbufDrops: ringbufDrops,
 		QueueDrops:   p.q.Dropped(),
 		Tamper:       p.tamperLocked(),
+
+		FirewallFingerprint: p.firewallLocked(),
 	})
 }
 

@@ -804,9 +804,12 @@ type Heartbeat struct {
 	BootId    string `protobuf:"bytes,9,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
 	RunNumber uint64 `protobuf:"varint,10,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
 	// The agent's tamper checks as of its last pass (M6); unset from agents without them.
-	Tamper        *TamperStatus `protobuf:"bytes,11,opt,name=tamper,proto3" json:"tamper,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Tamper *TamperStatus `protobuf:"bytes,11,opt,name=tamper,proto3" json:"tamper,omitempty"`
+	// The firewall fingerprint as of the agent's latest exposure view (M7), the same value
+	// as HostInfo.firewall_fingerprint. Unset from agents without it.
+	FirewallFingerprint *string `protobuf:"bytes,12,opt,name=firewall_fingerprint,json=firewallFingerprint,proto3,oneof" json:"firewall_fingerprint,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -915,6 +918,13 @@ func (x *Heartbeat) GetTamper() *TamperStatus {
 		return x.Tamper
 	}
 	return nil
+}
+
+func (x *Heartbeat) GetFirewallFingerprint() string {
+	if x != nil && x.FirewallFingerprint != nil {
+		return *x.FirewallFingerprint
+	}
+	return ""
 }
 
 // TamperFlag is one tamper signal the agent's self-checks (design §9) currently see.
@@ -1357,9 +1367,15 @@ type HostInfo struct {
 	Conditions []string `protobuf:"bytes,4,rep,name=conditions,proto3" json:"conditions,omitempty"`
 	// The cloud region (AWS placement/region, the GCP zone's region, the Azure location);
 	// the backend's cloud look-up needs it. Empty off-cloud.
-	Region        string `protobuf:"bytes,5,opt,name=region,proto3" json:"region,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Region string `protobuf:"bytes,5,opt,name=region,proto3" json:"region,omitempty"`
+	// A digest of the firewall ruleset the agent judges with (M7): lowercase hex SHA-256 of
+	// the parsed rules (counters and dump timestamps excluded), never the rules themselves.
+	// It changes whenever a rule does, even one that moves no listener's exposure. Set and
+	// empty while the firewall cannot be read in full (a "fw:unreadable" condition says
+	// why); unset from agents without it.
+	FirewallFingerprint *string `protobuf:"bytes,6,opt,name=firewall_fingerprint,json=firewallFingerprint,proto3,oneof" json:"firewall_fingerprint,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *HostInfo) Reset() {
@@ -1423,6 +1439,13 @@ func (x *HostInfo) GetConditions() []string {
 func (x *HostInfo) GetRegion() string {
 	if x != nil {
 		return x.Region
+	}
+	return ""
+}
+
+func (x *HostInfo) GetFirewallFingerprint() string {
+	if x != nil && x.FirewallFingerprint != nil {
+		return *x.FirewallFingerprint
 	}
 	return ""
 }
@@ -2772,7 +2795,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\aboot_id\x18\t \x01(\tR\x06bootId\x12\x1d\n" +
 	"\n" +
 	"run_number\x18\n" +
-	" \x01(\x04R\trunNumber\"\xf8\x02\n" +
+	" \x01(\x04R\trunNumber\"\xc9\x03\n" +
 	"\tHeartbeat\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -2787,7 +2810,9 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\n" +
 	"run_number\x18\n" +
 	" \x01(\x04R\trunNumber\x12,\n" +
-	"\x06tamper\x18\v \x01(\v2\x14.asm.v1.TamperStatusR\x06tamper\"\xba\x01\n" +
+	"\x06tamper\x18\v \x01(\v2\x14.asm.v1.TamperStatusR\x06tamper\x126\n" +
+	"\x14firewall_fingerprint\x18\f \x01(\tH\x00R\x13firewallFingerprint\x88\x01\x01B\x17\n" +
+	"\x15_firewall_fingerprint\"\xba\x01\n" +
 	"\n" +
 	"TamperFlag\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x18\n" +
@@ -2828,7 +2853,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x02ip\x18\x01 \x01(\tR\x02ip\x12\x10\n" +
 	"\x03via\x18\x02 \x01(\tR\x03via\x12\x10\n" +
 	"\x03dir\x18\x03 \x01(\tR\x03dir\x12\x14\n" +
-	"\x05iface\x18\x04 \x01(\tR\x05iface\"\xaa\x01\n" +
+	"\x05iface\x18\x04 \x01(\tR\x05iface\"\xfb\x01\n" +
 	"\bHostInfo\x12/\n" +
 	"\n" +
 	"public_ips\x18\x01 \x03(\v2\x10.asm.v1.PublicIPR\tpublicIps\x12\x14\n" +
@@ -2838,7 +2863,9 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\n" +
 	"conditions\x18\x04 \x03(\tR\n" +
 	"conditions\x12\x16\n" +
-	"\x06region\x18\x05 \x01(\tR\x06region\"\xf2\x03\n" +
+	"\x06region\x18\x05 \x01(\tR\x06region\x126\n" +
+	"\x14firewall_fingerprint\x18\x06 \x01(\tH\x00R\x13firewallFingerprint\x88\x01\x01B\x17\n" +
+	"\x15_firewall_fingerprint\"\xf2\x03\n" +
 	"\rExposureEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -3107,6 +3134,8 @@ func file_asm_v1_events_proto_init() {
 	if File_asm_v1_events_proto != nil {
 		return
 	}
+	file_asm_v1_events_proto_msgTypes[6].OneofWrappers = []any{}
+	file_asm_v1_events_proto_msgTypes[12].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

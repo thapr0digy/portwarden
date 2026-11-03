@@ -3,13 +3,16 @@
 // mints nkey users for them and renders the nats-server authorization block.
 //
 // Roles:
-//   - host: one per server. Publishes asm.<host>.> only; subscribes only to its own reply
-//     inboxes _INBOX_<host>.> (JetStream publish acks).
+//   - host: one per server. Publishes only the agent's own subjects under asm.<host>
+//     (HostSubjects); subscribes only to its own reply inboxes _INBOX_<host>.> (JetStream
+//     publish acks). It can never publish in the backend's pwb.> namespace, so it cannot
+//     forge a cloud or verifier verdict, even about itself.
 //   - inventory, alerter, verifier: backend services. Each may read the ASM_EVENTS stream
 //     through its own named durable consumers only, and subscribe only to its own inboxes
-//     _INBOX_<service>.>. The inventory may also publish asm.*.exposure.changed (cloud
-//     look-up, level 3) and fetch single stream messages (gap reload); the verifier may
-//     publish asm.*.exposure.confirmed. The alerter publishes nothing on the bus.
+//     _INBOX_<service>.>. None may publish under asm.>. The inventory publishes cloud
+//     verdicts (pwb.cloud.<host>.exposure) and probe requests (pwb.probe.<host>.request)
+//     and fetches single stream messages (gap reload); the verifier publishes its results
+//     (pwb.verifier.<host>.exposure). The alerter publishes nothing on the bus.
 //   - admin: creates and manages the stream ($JS.API.>), never given to a host.
 package natsauth
 
@@ -54,9 +57,17 @@ const (
 	directGetPlain     = "$JS.API.DIRECT.GET." + StreamName
 	jetStreamAPIInfo   = "$JS.API.INFO"
 	ackPrefix          = "$JS.ACK." + StreamName + "."
-	exposureChangedAll = "asm.*.exposure.changed"
-	exposureConfirmAll = "asm.*.exposure.confirmed"
+	cloudVerdicts      = "pwb.cloud.*.exposure"
+	probeRequests      = "pwb.probe.*.request"
+	verifierResults    = "pwb.verifier.*.exposure"
 )
+
+// HostSubjects are the subject kinds an agent publishes under asm.<host>.
+var HostSubjects = []string{"listener.opened", "listener.closed", "listener.owner_changed", "exposure.changed",
+	"snapshot", "heartbeat", "proxy.routes", "host.changed"}
+
+// reservedHostIDs would give a host a service's reply inbox (_INBOX_<service>).
+var reservedHostIDs = map[string]bool{"inventory": true, "alerter": true, "verifier": true, "admin": true}
 
 // Consumers lists the durable consumers a service role owns.
 func Consumers(r Role) []string {
@@ -90,9 +101,13 @@ func Permissions(r Role, host string) (publish, subscribe []string, err error) {
 		if err := ValidHostID(host); err != nil {
 			return nil, nil, err
 		}
-		return []string{"asm." + host + ".>"}, []string{InboxPrefix(r, host) + ".>"}, nil
+		var pub []string
+		for _, k := range HostSubjects {
+			pub = append(pub, "asm."+host+"."+k)
+		}
+		return pub, []string{InboxPrefix(r, host) + ".>"}, nil
 	case RoleAdmin:
-		return []string{"$JS.API.>", "$JS.ACK.>", "asm.>"}, []string{"_INBOX.>", "asm.>"}, nil
+		return []string{"$JS.API.>", "$JS.ACK.>", "asm.>", "pwb.>"}, []string{"_INBOX.>", "asm.>", "pwb.>"}, nil
 	case RoleInventory, RoleAlerter, RoleVerifier:
 		pub := []string{jetStreamAPIInfo, streamInfoSubject}
 		for _, c := range Consumers(r) {
@@ -108,9 +123,9 @@ func Permissions(r Role, host string) (publish, subscribe []string, err error) {
 		}
 		switch r {
 		case RoleInventory:
-			pub = append(pub, streamMsgGet, directGetPlain, directGetWildcard, exposureChangedAll)
+			pub = append(pub, streamMsgGet, directGetPlain, directGetWildcard, cloudVerdicts, probeRequests)
 		case RoleVerifier:
-			pub = append(pub, exposureConfirmAll)
+			pub = append(pub, verifierResults)
 		}
 		return pub, []string{InboxPrefix(r, "") + ".>"}, nil
 	}
@@ -121,6 +136,9 @@ func Permissions(r Role, host string) (publish, subscribe []string, err error) {
 func ValidHostID(host string) error {
 	if host == "" || strings.ContainsAny(host, ".*> \t\r\n\"'\\{}[]#$") {
 		return fmt.Errorf("host id %q is not a single plain subject token", host)
+	}
+	if reservedHostIDs[host] {
+		return fmt.Errorf("host id %q is reserved (a service's reply inbox)", host)
 	}
 	return nil
 }

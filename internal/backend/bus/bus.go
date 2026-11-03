@@ -205,3 +205,45 @@ func (p *Publisher) Publish(ctx context.Context, subject, id string, msg proto.M
 	}
 	return fmt.Errorf("publish %s: %w", subject, last)
 }
+
+// Backend namespaces (pwb.<origin>.<host>.<kind>). No host may publish there, so the
+// origin of a message is the subject's, never a field of the body.
+const (
+	OriginAgent    = ""
+	OriginCloud    = "cloud"
+	OriginVerifier = "verifier"
+	OriginProbe    = "probe"
+	// KindVerdict is the kind of pwb.cloud and pwb.verifier messages; KindProbeRequest
+	// of pwb.probe ones.
+	KindVerdict      = "exposure"
+	KindProbeRequest = "request"
+)
+
+// CloudSubject is where the inventory's cloud look-up publishes a host's verdicts.
+func CloudSubject(host string) string { return "pwb.cloud." + host + "." + KindVerdict }
+
+// VerifierSubject is where the verifier publishes a host's probe results.
+func VerifierSubject(host string) string { return "pwb.verifier." + host + "." + KindVerdict }
+
+// ProbeSubject is where the inventory asks the verifier to probe a host's listener.
+func ProbeSubject(host string) string { return "pwb.probe." + host + "." + KindProbeRequest }
+
+// Parsed is a subject split into origin, host and kind.
+type Parsed struct{ Origin, Host, Kind string }
+
+// Parse splits asm.<host>.<kind> (origin "") and pwb.<origin>.<host>.<kind>.
+func Parse(subject string) (Parsed, bool) {
+	if host, kind, ok := ParseSubject(subject); ok {
+		return Parsed{Origin: OriginAgent, Host: host, Kind: kind}, true
+	}
+	parts := strings.Split(subject, ".")
+	if len(parts) != 4 || parts[0] != "pwb" || parts[2] == "" {
+		return Parsed{}, false
+	}
+	switch {
+	case (parts[1] == OriginCloud || parts[1] == OriginVerifier) && parts[3] == KindVerdict,
+		parts[1] == OriginProbe && parts[3] == KindProbeRequest:
+		return Parsed{Origin: parts[1], Host: parts[2], Kind: parts[3]}, true
+	}
+	return Parsed{}, false
+}

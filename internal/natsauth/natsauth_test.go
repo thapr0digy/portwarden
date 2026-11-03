@@ -118,7 +118,7 @@ func TestPermissionMatrix(t *testing.T) {
 	url, users := authServer(t)
 	admin := connect(t, url, users, RoleAdmin, "")
 	ctx := context.Background()
-	if _, err := admin.js.CreateStream(ctx, jetstream.StreamConfig{Name: StreamName, Subjects: []string{"asm.>"}, AllowDirect: true}); err != nil {
+	if _, err := admin.js.CreateStream(ctx, jetstream.StreamConfig{Name: StreamName, Subjects: []string{"asm.>", "pwb.>"}, AllowDirect: true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -132,6 +132,14 @@ func TestPermissionMatrix(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if !a.denied("asm." + hostB + ".heartbeat") {
 		t.Fatalf("no permission violation for host A on host B's prefix: %v", a.violations)
+	}
+	// A host can never forge a backend verdict, even about itself, nor publish a kind the
+	// agent does not send.
+	for _, forged := range []string{"pwb.verifier." + hostA + ".exposure", "pwb.cloud." + hostA + ".exposure",
+		"asm." + hostA + ".exposure.confirmed", "asm." + hostA + ".anything"} {
+		if err := publish(a, forged); err == nil {
+			t.Errorf("host A published %s", forged)
+		}
 	}
 	if _, err := a.js.Stream(ctx, StreamName); err == nil {
 		t.Fatal("a host may not look up the stream")
@@ -152,12 +160,17 @@ func TestPermissionMatrix(t *testing.T) {
 		mayNot  string
 		durable string
 	}{
-		{RoleInventory, "asm." + hostA + ".exposure.changed", "asm." + hostA + ".listener.opened", ConsumerInventory},
-		{RoleVerifier, "asm." + hostA + ".exposure.confirmed", "asm." + hostA + ".exposure.changed", ConsumerVerifier},
+		{RoleInventory, "pwb.cloud." + hostA + ".exposure", "asm." + hostA + ".exposure.changed", ConsumerInventory},
+		{RoleInventory, "pwb.probe." + hostA + ".request", "pwb.verifier." + hostA + ".exposure", ConsumerInventory},
+		{RoleVerifier, "pwb.verifier." + hostA + ".exposure", "asm." + hostA + ".exposure.confirmed", ConsumerVerifier},
+		{RoleVerifier, "", "pwb.cloud." + hostA + ".exposure", ConsumerVerifier},
 		{RoleAlerter, "", "asm." + hostA + ".exposure.changed", ConsumerAlerter},
 	} {
 		t.Run(string(svc.r), func(t *testing.T) {
 			c := connect(t, url, users, svc.r, "")
+			if err := publish(a, "asm."+hostA+".heartbeat"); err != nil {
+				t.Fatal(err)
+			}
 			cons, err := c.js.CreateOrUpdateConsumer(ctx, StreamName, jetstream.ConsumerConfig{
 				Durable: svc.durable, AckPolicy: jetstream.AckExplicitPolicy, FilterSubject: "asm.>",
 			})
@@ -218,7 +231,7 @@ func TestMintNeverOverwritesAndKeepsSeedPrivate(t *testing.T) {
 }
 
 func TestBadHostIDs(t *testing.T) {
-	for _, h := range []string{"", "a.b", "a*", ">", "a b", `a"b`} {
+	for _, h := range []string{"", "a.b", "a*", ">", "a b", `a"b`, "inventory", "alerter", "verifier", "admin"} {
 		if _, _, err := Permissions(RoleHost, h); err == nil {
 			t.Errorf("host id %q accepted", h)
 		}

@@ -24,7 +24,7 @@ func TestMintAndRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `"asm.abc123.>"`) || !strings.Contains(string(b), `"_INBOX_inventory.>"`) {
+	if !strings.Contains(string(b), `"asm.abc123.heartbeat"`) || !strings.Contains(string(b), `"_INBOX_inventory.>"`) {
 		t.Fatalf("render output:\n%s", b)
 	}
 	if err := run([]string{"mint", "--dir", dir, "--role", "alerter", "--host", "x"}, &out); err == nil {

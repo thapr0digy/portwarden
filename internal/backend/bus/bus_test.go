@@ -54,18 +54,18 @@ func TestPublishAndDurable(t *testing.T) {
 	}
 	defer nc.Close()
 	ctx := context.Background()
-	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: natsauth.StreamName, Subjects: []string{"asm.>"}}); err != nil {
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: natsauth.StreamName, Subjects: []string{"asm.>", "pwb.>"}}); err != nil {
 		t.Fatal(err)
 	}
 	p := NewPublisher(js, "verifier")
 	id := NewEventID()
 	ev := &asmv1.ExposureConfirmation{EventId: id, HostId: "h1", RunId: p.RunID, Result: "confirmed", Origin: "verifier"}
 	for range 2 { // the retry of the same id is deduplicated
-		if err := p.Publish(ctx, Subject("h1", KindExposureConfirmed), id, ev); err != nil {
+		if err := p.Publish(ctx, VerifierSubject("h1"), id, ev); err != nil {
 			t.Fatal(err)
 		}
 	}
-	c, err := Durable(ctx, js, natsauth.ConsumerVerifier, DurableOptions{Filters: []string{"asm.*.exposure.confirmed"}})
+	c, err := Durable(ctx, js, natsauth.ConsumerVerifier, DurableOptions{Filters: []string{"pwb.verifier.*.exposure"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,12 +86,31 @@ func TestPublishAndDurable(t *testing.T) {
 		t.Fatalf("got %d messages, want 1 (dedupe)", n)
 	}
 	// Re-creating keeps the position: nothing is redelivered.
-	c, err = Durable(ctx, js, natsauth.ConsumerVerifier, DurableOptions{Filters: []string{"asm.*.exposure.confirmed"}, DeliverNew: true})
+	c, err = Durable(ctx, js, natsauth.ConsumerVerifier, DurableOptions{Filters: []string{"pwb.verifier.*.exposure"}, DeliverNew: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	batch, _ = c.Fetch(10, jetstream.FetchMaxWait(300*time.Millisecond))
 	for range batch.Messages() {
 		t.Fatal("redelivered after re-create")
+	}
+}
+
+func TestParseBackendSubjects(t *testing.T) {
+	for subj, want := range map[string]Parsed{
+		"asm.h.exposure.changed": {"", "h", "exposure.changed"},
+		CloudSubject("h"):        {"cloud", "h", "exposure"},
+		VerifierSubject("h"):     {"verifier", "h", "exposure"},
+		ProbeSubject("h"):        {"probe", "h", "request"},
+	} {
+		got, ok := Parse(subj)
+		if !ok || got != want {
+			t.Errorf("%s: %+v %v", subj, got, ok)
+		}
+	}
+	for _, bad := range []string{"pwb.agent.h.exposure", "pwb.cloud.h.other", "pwb.cloud..exposure", "pwb.cloud.h", "x.y"} {
+		if _, ok := Parse(bad); ok {
+			t.Errorf("%s parsed", bad)
+		}
 	}
 }

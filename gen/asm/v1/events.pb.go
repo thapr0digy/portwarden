@@ -126,6 +126,72 @@ func (Source) EnumDescriptor() ([]byte, []int) {
 	return file_asm_v1_events_proto_rawDescGZIP(), []int{1}
 }
 
+// ExposureLevel is the design's exposure level plus one (0 is unset): it only rises as
+// evidence comes in. The agent sets LOCAL, BOUND and HOST_FIREWALL_OPEN; CLOUD_OPEN and
+// CONFIRMED are reserved for the backend's cloud look-up and the outside checker.
+type ExposureLevel int32
+
+const (
+	ExposureLevel_EXPOSURE_LEVEL_UNSPECIFIED ExposureLevel = 0
+	// Level 0: loopback, or a container listener no host port mapping points at.
+	ExposureLevel_EXPOSURE_LOCAL ExposureLevel = 1
+	// Level 1: bound to all addresses or to a real interface address.
+	ExposureLevel_EXPOSURE_BOUND ExposureLevel = 2
+	// Level 2: the host firewall (nftables / iptables) lets a packet from 0/0 in.
+	ExposureLevel_EXPOSURE_HOST_FIREWALL_OPEN ExposureLevel = 3
+	// Level 3 (reserved): a cloud security group or load balancer allows it.
+	ExposureLevel_EXPOSURE_CLOUD_OPEN ExposureLevel = 4
+	// Level 4 (reserved): the outside checker connected.
+	ExposureLevel_EXPOSURE_CONFIRMED ExposureLevel = 5
+)
+
+// Enum value maps for ExposureLevel.
+var (
+	ExposureLevel_name = map[int32]string{
+		0: "EXPOSURE_LEVEL_UNSPECIFIED",
+		1: "EXPOSURE_LOCAL",
+		2: "EXPOSURE_BOUND",
+		3: "EXPOSURE_HOST_FIREWALL_OPEN",
+		4: "EXPOSURE_CLOUD_OPEN",
+		5: "EXPOSURE_CONFIRMED",
+	}
+	ExposureLevel_value = map[string]int32{
+		"EXPOSURE_LEVEL_UNSPECIFIED":  0,
+		"EXPOSURE_LOCAL":              1,
+		"EXPOSURE_BOUND":              2,
+		"EXPOSURE_HOST_FIREWALL_OPEN": 3,
+		"EXPOSURE_CLOUD_OPEN":         4,
+		"EXPOSURE_CONFIRMED":          5,
+	}
+)
+
+func (x ExposureLevel) Enum() *ExposureLevel {
+	p := new(ExposureLevel)
+	*p = x
+	return p
+}
+
+func (x ExposureLevel) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ExposureLevel) Descriptor() protoreflect.EnumDescriptor {
+	return file_asm_v1_events_proto_enumTypes[2].Descriptor()
+}
+
+func (ExposureLevel) Type() protoreflect.EnumType {
+	return &file_asm_v1_events_proto_enumTypes[2]
+}
+
+func (x ExposureLevel) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ExposureLevel.Descriptor instead.
+func (ExposureLevel) EnumDescriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{2}
+}
+
 type Listener struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Netns         uint32                 `protobuf:"varint,1,opt,name=netns,proto3" json:"netns,omitempty"`
@@ -383,8 +449,12 @@ type ListenerEvent struct {
 	Processes  []*Process             `protobuf:"bytes,9,rep,name=processes,proto3" json:"processes,omitempty"`
 	// Set only on OWNER_CHANGED: the owners before the change.
 	PreviousProcesses []*Process `protobuf:"bytes,10,rep,name=previous_processes,json=previousProcesses,proto3" json:"previous_processes,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// The listener's exposure when the event was published (on CLOSED: its last one).
+	Exposure *Exposure `protobuf:"bytes,11,opt,name=exposure,proto3" json:"exposure,omitempty"`
+	// The host's public-IP candidates and cloud identity at publish time.
+	Host          *HostInfo `protobuf:"bytes,12,opt,name=host,proto3" json:"host,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ListenerEvent) Reset() {
@@ -487,10 +557,25 @@ func (x *ListenerEvent) GetPreviousProcesses() []*Process {
 	return nil
 }
 
+func (x *ListenerEvent) GetExposure() *Exposure {
+	if x != nil {
+		return x.Exposure
+	}
+	return nil
+}
+
+func (x *ListenerEvent) GetHost() *HostInfo {
+	if x != nil {
+		return x.Host
+	}
+	return nil
+}
+
 type ListenerState struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Listener      *Listener              `protobuf:"bytes,1,opt,name=listener,proto3" json:"listener,omitempty"`
 	Processes     []*Process             `protobuf:"bytes,2,rep,name=processes,proto3" json:"processes,omitempty"`
+	Exposure      *Exposure              `protobuf:"bytes,3,opt,name=exposure,proto3" json:"exposure,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -539,6 +624,13 @@ func (x *ListenerState) GetProcesses() []*Process {
 	return nil
 }
 
+func (x *ListenerState) GetExposure() *Exposure {
+	if x != nil {
+		return x.Exposure
+	}
+	return nil
+}
+
 type Snapshot struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
@@ -547,6 +639,7 @@ type Snapshot struct {
 	Seq           uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
 	TakenAt       *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=taken_at,json=takenAt,proto3" json:"taken_at,omitempty"`
 	Listeners     []*ListenerState       `protobuf:"bytes,6,rep,name=listeners,proto3" json:"listeners,omitempty"`
+	Host          *HostInfo              `protobuf:"bytes,7,opt,name=host,proto3" json:"host,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -619,6 +712,13 @@ func (x *Snapshot) GetTakenAt() *timestamppb.Timestamp {
 func (x *Snapshot) GetListeners() []*ListenerState {
 	if x != nil {
 		return x.Listeners
+	}
+	return nil
+}
+
+func (x *Snapshot) GetHost() *HostInfo {
+	if x != nil {
+		return x.Host
 	}
 	return nil
 }
@@ -725,6 +825,416 @@ func (x *Heartbeat) GetDroppedForeignNetns() uint64 {
 	return 0
 }
 
+type Exposure struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Level ExposureLevel          `protobuf:"varint,1,opt,name=level,proto3,enum=asm.v1.ExposureLevel" json:"level,omitempty"`
+	// Why, in order: the bind ("bind:any"), any port mapping, then the firewall verdict
+	// ("nft: accept tcp/8443 from 0/0 (eth0, inet filter input)").
+	Evidence      []string `protobuf:"bytes,2,rep,name=evidence,proto3" json:"evidence,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Exposure) Reset() {
+	*x = Exposure{}
+	mi := &file_asm_v1_events_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Exposure) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Exposure) ProtoMessage() {}
+
+func (x *Exposure) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Exposure.ProtoReflect.Descriptor instead.
+func (*Exposure) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *Exposure) GetLevel() ExposureLevel {
+	if x != nil {
+		return x.Level
+	}
+	return ExposureLevel_EXPOSURE_LEVEL_UNSPECIFIED
+}
+
+func (x *Exposure) GetEvidence() []string {
+	if x != nil {
+		return x.Evidence
+	}
+	return nil
+}
+
+// PublicIP is one candidate for the server's public address.
+type PublicIP struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Ip    string                 `protobuf:"bytes,1,opt,name=ip,proto3" json:"ip,omitempty"`
+	// netlink (an interface address), imds (cloud metadata) or ingest-local (the local
+	// address of the agent's NATS connection, only when it is public).
+	Via string `protobuf:"bytes,2,opt,name=via,proto3" json:"via,omitempty"`
+	// in (people can connect to it) or out (the server connects out from it).
+	Dir string `protobuf:"bytes,3,opt,name=dir,proto3" json:"dir,omitempty"`
+	// The interface, for via=netlink.
+	Iface         string `protobuf:"bytes,4,opt,name=iface,proto3" json:"iface,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PublicIP) Reset() {
+	*x = PublicIP{}
+	mi := &file_asm_v1_events_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PublicIP) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PublicIP) ProtoMessage() {}
+
+func (x *PublicIP) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PublicIP.ProtoReflect.Descriptor instead.
+func (*PublicIP) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *PublicIP) GetIp() string {
+	if x != nil {
+		return x.Ip
+	}
+	return ""
+}
+
+func (x *PublicIP) GetVia() string {
+	if x != nil {
+		return x.Via
+	}
+	return ""
+}
+
+func (x *PublicIP) GetDir() string {
+	if x != nil {
+		return x.Dir
+	}
+	return ""
+}
+
+func (x *PublicIP) GetIface() string {
+	if x != nil {
+		return x.Iface
+	}
+	return ""
+}
+
+type HostInfo struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	PublicIps []*PublicIP            `protobuf:"bytes,1,rep,name=public_ips,json=publicIps,proto3" json:"public_ips,omitempty"`
+	// aws, gcp or azure when cloud metadata answered; empty otherwise.
+	Cloud         string `protobuf:"bytes,2,opt,name=cloud,proto3" json:"cloud,omitempty"`
+	InstanceId    string `protobuf:"bytes,3,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HostInfo) Reset() {
+	*x = HostInfo{}
+	mi := &file_asm_v1_events_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostInfo) ProtoMessage() {}
+
+func (x *HostInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostInfo.ProtoReflect.Descriptor instead.
+func (*HostInfo) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *HostInfo) GetPublicIps() []*PublicIP {
+	if x != nil {
+		return x.PublicIps
+	}
+	return nil
+}
+
+func (x *HostInfo) GetCloud() string {
+	if x != nil {
+		return x.Cloud
+	}
+	return ""
+}
+
+func (x *HostInfo) GetInstanceId() string {
+	if x != nil {
+		return x.InstanceId
+	}
+	return ""
+}
+
+// ExposureEvent is published on asm.<host>.exposure.changed when a listener's level
+// changes, and once when a listener opens (previous unset).
+type ExposureEvent struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	EventId    string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	HostId     string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	RunId      string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	Seq        uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
+	ObservedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	Listener   *Listener              `protobuf:"bytes,6,opt,name=listener,proto3" json:"listener,omitempty"`
+	Processes  []*Process             `protobuf:"bytes,7,rep,name=processes,proto3" json:"processes,omitempty"`
+	Exposure   *Exposure              `protobuf:"bytes,8,opt,name=exposure,proto3" json:"exposure,omitempty"`
+	Previous   *Exposure              `protobuf:"bytes,9,opt,name=previous,proto3" json:"previous,omitempty"`
+	// What made the agent re-judge: opened, listener (a listener change, e.g. a port
+	// mapping's proxy appeared), firewall, interfaces, recheck.
+	Trigger       string    `protobuf:"bytes,10,opt,name=trigger,proto3" json:"trigger,omitempty"`
+	Host          *HostInfo `protobuf:"bytes,11,opt,name=host,proto3" json:"host,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExposureEvent) Reset() {
+	*x = ExposureEvent{}
+	mi := &file_asm_v1_events_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExposureEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExposureEvent) ProtoMessage() {}
+
+func (x *ExposureEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExposureEvent.ProtoReflect.Descriptor instead.
+func (*ExposureEvent) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ExposureEvent) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *ExposureEvent) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *ExposureEvent) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ExposureEvent) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *ExposureEvent) GetObservedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ObservedAt
+	}
+	return nil
+}
+
+func (x *ExposureEvent) GetListener() *Listener {
+	if x != nil {
+		return x.Listener
+	}
+	return nil
+}
+
+func (x *ExposureEvent) GetProcesses() []*Process {
+	if x != nil {
+		return x.Processes
+	}
+	return nil
+}
+
+func (x *ExposureEvent) GetExposure() *Exposure {
+	if x != nil {
+		return x.Exposure
+	}
+	return nil
+}
+
+func (x *ExposureEvent) GetPrevious() *Exposure {
+	if x != nil {
+		return x.Previous
+	}
+	return nil
+}
+
+func (x *ExposureEvent) GetTrigger() string {
+	if x != nil {
+		return x.Trigger
+	}
+	return ""
+}
+
+func (x *ExposureEvent) GetHost() *HostInfo {
+	if x != nil {
+		return x.Host
+	}
+	return nil
+}
+
+// HostEvent is published on asm.<host>.host.changed when the public-IP candidates or the
+// cloud identity change.
+type HostEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	HostId        string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	RunId         string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	Seq           uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
+	ObservedAt    *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	Host          *HostInfo              `protobuf:"bytes,6,opt,name=host,proto3" json:"host,omitempty"`
+	Previous      *HostInfo              `protobuf:"bytes,7,opt,name=previous,proto3" json:"previous,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HostEvent) Reset() {
+	*x = HostEvent{}
+	mi := &file_asm_v1_events_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostEvent) ProtoMessage() {}
+
+func (x *HostEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostEvent.ProtoReflect.Descriptor instead.
+func (*HostEvent) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *HostEvent) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *HostEvent) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *HostEvent) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *HostEvent) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *HostEvent) GetObservedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ObservedAt
+	}
+	return nil
+}
+
+func (x *HostEvent) GetHost() *HostInfo {
+	if x != nil {
+		return x.Host
+	}
+	return nil
+}
+
+func (x *HostEvent) GetPrevious() *HostInfo {
+	if x != nil {
+		return x.Previous
+	}
+	return nil
+}
+
 var File_asm_v1_events_proto protoreflect.FileDescriptor
 
 const file_asm_v1_events_proto_rawDesc = "" +
@@ -751,7 +1261,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"socketUnit\x12/\n" +
 	"\tcontainer\x18\t \x01(\v2\x11.asm.v1.ContainerR\tcontainer\x12\x1b\n" +
 	"\tcgroup_id\x18\n" +
-	" \x01(\x04R\bcgroupId\"\x90\x03\n" +
+	" \x01(\x04R\bcgroupId\"\xe4\x03\n" +
 	"\rListenerEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -764,17 +1274,21 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\blistener\x18\b \x01(\v2\x10.asm.v1.ListenerR\blistener\x12-\n" +
 	"\tprocesses\x18\t \x03(\v2\x0f.asm.v1.ProcessR\tprocesses\x12>\n" +
 	"\x12previous_processes\x18\n" +
-	" \x03(\v2\x0f.asm.v1.ProcessR\x11previousProcesses\"l\n" +
+	" \x03(\v2\x0f.asm.v1.ProcessR\x11previousProcesses\x12,\n" +
+	"\bexposure\x18\v \x01(\v2\x10.asm.v1.ExposureR\bexposure\x12$\n" +
+	"\x04host\x18\f \x01(\v2\x10.asm.v1.HostInfoR\x04host\"\x9a\x01\n" +
 	"\rListenerState\x12,\n" +
 	"\blistener\x18\x01 \x01(\v2\x10.asm.v1.ListenerR\blistener\x12-\n" +
-	"\tprocesses\x18\x02 \x03(\v2\x0f.asm.v1.ProcessR\tprocesses\"\xd3\x01\n" +
+	"\tprocesses\x18\x02 \x03(\v2\x0f.asm.v1.ProcessR\tprocesses\x12,\n" +
+	"\bexposure\x18\x03 \x01(\v2\x10.asm.v1.ExposureR\bexposure\"\xf9\x01\n" +
 	"\bSnapshot\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
 	"\x06run_id\x18\x03 \x01(\tR\x05runId\x12\x10\n" +
 	"\x03seq\x18\x04 \x01(\x04R\x03seq\x125\n" +
 	"\btaken_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\atakenAt\x123\n" +
-	"\tlisteners\x18\x06 \x03(\v2\x15.asm.v1.ListenerStateR\tlisteners\"\x92\x02\n" +
+	"\tlisteners\x18\x06 \x03(\v2\x15.asm.v1.ListenerStateR\tlisteners\x12$\n" +
+	"\x04host\x18\a \x01(\v2\x10.asm.v1.HostInfoR\x04host\"\x92\x02\n" +
 	"\tHeartbeat\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -784,7 +1298,44 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\rringbuf_drops\x18\x06 \x01(\x04R\fringbufDrops\x12\x1f\n" +
 	"\vqueue_drops\x18\a \x01(\x04R\n" +
 	"queueDrops\x126\n" +
-	"\x15dropped_foreign_netns\x18\b \x01(\x04B\x02\x18\x01R\x13droppedForeignNetns*G\n" +
+	"\x15dropped_foreign_netns\x18\b \x01(\x04B\x02\x18\x01R\x13droppedForeignNetns\"S\n" +
+	"\bExposure\x12+\n" +
+	"\x05level\x18\x01 \x01(\x0e2\x15.asm.v1.ExposureLevelR\x05level\x12\x1a\n" +
+	"\bevidence\x18\x02 \x03(\tR\bevidence\"T\n" +
+	"\bPublicIP\x12\x0e\n" +
+	"\x02ip\x18\x01 \x01(\tR\x02ip\x12\x10\n" +
+	"\x03via\x18\x02 \x01(\tR\x03via\x12\x10\n" +
+	"\x03dir\x18\x03 \x01(\tR\x03dir\x12\x14\n" +
+	"\x05iface\x18\x04 \x01(\tR\x05iface\"r\n" +
+	"\bHostInfo\x12/\n" +
+	"\n" +
+	"public_ips\x18\x01 \x03(\v2\x10.asm.v1.PublicIPR\tpublicIps\x12\x14\n" +
+	"\x05cloud\x18\x02 \x01(\tR\x05cloud\x12\x1f\n" +
+	"\vinstance_id\x18\x03 \x01(\tR\n" +
+	"instanceId\"\xa2\x03\n" +
+	"\rExposureEvent\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
+	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
+	"\x06run_id\x18\x03 \x01(\tR\x05runId\x12\x10\n" +
+	"\x03seq\x18\x04 \x01(\x04R\x03seq\x12;\n" +
+	"\vobserved_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"observedAt\x12,\n" +
+	"\blistener\x18\x06 \x01(\v2\x10.asm.v1.ListenerR\blistener\x12-\n" +
+	"\tprocesses\x18\a \x03(\v2\x0f.asm.v1.ProcessR\tprocesses\x12,\n" +
+	"\bexposure\x18\b \x01(\v2\x10.asm.v1.ExposureR\bexposure\x12,\n" +
+	"\bprevious\x18\t \x01(\v2\x10.asm.v1.ExposureR\bprevious\x12\x18\n" +
+	"\atrigger\x18\n" +
+	" \x01(\tR\atrigger\x12$\n" +
+	"\x04host\x18\v \x01(\v2\x10.asm.v1.HostInfoR\x04host\"\xf9\x01\n" +
+	"\tHostEvent\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
+	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
+	"\x06run_id\x18\x03 \x01(\tR\x05runId\x12\x10\n" +
+	"\x03seq\x18\x04 \x01(\x04R\x03seq\x12;\n" +
+	"\vobserved_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"observedAt\x12$\n" +
+	"\x04host\x18\x06 \x01(\v2\x10.asm.v1.HostInfoR\x04host\x12,\n" +
+	"\bprevious\x18\a \x01(\v2\x10.asm.v1.HostInfoR\bprevious*G\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
@@ -796,7 +1347,14 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x12SOURCE_UNSPECIFIED\x10\x00\x12\b\n" +
 	"\x04EBPF\x10\x01\x12\f\n" +
 	"\bBASELINE\x10\x02\x12\r\n" +
-	"\tRECONCILE\x10\x03B3Z1github.com/thapr0digy/portwarden/gen/asm/v1;asmv1b\x06proto3"
+	"\tRECONCILE\x10\x03*\xa9\x01\n" +
+	"\rExposureLevel\x12\x1e\n" +
+	"\x1aEXPOSURE_LEVEL_UNSPECIFIED\x10\x00\x12\x12\n" +
+	"\x0eEXPOSURE_LOCAL\x10\x01\x12\x12\n" +
+	"\x0eEXPOSURE_BOUND\x10\x02\x12\x1f\n" +
+	"\x1bEXPOSURE_HOST_FIREWALL_OPEN\x10\x03\x12\x17\n" +
+	"\x13EXPOSURE_CLOUD_OPEN\x10\x04\x12\x16\n" +
+	"\x12EXPOSURE_CONFIRMED\x10\x05B3Z1github.com/thapr0digy/portwarden/gen/asm/v1;asmv1b\x06proto3"
 
 var (
 	file_asm_v1_events_proto_rawDescOnce sync.Once
@@ -810,38 +1368,59 @@ func file_asm_v1_events_proto_rawDescGZIP() []byte {
 	return file_asm_v1_events_proto_rawDescData
 }
 
-var file_asm_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_asm_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_asm_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_asm_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_asm_v1_events_proto_goTypes = []any{
 	(Kind)(0),                     // 0: asm.v1.Kind
 	(Source)(0),                   // 1: asm.v1.Source
-	(*Listener)(nil),              // 2: asm.v1.Listener
-	(*Container)(nil),             // 3: asm.v1.Container
-	(*Process)(nil),               // 4: asm.v1.Process
-	(*ListenerEvent)(nil),         // 5: asm.v1.ListenerEvent
-	(*ListenerState)(nil),         // 6: asm.v1.ListenerState
-	(*Snapshot)(nil),              // 7: asm.v1.Snapshot
-	(*Heartbeat)(nil),             // 8: asm.v1.Heartbeat
-	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
+	(ExposureLevel)(0),            // 2: asm.v1.ExposureLevel
+	(*Listener)(nil),              // 3: asm.v1.Listener
+	(*Container)(nil),             // 4: asm.v1.Container
+	(*Process)(nil),               // 5: asm.v1.Process
+	(*ListenerEvent)(nil),         // 6: asm.v1.ListenerEvent
+	(*ListenerState)(nil),         // 7: asm.v1.ListenerState
+	(*Snapshot)(nil),              // 8: asm.v1.Snapshot
+	(*Heartbeat)(nil),             // 9: asm.v1.Heartbeat
+	(*Exposure)(nil),              // 10: asm.v1.Exposure
+	(*PublicIP)(nil),              // 11: asm.v1.PublicIP
+	(*HostInfo)(nil),              // 12: asm.v1.HostInfo
+	(*ExposureEvent)(nil),         // 13: asm.v1.ExposureEvent
+	(*HostEvent)(nil),             // 14: asm.v1.HostEvent
+	(*timestamppb.Timestamp)(nil), // 15: google.protobuf.Timestamp
 }
 var file_asm_v1_events_proto_depIdxs = []int32{
-	3,  // 0: asm.v1.Process.container:type_name -> asm.v1.Container
-	9,  // 1: asm.v1.ListenerEvent.observed_at:type_name -> google.protobuf.Timestamp
+	4,  // 0: asm.v1.Process.container:type_name -> asm.v1.Container
+	15, // 1: asm.v1.ListenerEvent.observed_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: asm.v1.ListenerEvent.kind:type_name -> asm.v1.Kind
 	1,  // 3: asm.v1.ListenerEvent.source:type_name -> asm.v1.Source
-	2,  // 4: asm.v1.ListenerEvent.listener:type_name -> asm.v1.Listener
-	4,  // 5: asm.v1.ListenerEvent.processes:type_name -> asm.v1.Process
-	4,  // 6: asm.v1.ListenerEvent.previous_processes:type_name -> asm.v1.Process
-	2,  // 7: asm.v1.ListenerState.listener:type_name -> asm.v1.Listener
-	4,  // 8: asm.v1.ListenerState.processes:type_name -> asm.v1.Process
-	9,  // 9: asm.v1.Snapshot.taken_at:type_name -> google.protobuf.Timestamp
-	6,  // 10: asm.v1.Snapshot.listeners:type_name -> asm.v1.ListenerState
-	9,  // 11: asm.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
-	12, // [12:12] is the sub-list for method output_type
-	12, // [12:12] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	3,  // 4: asm.v1.ListenerEvent.listener:type_name -> asm.v1.Listener
+	5,  // 5: asm.v1.ListenerEvent.processes:type_name -> asm.v1.Process
+	5,  // 6: asm.v1.ListenerEvent.previous_processes:type_name -> asm.v1.Process
+	10, // 7: asm.v1.ListenerEvent.exposure:type_name -> asm.v1.Exposure
+	12, // 8: asm.v1.ListenerEvent.host:type_name -> asm.v1.HostInfo
+	3,  // 9: asm.v1.ListenerState.listener:type_name -> asm.v1.Listener
+	5,  // 10: asm.v1.ListenerState.processes:type_name -> asm.v1.Process
+	10, // 11: asm.v1.ListenerState.exposure:type_name -> asm.v1.Exposure
+	15, // 12: asm.v1.Snapshot.taken_at:type_name -> google.protobuf.Timestamp
+	7,  // 13: asm.v1.Snapshot.listeners:type_name -> asm.v1.ListenerState
+	12, // 14: asm.v1.Snapshot.host:type_name -> asm.v1.HostInfo
+	15, // 15: asm.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
+	2,  // 16: asm.v1.Exposure.level:type_name -> asm.v1.ExposureLevel
+	11, // 17: asm.v1.HostInfo.public_ips:type_name -> asm.v1.PublicIP
+	15, // 18: asm.v1.ExposureEvent.observed_at:type_name -> google.protobuf.Timestamp
+	3,  // 19: asm.v1.ExposureEvent.listener:type_name -> asm.v1.Listener
+	5,  // 20: asm.v1.ExposureEvent.processes:type_name -> asm.v1.Process
+	10, // 21: asm.v1.ExposureEvent.exposure:type_name -> asm.v1.Exposure
+	10, // 22: asm.v1.ExposureEvent.previous:type_name -> asm.v1.Exposure
+	12, // 23: asm.v1.ExposureEvent.host:type_name -> asm.v1.HostInfo
+	15, // 24: asm.v1.HostEvent.observed_at:type_name -> google.protobuf.Timestamp
+	12, // 25: asm.v1.HostEvent.host:type_name -> asm.v1.HostInfo
+	12, // 26: asm.v1.HostEvent.previous:type_name -> asm.v1.HostInfo
+	27, // [27:27] is the sub-list for method output_type
+	27, // [27:27] is the sub-list for method input_type
+	27, // [27:27] is the sub-list for extension type_name
+	27, // [27:27] is the sub-list for extension extendee
+	0,  // [0:27] is the sub-list for field type_name
 }
 
 func init() { file_asm_v1_events_proto_init() }
@@ -854,8 +1433,8 @@ func file_asm_v1_events_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_asm_v1_events_proto_rawDesc), len(file_asm_v1_events_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   7,
+			NumEnums:      3,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

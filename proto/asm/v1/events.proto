@@ -58,11 +58,16 @@ message ListenerEvent {
   repeated Process processes = 9;
   // Set only on OWNER_CHANGED: the owners before the change.
   repeated Process previous_processes = 10;
+  // The listener's exposure when the event was published (on CLOSED: its last one).
+  Exposure exposure = 11;
+  // The host's public-IP candidates and cloud identity at publish time.
+  HostInfo host = 12;
 }
 
 message ListenerState {
   Listener listener = 1;
   repeated Process processes = 2;
+  Exposure exposure = 3;
 }
 
 message Snapshot {
@@ -72,6 +77,7 @@ message Snapshot {
   uint64 seq = 4;
   google.protobuf.Timestamp taken_at = 5;
   repeated ListenerState listeners = 6;
+  HostInfo host = 7;
 }
 
 message Heartbeat {
@@ -83,4 +89,77 @@ message Heartbeat {
   uint64 ringbuf_drops = 6;
   uint64 queue_drops = 7;
   uint64 dropped_foreign_netns = 8 [deprecated = true];
+}
+
+// ExposureLevel is the design's exposure level plus one (0 is unset): it only rises as
+// evidence comes in. The agent sets LOCAL, BOUND and HOST_FIREWALL_OPEN; CLOUD_OPEN and
+// CONFIRMED are reserved for the backend's cloud look-up and the outside checker.
+enum ExposureLevel {
+  EXPOSURE_LEVEL_UNSPECIFIED = 0;
+  // Level 0: loopback, or a container listener no host port mapping points at.
+  EXPOSURE_LOCAL = 1;
+  // Level 1: bound to all addresses or to a real interface address.
+  EXPOSURE_BOUND = 2;
+  // Level 2: the host firewall (nftables / iptables) lets a packet from 0/0 in.
+  EXPOSURE_HOST_FIREWALL_OPEN = 3;
+  // Level 3 (reserved): a cloud security group or load balancer allows it.
+  EXPOSURE_CLOUD_OPEN = 4;
+  // Level 4 (reserved): the outside checker connected.
+  EXPOSURE_CONFIRMED = 5;
+}
+
+message Exposure {
+  ExposureLevel level = 1;
+  // Why, in order: the bind ("bind:any"), any port mapping, then the firewall verdict
+  // ("nft: accept tcp/8443 from 0/0 (eth0, inet filter input)").
+  repeated string evidence = 2;
+}
+
+// PublicIP is one candidate for the server's public address.
+message PublicIP {
+  string ip = 1;
+  // netlink (an interface address), imds (cloud metadata) or ingest-local (the local
+  // address of the agent's NATS connection, only when it is public).
+  string via = 2;
+  // in (people can connect to it) or out (the server connects out from it).
+  string dir = 3;
+  // The interface, for via=netlink.
+  string iface = 4;
+}
+
+message HostInfo {
+  repeated PublicIP public_ips = 1;
+  // aws, gcp or azure when cloud metadata answered; empty otherwise.
+  string cloud = 2;
+  string instance_id = 3;
+}
+
+// ExposureEvent is published on asm.<host>.exposure.changed when a listener's level
+// changes, and once when a listener opens (previous unset).
+message ExposureEvent {
+  string event_id = 1;
+  string host_id = 2;
+  string run_id = 3;
+  uint64 seq = 4;
+  google.protobuf.Timestamp observed_at = 5;
+  Listener listener = 6;
+  repeated Process processes = 7;
+  Exposure exposure = 8;
+  Exposure previous = 9;
+  // What made the agent re-judge: opened, listener (a listener change, e.g. a port
+  // mapping's proxy appeared), firewall, interfaces, recheck.
+  string trigger = 10;
+  HostInfo host = 11;
+}
+
+// HostEvent is published on asm.<host>.host.changed when the public-IP candidates or the
+// cloud identity change.
+message HostEvent {
+  string event_id = 1;
+  string host_id = 2;
+  string run_id = 3;
+  uint64 seq = 4;
+  google.protobuf.Timestamp observed_at = 5;
+  HostInfo host = 6;
+  HostInfo previous = 7;
 }

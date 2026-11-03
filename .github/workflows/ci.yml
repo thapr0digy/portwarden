@@ -1,0 +1,98 @@
+# CI: unit tests, vet, cross builds, generated-code drift, reproducible packages and
+# deployment lint on every push; then the kernel matrix, where each leg boots its Ubuntu
+# cloud image in a Lima VM (QEMU with KVM: GitHub's x86_64 Linux runners expose
+# /dev/kvm) and runs the same dev/itest.sh and dev/e2e.sh as `make matrix` does locally.
+# The VMs are x86_64 here, so these legs are also the amd64 run of the real probes.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Unit tests
+        run: go test ./...
+      - name: Vet (default and integration tags)
+        run: |
+          go vet ./...
+          go vet -tags integration ./...
+      - name: Cross builds
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./...
+      - name: Generated code is current (buf generate, bpf2go)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang llvm libbpf-dev
+          go install github.com/bufbuild/buf/cmd/buf@v1.50.0
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          buf generate
+          go generate ./...
+          git diff --exit-code
+      - name: Packages (make dist, reproducibility, lint)
+        run: |
+          sudo apt-get install -y -q lintian
+          dev/dist.sh
+          dev/dist.sh --check
+          dev/dist-lint.sh
+      - name: Deployment lint (Helm, kubeconform, actionlint)
+        run: dev/lint-deploy.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  kernel:
+    needs: unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: ["2404", "2604"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Install QEMU and Lima
+        env:
+          LIMA_VERSION: 2.1.1
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q qemu-system-x86 qemu-utils
+          curl -fsSL "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz" |
+            sudo tar -C /usr/local -xz
+          limactl --version
+      - name: Kernel matrix leg ${{ matrix.leg }}
+        env:
+          MATRIX_LEGS: ${{ matrix.leg }}
+          MATRIX_MOUNT: ${{ github.workspace }}
+        run: dev/matrix.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: matrix-${{ matrix.leg }}
+          path: .matrix/

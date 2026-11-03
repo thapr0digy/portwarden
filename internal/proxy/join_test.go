@@ -152,3 +152,32 @@ func TestListenMatches(t *testing.T) {
 		}
 	}
 }
+
+func TestInferredRoutesAggregatedAndCapped(t *testing.T) {
+	s := testState()
+	s.Routes = nil
+	s.Observed = []Observed{
+		{Addr: ap("127.0.0.1:9000"), Count: 1, Last: time.Unix(1, 0)}, // both reach the [::]:9000 listener
+		{Addr: ap("192.168.5.15:9000"), Count: 2, Last: time.Unix(1, 0)},
+	}
+	for i := range 200 {
+		s.Observed = append(s.Observed, Observed{Addr: netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, 1, byte(i / 256), byte(i)}), 443), Count: 1})
+	}
+	got := Join(s, listeners(), addrs)
+	if len(got.Routes) != MaxInferred {
+		t.Fatalf("inferred routes = %d", len(got.Routes))
+	}
+	var app *model.ProxyRoute
+	for i, r := range got.Routes {
+		if len(r.Backends) > 0 && r.Backends[0].Listener != nil && *r.Backends[0].Listener == wildApp {
+			app = &got.Routes[i]
+		}
+	}
+	if app == nil || len(app.Backends) != 2 {
+		t.Fatalf("destinations reaching one listener are one route: %+v", app)
+	}
+	last := got.Routes[len(got.Routes)-1]
+	if last.Target != "other destinations" || len(last.Notes) != 1 {
+		t.Fatalf("summary = %+v", last)
+	}
+}

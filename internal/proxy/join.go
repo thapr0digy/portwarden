@@ -4,6 +4,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -128,28 +129,81 @@ func Join(s State, listeners []state.Listener, addrs map[uint32][]netip.Addr) mo
 		}
 		out.Routes = append(out.Routes, rt)
 	}
+	out.Routes = append(out.Routes, inferredRoutes(inst, observed, used, ix)...)
+	return out
+}
+
+// MaxInferred bounds the inferred routes of one proxy; past it the rest is one summary
+// route.
+const MaxInferred = 64
+
+// inferredRoutes turns observed destinations no configured route names into inferred
+// routes: one per listener they reach (its addresses as backends), then one per other
+// destination, at most MaxInferred, then a summary of the rest.
+func inferredRoutes(inst model.ProxyInstance, observed map[netip.AddrPort]Observed, used map[netip.AddrPort]bool, ix *index) []model.ProxyRoute {
 	var extra []netip.AddrPort
 	for k := range observed {
 		if !used[k] {
 			extra = append(extra, k)
 		}
 	}
-	slices.SortFunc(extra, func(a, b netip.AddrPort) int { return a.Compare(b) })
+	// Destinations that reach a local listener come first: they name a program.
+	joinedTo := make(map[netip.AddrPort]state.Listener)
+	for _, k := range extra {
+		if l, ok := ix.find(inst.NetNS, model.ProtoTCP, k); ok {
+			joinedTo[k] = l
+		}
+	}
+	slices.SortFunc(extra, func(a, b netip.AddrPort) int {
+		_, ja := joinedTo[a]
+		_, jb := joinedTo[b]
+		if ja != jb {
+			if ja {
+				return -1
+			}
+			return 1
+		}
+		return a.Compare(b)
+	})
+	var routes []model.ProxyRoute
+	byListener := make(map[model.ListenerKey]int)
 	for _, k := range extra {
 		o := observed[k]
 		b := model.ProxyBackend{Address: k.String(), Addr: k, Seen: true, Connections: o.Count, LastSeen: o.Last}
-		if l, ok := ix.find(inst.NetNS, model.ProtoTCP, k); ok {
+		l, joined := joinedTo[k]
+		if joined {
+			if i, ok := byListener[l.Key]; ok {
+				routes[i].Backends = append(routes[i].Backends, b)
+				continue
+			}
 			lk := l.Key
 			b.Listener, b.Procs = &lk, slices.Clone(l.Procs)
+			byListener[l.Key] = len(routes)
 		} else {
 			b.Note = "no listener"
 		}
-		out.Routes = append(out.Routes, model.ProxyRoute{
+		routes = append(routes, model.ProxyRoute{
 			Frontends: slices.Clone(inst.Listeners), Kind: model.RouteProxy, Target: k.String(),
 			Inferred: true, Backends: []model.ProxyBackend{b},
 		})
 	}
-	return out
+	if len(routes) <= MaxInferred {
+		return routes
+	}
+	rest := routes[MaxInferred-1:]
+	var n int
+	var conns uint64
+	for _, r := range rest {
+		for _, b := range r.Backends {
+			n++
+			conns += b.Connections
+		}
+	}
+	summary := model.ProxyRoute{
+		Frontends: slices.Clone(inst.Listeners), Kind: model.RouteProxy, Target: "other destinations",
+		Inferred: true, Notes: []string{fmt.Sprintf("%d more destinations (%d connections) not listed", n, conns)},
+	}
+	return append(routes[:MaxInferred-1], summary)
 }
 
 func joinBackend(b conf.Backend, netns uint32, proto string, ix *index, observed map[netip.AddrPort]Observed, used map[netip.AddrPort]bool) model.ProxyBackend {

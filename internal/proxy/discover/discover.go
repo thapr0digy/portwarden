@@ -244,19 +244,37 @@ type compiledFunc func(prefix, stop string) string
 // nginx's configure arguments end at a space (or the string's end).
 const configureStop = " \x00\n"
 
+// upstreamPrefix is nginx's built-in --prefix.
+const upstreamPrefix = "/usr/local/nginx/"
+
+// nginxConf finds the running nginx's main config as nginx does: -c, else the compiled
+// --conf-path, else conf/nginx.conf; a relative path is under the prefix (-p, else the
+// compiled --prefix, else /usr/local/nginx/). Only a binary with no configure arguments
+// at all (nothing to go on) falls back to /etc/nginx/nginx.conf.
 func nginxConf(cmdline []string, compiled compiledFunc) string {
 	args := nginxArgs(cmdline)
 	conf, prefix := flagValue(args, "-c"), flagValue(args, "-p")
+	cPrefix, cConf := compiled(" --prefix=", configureStop), compiled(" --conf-path=", configureStop)
+	configured := cPrefix != "" || cConf != ""
+	for _, opt := range []string{" --with", " --without", " --add-", " --sbin-path="} {
+		configured = configured || compiled(opt, configureStop) != ""
+	}
 	if prefix == "" {
-		prefix = compiled(" --prefix=", configureStop)
+		prefix = cPrefix
 	}
-	if conf == "" {
-		conf = compiled(" --conf-path=", configureStop)
+	if prefix == "" {
+		prefix = upstreamPrefix
 	}
-	if conf == "" {
+	switch {
+	case conf != "":
+	case cConf != "":
+		conf = cConf
+	case !configured:
 		return nginx.DefaultConfPath
+	default:
+		conf = "conf/nginx.conf"
 	}
-	if !path.IsAbs(conf) && prefix != "" {
+	if !path.IsAbs(conf) {
 		conf = path.Join(prefix, conf)
 	}
 	return path.Clean(conf)

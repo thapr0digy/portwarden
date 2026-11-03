@@ -164,3 +164,23 @@ func TestScanForStreams(t *testing.T) {
 		t.Fatalf("value at the end = %q %v", v, ok)
 	}
 }
+
+func TestNginxConfFromCompiledPrefix(t *testing.T) {
+	bin := func(configure string) compiledFunc {
+		return func(prefix, stop string) string {
+			v, _ := scanFor(strings.NewReader(configure+"\x00"), []byte(prefix), stop, maxValue)
+			return v
+		}
+	}
+	for _, c := range []struct{ name, configure, cmdline, want string }{
+		{"openresty", "configure arguments: --prefix=/usr/local/openresty/nginx --with-cc-opt=-O2", "nginx: master process /usr/local/openresty/nginx/sbin/nginx", "/usr/local/openresty/nginx/conf/nginx.conf"},
+		{"source build", "configure arguments: --with-http_ssl_module", "nginx: master process ./nginx", "/usr/local/nginx/conf/nginx.conf"},
+		{"distro", "configure arguments: --prefix=/usr/share/nginx --conf-path=/etc/nginx/nginx.conf", "nginx: master process /usr/sbin/nginx", "/etc/nginx/nginx.conf"},
+		{"relative -c, compiled prefix", "configure arguments: --prefix=/opt/n", "nginx: master process nginx -c alt.conf", "/opt/n/alt.conf"},
+		{"nothing compiled", "", "nginx: master process nginx", "/etc/nginx/nginx.conf"},
+	} {
+		if got := nginxConf([]string{c.cmdline}, bin(c.configure)); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+}

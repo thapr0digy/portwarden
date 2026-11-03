@@ -15,7 +15,8 @@ images:
   - location: "https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img"
     arch: x86_64
 cpus: 4
-memory: 4GiB
+# 6 GiB: compiling the AWS SDK for the itest binaries was OOM-killed at 4 GiB.
+memory: 6GiB
 disk: 30GiB
 mounts:
   # mountPoint defaults to the host path, so `cd <repo>` works in `limactl shell`.

@@ -55,6 +55,12 @@ func parseMessage(subject string, data []byte) (parsed, error) {
 			body += " evidence=" + strings.Join(evd, "; ")
 		}
 		return parsed{header(ev.GetObservedAt(), ev.GetHostId(), ev.GetSeq()) + " " + body, ev.GetRunId(), ev.GetSeq()}, nil
+	case strings.HasSuffix(subject, ".proxy.routes"):
+		var ev asmv1.ProxyRoutes
+		if err := proto.Unmarshal(data, &ev); err != nil {
+			return parsed{}, fmt.Errorf("decode %s: %w", subject, err)
+		}
+		return parsed{header(ev.GetObservedAt(), ev.GetHostId(), ev.GetSeq()) + " " + proxyLine(&ev), ev.GetRunId(), ev.GetSeq()}, nil
 	case strings.HasSuffix(subject, ".host.changed"):
 		var ev asmv1.HostEvent
 		if err := proto.Unmarshal(data, &ev); err != nil {
@@ -76,6 +82,7 @@ func parseMessage(subject string, data []byte) (parsed, error) {
 		if ev.GetKind() == asmv1.Kind_OWNER_CHANGED {
 			body += " was=" + holders(ev.GetPreviousProcesses())
 		}
+		body += behindSuffix(ev.GetBehindProxy())
 		return parsed{header(ev.GetObservedAt(), ev.GetHostId(), ev.GetSeq()) + " " + body, ev.GetRunId(), ev.GetSeq()}, nil
 	case "snapshot":
 		var s asmv1.Snapshot
@@ -87,6 +94,9 @@ func parseMessage(subject string, data []byte) (parsed, error) {
 			counts[ls.GetListener().GetProto()]++
 		}
 		body := fmt.Sprintf("SNAPSHOT n=%d tcp=%d udp=%d", len(s.GetListeners()), counts["tcp"], counts["udp"])
+		if n := len(s.GetProxies()); n > 0 {
+			body += fmt.Sprintf(" proxies=%d", n)
+		}
 		return parsed{header(s.GetTakenAt(), s.GetHostId(), s.GetSeq()) + " " + body, s.GetRunId(), s.GetSeq()}, nil
 	case "heartbeat":
 		var h asmv1.Heartbeat
@@ -233,4 +243,81 @@ func (g *gapTracker) check(run string, seq uint64) string {
 		return fmt.Sprintf("GAP run=%s expected=%d got=%d", run, prev+1, seq)
 	}
 	return ""
+}
+
+// proxyLine renders a proxy.routes event: "PROXY <kind> pid=<master> <exe> trigger=<t>
+// routes=<n>", then " | <listen> [names=<n>] <path> <kind> -> <backend>, …" per route,
+// each backend as "<address> [pid=<n> <exe>] [labels] (note)"; a removed proxy is
+// "PROXY <kind> … REMOVED".
+func proxyLine(ev *asmv1.ProxyRoutes) string {
+	p := ev.GetProxy()
+	var b strings.Builder
+	fmt.Fprintf(&b, "PROXY %s%s trigger=%s", p.GetKind(), processSuffix(p.GetProcesses()[:min(1, len(p.GetProcesses()))]), ev.GetTrigger())
+	if ev.GetRemoved() {
+		b.WriteString(" REMOVED")
+		return b.String()
+	}
+	fmt.Fprintf(&b, " routes=%d", len(ev.GetRoutes()))
+	for _, r := range ev.GetRoutes() {
+		listen := strings.Join(r.GetListen(), ",")
+		if listen == "" {
+			listen = "*"
+		}
+		fmt.Fprintf(&b, " | %s", listen)
+		if names := r.GetServerNames(); len(names) > 0 {
+			fmt.Fprintf(&b, " names=%s", strings.Join(names, ","))
+		}
+		path := r.GetPath()
+		if path == "" {
+			path = "-"
+		}
+		fmt.Fprintf(&b, " %s %s ->", path, r.GetKind())
+		if r.GetKind() == "static" {
+			fmt.Fprintf(&b, " %s", r.GetRoot())
+		}
+		for i, be := range r.GetBackends() {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, " %s", be.GetAddress())
+			if be.GetListener() != nil {
+				b.WriteString(processSuffix(be.GetProcesses()[:min(1, len(be.GetProcesses()))]))
+			}
+			b.WriteString(" [" + labels(be.GetConfig(), be.GetSeen()) + "]")
+			if be.GetNote() != "" {
+				fmt.Fprintf(&b, " (%s)", be.GetNote())
+			}
+		}
+	}
+	return b.String()
+}
+
+// labels is "config", "config,seen" or "inferred,seen".
+func labels(config, seen bool) string {
+	switch {
+	case config && seen:
+		return "config,seen"
+	case config:
+		return "config"
+	case seen:
+		return "inferred,seen"
+	}
+	return "inferred"
+}
+
+// behindSuffix prints " behind=<kind>:<pid>:<path>[labels],…" for the proxy routes that
+// end at a listener; "" when none.
+func behindSuffix(refs []*asmv1.ProxyRef) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	parts := make([]string, len(refs))
+	for i, r := range refs {
+		path := r.GetPath()
+		if path == "" {
+			path = "-"
+		}
+		parts[i] = fmt.Sprintf("%s:%d:%s[%s]", r.GetKind(), r.GetProxy().GetPid(), path, labels(r.GetConfig(), r.GetSeen()))
+	}
+	return " behind=" + strings.Join(parts, ",")
 }

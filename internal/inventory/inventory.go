@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -85,6 +86,9 @@ type Consumer struct {
 	// look-up sees for the host (its listeners, exposure or host block).
 	Changed func(host string)
 	Now     func() time.Time
+
+	// liveMu guards Liveness: Handle and CheckSilence run on different goroutines.
+	liveMu sync.Mutex
 }
 
 // Handle processes one message. An error means it was not applied and must be retried;
@@ -126,7 +130,10 @@ func (c *Consumer) handleAgent(ctx context.Context, m Meta, msg proto.Message, r
 		return err
 	}
 	if _, ok := msg.(*asmv1.Heartbeat); ok && c.Liveness != nil {
-		if r := c.Liveness.Seen(m.Host, m.StreamTime, c.now()); r != nil {
+		c.liveMu.Lock()
+		r := c.Liveness.Seen(m.Host, m.StreamTime, c.now())
+		c.liveMu.Unlock()
+		if r != nil {
 			slog.Info("host recovered", "host", m.Host, "last_heartbeat", r.LastSeen)
 			if err := c.Store.SetSilent(ctx, m.Host, time.Time{}); err != nil {
 				return err
@@ -208,7 +215,10 @@ func (c *Consumer) CheckSilence(ctx context.Context) error {
 	if c.Liveness == nil {
 		return nil
 	}
-	for _, t := range c.Liveness.Check(c.now()) {
+	c.liveMu.Lock()
+	silent := c.Liveness.Check(c.now())
+	c.liveMu.Unlock()
+	for _, t := range silent {
 		slog.Warn("host silent", "host", t.Host, "last_heartbeat", t.LastSeen, "after", c.Liveness.After)
 		if err := c.Store.SetSilent(ctx, t.Host, t.At); err != nil {
 			return err
@@ -226,6 +236,8 @@ func (c *Consumer) SeedLiveness(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	c.liveMu.Lock()
+	defer c.liveMu.Unlock()
 	for h, at := range last {
 		c.Liveness.Seen(h, at, c.now())
 	}

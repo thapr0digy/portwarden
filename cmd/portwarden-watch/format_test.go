@@ -260,7 +260,7 @@ func TestFormatBackendEvents(t *testing.T) {
 			Evidence: []string{"cloud: sg-1 allows tcp/443 from 0.0.0.0/0"}},
 		Previous: &asmv1.Exposure{Level: asmv1.ExposureLevel_EXPOSURE_HOST_FIREWALL_OPEN},
 	}
-	got, err := formatEvent("asm."+hostID+".exposure.changed", mustMarshal(t, ev))
+	got, err := formatEvent("pwb.cloud."+hostID+".exposure", mustMarshal(t, ev))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestFormatBackendEvents(t *testing.T) {
 		Result:   "confirmed", Target: "10.231.0.1:22", Probe: "tcp-connect", RttMs: 3,
 		Banner: "SSH-2.0-OpenSSH_9.6", Checker: "probe-1",
 	}
-	got, err = formatEvent("asm."+hostID+".exposure.confirmed", mustMarshal(t, c))
+	got, err = formatEvent("pwb.verifier."+hostID+".exposure", mustMarshal(t, c))
 	if err != nil {
 		t.Fatal(err)
 	}

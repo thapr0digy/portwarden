@@ -39,6 +39,12 @@ func formatEvent(subject string, data []byte) (string, error) {
 
 func parseMessage(subject string, data []byte) (parsed, error) {
 	switch {
+	case strings.HasPrefix(subject, "pwb.verifier."):
+		subject = "asm.x.exposure.confirmed"
+	case strings.HasPrefix(subject, "pwb.cloud."):
+		subject = "asm.x.exposure.changed"
+	}
+	switch {
 	case strings.HasSuffix(subject, ".exposure.changed"):
 		var ev asmv1.ExposureEvent
 		if err := proto.Unmarshal(data, &ev); err != nil {

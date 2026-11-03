@@ -93,7 +93,7 @@ func run(ctx context.Context, opts options) error {
 		return fmt.Errorf("stream %s: %w", streamName, err)
 	}
 	cons, err := stream.OrderedConsumer(ctx, jetstream.OrderedConsumerConfig{
-		FilterSubjects: []string{"asm." + opts.host + ".>"},
+		FilterSubjects: []string{"asm." + opts.host + ".>", "pwb.cloud." + opts.host + ".exposure", "pwb.verifier." + opts.host + ".exposure"},
 		DeliverPolicy:  jetstream.DeliverByStartTimePolicy,
 		OptStartTime:   &start,
 	})

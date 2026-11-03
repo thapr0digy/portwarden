@@ -11,8 +11,11 @@ import (
 
 // directive is one parsed directive; a container (<VirtualHost …>) has a block.
 type directive struct {
-	name      string // lower case, without "<" for a container
-	args      []string
+	name string // lower case, without "<" for a container
+	args []string
+	// raw are the arguments before ${VAR} substitution: what is published, so an
+	// environment value (a password) never is.
+	raw       []string
 	file      string
 	line      int
 	container bool
@@ -133,6 +136,9 @@ func (l *loader) block(file string, lines []line, pos *int, depth int, end strin
 			continue
 		}
 		d := &directive{name: strings.ToLower(words[0]), args: words[1:], file: file, line: ln.num}
+		if raw := l.split(ln.text); len(raw) == len(words) {
+			d.raw = raw[1:]
+		}
 		switch d.name {
 		case "include", "includeoptional":
 			if len(d.args) == 1 {
@@ -276,7 +282,11 @@ var varRef = regexp.MustCompile(`\$\{([A-Za-z0-9_:.-]+)\}`)
 // words splits a line into arguments as ap_getword_conf does (double or single quotes,
 // a backslash escaping a quote inside them) after substituting ${NAME}.
 func (l *loader) words(text string) []string {
-	text = varRef.ReplaceAllStringFunc(text, func(ref string) string {
+	return l.split(l.substitute(text))
+}
+
+func (l *loader) substitute(text string) string {
+	return varRef.ReplaceAllStringFunc(text, func(ref string) string {
 		name := ref[2 : len(ref)-1]
 		if v, ok := l.defines[name]; ok {
 			return v
@@ -286,6 +296,10 @@ func (l *loader) words(text string) []string {
 		}
 		return ref
 	})
+}
+
+// split breaks a line into words (no substitution).
+func (l *loader) split(text string) []string {
 	var out []string
 	i := 0
 	for i < len(text) {

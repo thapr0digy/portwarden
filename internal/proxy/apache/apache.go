@@ -177,9 +177,14 @@ type parser struct {
 // the enclosing <Location>/<Files…> path, "" at server level.
 func (p *parser) routes(block []*directive, base conf.Route, where string) []conf.Route {
 	var out []conf.Route
-	add := func(d *directive, path, target string) {
+	// add resolves the substituted target but publishes the raw one (args[i]).
+	add := func(d *directive, path string, i int, trim string) {
+		target := strings.TrimPrefix(d.args[i], trim)
 		rt := base
 		rt.Path, rt.Target, rt.Source = path, target, d.source()
+		if i < len(d.raw) {
+			rt.Target = strings.TrimPrefix(d.raw[i], trim)
+		}
 		p.resolve(&rt, target)
 		out = append(out, rt)
 	}
@@ -203,33 +208,33 @@ func (p *parser) routes(block []*directive, base conf.Route, where string) []con
 		}
 		switch d.name {
 		case "proxypass", "proxypassmatch":
-			pth, target := where, ""
+			pth, ti := where, 0
 			switch {
 			case where != "" && len(d.args) >= 1:
-				target = d.args[0]
 			case len(d.args) >= 2:
-				pth, target = d.args[0], d.args[1]
+				pth, ti = d.args[0], 1
 			default:
 				continue
 			}
+			target := d.args[ti]
 			if target == "!" || pth == "!" {
 				continue
 			}
 			if d.name == "proxypassmatch" && where == "" {
 				pth = "~ " + pth
 			}
-			add(d, pth, target)
+			add(d, pth, ti, "")
 		case "rewriterule":
 			if len(d.args) >= 3 && proxyFlag(d.args[2]) {
 				pth := "~ " + d.args[0]
 				if where != "" {
 					pth = where + " " + pth
 				}
-				add(d, pth, d.args[1])
+				add(d, pth, 1, "")
 			}
 		case "sethandler":
 			if len(d.args) == 1 && strings.HasPrefix(strings.ToLower(d.args[0]), "proxy:") {
-				add(d, where, d.args[0][len("proxy:"):])
+				add(d, where, 0, d.args[0][:len("proxy:")])
 			}
 		}
 	}
@@ -296,6 +301,10 @@ func (p *parser) endpoints(target string, depth int) (bs []conf.Backend, kind, u
 	}
 	scheme = strings.ToLower(scheme)
 	hostPort, _, _ := strings.Cut(rest, "/")
+	hostPort, _, _ = strings.Cut(hostPort, "?")
+	if at := strings.LastIndexByte(hostPort, '@'); at >= 0 {
+		hostPort = hostPort[at+1:] // userinfo is not part of the destination
+	}
 	if scheme == "balancer" {
 		name := strings.ToLower(hostPort)
 		members, found := p.balancers[name]

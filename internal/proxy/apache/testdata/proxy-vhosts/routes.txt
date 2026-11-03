@@ -21,7 +21,7 @@
 *:80 names=app.example.com,www.app.example.com path="/ws" proxy "ws://127.0.0.1:8090/"
     -> 127.0.0.1:8090 127.0.0.1:8090
     @ /etc/pw-apache/sites-enabled/app.conf:26
-*:80 names=app.example.com,www.app.example.com path="/def" proxy "http://127.0.0.1:8070/"
+*:80 names=app.example.com,www.app.example.com path="/def" proxy "http://${BACKEND}/"
     -> 127.0.0.1:8070 127.0.0.1:8070
     @ /etc/pw-apache/sites-enabled/app.conf:27
 *:80 names=app.example.com,www.app.example.com path="/sock" proxy "unix:/run/app.sock|http://localhost/"

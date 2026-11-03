@@ -185,10 +185,10 @@ func frontendRoutes(s *section, inherited string, backends map[string][]server, 
 		}
 		rt := base
 		rt.Target, rt.Source = w[1], source(l)
-		rt.Path = strings.Join(w[2:], " ")
+		rt.Path = condText(w[2:])
 		for _, name := range condACLs(w[2:]) {
-			for _, def := range acls[name] {
-				rt.Notes = append(rt.Notes, "acl "+name+" "+def)
+			if _, ok := acls[name]; ok {
+				rt.Notes = append(rt.Notes, "acl "+name)
 			}
 		}
 		fill(&rt, w[1], backends, names)
@@ -210,6 +210,27 @@ func frontendRoutes(s *section, inherited string, backends map[string][]server, 
 		out = append(out, rt)
 	}
 	return out
+}
+
+// condText renders a condition with anonymous ACLs ("{ … }") folded, so only ACL
+// names and operators are published, never their patterns.
+func condText(cond []string) string {
+	var out []string
+	depth := 0
+	for _, w := range cond {
+		switch {
+		case w == "{":
+			if depth == 0 {
+				out = append(out, "{…}")
+			}
+			depth++
+		case w == "}":
+			depth--
+		case depth == 0:
+			out = append(out, w)
+		}
+	}
+	return strings.Join(out, " ")
 }
 
 // condACLs lists the ACL names an "if/unless" condition refers to.

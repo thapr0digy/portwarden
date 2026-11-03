@@ -2,13 +2,13 @@
     -> 127.0.0.1:9000 127.0.0.1:9000
     -> 127.0.0.1:9001 127.0.0.1:9001 (backup)
     -> [::1]:9002 [::1]:9002
-    note: acl is_api path_beg /api
+    note: acl is_api
     @ /etc/pw-haproxy/haproxy.cfg:21
 *:80,[::]:8443,127.0.0.1:8080,127.0.0.1:8081 names= path="if is_static !is_api" proxy "static_be" upstream=static_be
     -> unix@/run/static.sock unix=/run/static.sock
     -> /run/static2.sock unix=/run/static2.sock
-    note: acl is_static hdr(host) -i static.example.com
-    note: acl is_api path_beg /api
+    note: acl is_static
+    note: acl is_api
     @ /etc/pw-haproxy/haproxy.cfg:22
 *:80,[::]:8443,127.0.0.1:8080,127.0.0.1:8081 names= path="" proxy "%[req.hdr(host),lower,map(/etc/pw-haproxy/hosts.map,web_be)]"
     -> %[req.hdr(host),lower,map(/etc/pw-haproxy/hosts.map,web_be)] (unresolved: dynamic backend %[req.hdr(host),lower,map(/etc/pw-haproxy/hosts.map,web_be)])

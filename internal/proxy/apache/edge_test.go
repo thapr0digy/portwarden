@@ -59,3 +59,18 @@ ProxyPass /if http://127.0.0.1:1001/
 		t.Errorf("files = %v", res.Files)
 	}
 }
+
+// Environment values never reach the published target, and userinfo is not part of the
+// destination.
+func TestApacheEnvSecretsNotPublished(t *testing.T) {
+	fsys := conf.MemFS{"/etc/apache2/apache2.conf": []byte("Listen 80\nProxyPass / http://${API_USER}:${API_PASS}@127.0.0.1:9000/?k=v\n")}
+	res := Load(fsys, Options{ServerRoot: DebianRoot, ConfigFile: DebianConfig, Env: map[string]string{"API_USER": "u", "API_PASS": "hunter2"}})
+	got := conf.Render(res)
+	if strings.Contains(got, "hunter2") || !strings.Contains(got, `"http://${API_USER}:${API_PASS}@127.0.0.1:9000/?k=v"`) ||
+		!strings.Contains(got, "-> 127.0.0.1:9000 127.0.0.1:9000") {
+		t.Fatalf("got:\n%s", got)
+	}
+	if r := conf.RedactRoute(res.Routes[0]); r.Target != "http://***@127.0.0.1:9000/" {
+		t.Fatalf("redacted target = %q", r.Target)
+	}
+}

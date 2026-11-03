@@ -1,11 +1,11 @@
 #!/bin/sh
-# portwarden-backend prerm: stop and disable the services on removal.
+# portwarden-backend prerm: stop the services on removal (an upgrade restarts running
+# ones in postinst).
 set -e
 
 if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
-	for unit in portwarden-inventory portwarden-alerter portwarden-verifier; do
-		systemctl stop "$unit.service" >/dev/null || true
-		systemctl disable "$unit.service" >/dev/null || true
+	for unit in portwarden-inventory.service portwarden-alerter.service portwarden-verifier.service; do
+		deb-systemd-invoke stop "$unit" >/dev/null || true
 	done
 fi
 exit 0

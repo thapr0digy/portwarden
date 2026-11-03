@@ -22,6 +22,8 @@ description: |-
   stream viewer). The systemd units are installed but not enabled: each
   needs its config in /etc/portwarden first (examples in
   /usr/share/doc/portwarden-backend/examples).
+depends:
+  - init-system-helpers (>= 1.54)
 recommends:
   - postgresql-client
 suggests:

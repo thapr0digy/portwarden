@@ -1,9 +1,20 @@
 #!/bin/sh
-# portwarden-backend postrm: reload systemd. Configs in /etc/portwarden are the
-# operator's and are never removed.
+# portwarden-backend postrm: reload systemd; mask on remove, forget unit state on purge.
+# Configs in /etc/portwarden are the operator's and are never removed.
 set -e
 
+UNITS="portwarden-inventory.service portwarden-alerter.service portwarden-verifier.service"
+
 if [ -d /run/systemd/system ]; then
-	systemctl daemon-reload >/dev/null || true
+	systemctl --system daemon-reload >/dev/null || true
 fi
+for unit in $UNITS; do
+	case "$1" in
+	remove) deb-systemd-helper mask "$unit" >/dev/null || true ;;
+	purge)
+		deb-systemd-helper purge "$unit" >/dev/null || true
+		deb-systemd-helper unmask "$unit" >/dev/null || true
+		;;
+	esac
+done
 exit 0

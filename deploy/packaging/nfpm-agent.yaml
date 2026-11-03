@@ -21,6 +21,8 @@ description: |-
   NATS JetStream within a second. Runs as the portwarden-agent system user with
   CAP_BPF, CAP_PERFMON, CAP_SYS_PTRACE and CAP_NET_ADMIN under a hardened
   systemd unit, and reports tamper signals about itself.
+depends:
+  - init-system-helpers (>= 1.54)
 recommends:
   - nftables
   - iptables

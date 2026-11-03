@@ -26,6 +26,15 @@ if [ "${1:-}" = --check ]; then
 	check=true
 fi
 
+# safe_dist_dir <absolute path>: fails, saying why, for /, $HOME or a top-level directory.
+safe_dist_dir() {
+	local d=${1%/}
+	if [ -z "$d" ] || [ "$d" = "${HOME%/}" ] || [ "$(printf '%s' "$d" | tr -cd / | wc -c | tr -d ' ')" -lt 2 ]; then
+		echo "dist: refusing DIST_DIR=${1} (/, \$HOME or a top-level directory)" >&2
+		return 1
+	fi
+}
+
 sha256() {
 	if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
@@ -33,11 +42,16 @@ sha256() {
 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}
 export SOURCE_DATE_EPOCH
 if [ -z "${VERSION:-}" ]; then
+	# Past a tag the commit time (to the second) leads the commit id, so successive
+	# builds sort upward in dpkg (the id alone is not ordered): X+gitYYYYMMDDHHMMSS.<sha>
+	# after tag vX, 0.0.0~gitYYYYMMDDHHMMSS.<sha> before any tag.
+	stamp=$(date -u -r "$SOURCE_DATE_EPOCH" +%Y%m%d%H%M%S 2>/dev/null || date -u -d "@$SOURCE_DATE_EPOCH" +%Y%m%d%H%M%S)
+	sha=$(git rev-parse --short=7 HEAD)
 	if tag=$(git describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null); then
 		VERSION=${tag#v}
-		[ "$(git rev-list -n1 "$tag")" = "$(git rev-parse HEAD)" ] || VERSION="$VERSION+git$(git rev-parse --short=7 HEAD)"
+		[ "$(git rev-list -n1 "$tag")" = "$(git rev-parse HEAD)" ] || VERSION="$VERSION+git$stamp.$sha"
 	else
-		VERSION="0.0.0~git$(date -u -r "$SOURCE_DATE_EPOCH" +%Y%m%d 2>/dev/null || date -u -d "@$SOURCE_DATE_EPOCH" +%Y%m%d).$(git rev-parse --short=7 HEAD)"
+		VERSION="0.0.0~git$stamp.$sha"
 	fi
 fi
 mtime=$(date -u -r "$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
@@ -57,6 +71,9 @@ fi
 
 out=${DIST_DIR:-dist}
 case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+# bin/, sbom/ and work/ under it are cleared below: refuse anything that is not plainly
+# a build directory (/, $HOME, a top-level directory such as /usr).
+safe_dist_dir "$out" || exit 1
 if [ -d "$out" ]; then
 	rm -rf "${out:?}/bin" "${out:?}/sbom" "${out:?}/work"
 	rm -f "${out:?}"/*.deb "${out:?}/SHA256SUMS"

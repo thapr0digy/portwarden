@@ -205,6 +205,9 @@ type evaluator struct {
 	env       Env
 	index     map[chainKey]*Chain
 	truncated bool
+	// base is the base chain being evaluated: regular chains it jumps to take its type
+	// (a dnat in a chain reached from a NAT base chain ends that evaluation).
+	base *Chain
 }
 
 // terminal is a path that ended in a chain with a verdict.
@@ -239,6 +242,7 @@ func (e *evaluator) hook(h Hook, in []state) (passed []state, final []Outcome) {
 		if len(seen) == 0 {
 			continue
 		}
+		e.base = c
 		terms, through := e.chain(c, seen, 0)
 		next := skip
 		for _, t := range terms {
@@ -330,7 +334,7 @@ func (e *evaluator) rule(c *Chain, r *Rule, s state, depth int) (terms []termina
 			for i := range cur {
 				applyNAT(&cur[i], x, e.env)
 			}
-			if c.Type == TypeNAT {
+			if e.base.Type == TypeNAT {
 				for _, st := range cur {
 					terms = append(terms, terminal{st, VerdictAccept, c})
 				}
@@ -376,7 +380,7 @@ func (e *evaluator) verdict(c *Chain, v Verdict, s state, depth int) (terms []te
 	case VerdictContinue:
 		return nil, []state{s}, nil
 	case VerdictAccept:
-		if c.Type != TypeNAT {
+		if e.base.Type != TypeNAT {
 			s.origin, s.where = c.Origin, c.Where()
 		}
 		return []terminal{{s, VerdictAccept, c}}, nil, nil

@@ -101,6 +101,18 @@ agent_pid=""
 nats_pid=""
 unit_was_active=false
 unit_started=false # step 11 runs the real unit with an e2e drop-in
+UNIT_ETC=/etc/systemd/system/portwarden-agent.service
+UNIT_BIN=/usr/bin/portwarden-agent
+
+# restore_file <backup> <target> <mode>: puts the backup back, or removes the target when
+# there was none (step 11 created it).
+restore_file() {
+	if [ -f "$1" ]; then
+		sudo install -m "$3" "$1" "$2"
+	else
+		sudo rm -f -- "$2"
+	fi
+}
 old_bpf_stats=""
 ssh_service_restore="" # start|stop: undoes the socket-activation check's change to ssh.service
 docker_started=false
@@ -140,10 +152,13 @@ cleanup() {
 	[ -n "$ssh_service_restore" ] && sudo systemctl -q "$ssh_service_restore" ssh.service || true
 	[ -n "$old_bpf_stats" ] && sudo sysctl -q kernel.bpf_stats_enabled="$old_bpf_stats" || true
 	if $unit_started; then
+		# Put the system back as it was (ruling R-g): the unit file in /etc and the binary
+		# in /usr/bin are restored from their backups, or removed when step 11 created
+		# them, so a .deb's own unit (/usr/lib/systemd/system) is not left shadowed.
 		sudo systemctl stop portwarden-agent 2>/dev/null || true
 		sudo rm -rf "${UNIT_DROPIN_DIR:?}" "${UNIT_CRED_DIR:?}" "${UNIT_SPOOL:?}"
-		sudo install -m 0755 "$work/portwarden-agent" /usr/bin/portwarden-agent
-		sudo install -m 0644 deploy/portwarden-agent.service /etc/systemd/system/portwarden-agent.service
+		restore_file "$work/backup/unit" "$UNIT_ETC" 0644
+		restore_file "$work/backup/agent" "$UNIT_BIN" 0755
 		sudo systemctl daemon-reload
 	fi
 	$unit_was_active && sudo systemctl start portwarden-agent || true
@@ -773,6 +788,9 @@ echo "tamper: $(count_in "$work/watch.log" "HEARTBEAT .* tamper=ok") heartbeats 
 
 log "hardened unit: deploy/portwarden-agent.service runs the agent as portwarden-agent"
 id portwarden-agent >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin portwarden-agent
+mkdir -p "$work/backup"
+[ -f "$UNIT_ETC" ] && cp "$UNIT_ETC" "$work/backup/unit"
+[ -f "$UNIT_BIN" ] && cp "$UNIT_BIN" "$work/backup/agent"
 unit_started=true
 sudo install -m 0755 "$work/portwarden-agent" /usr/bin/portwarden-agent
 sudo install -m 0644 deploy/portwarden-agent.service /etc/systemd/system/portwarden-agent.service
@@ -804,6 +822,16 @@ echo "hardened unit: user $(ps -o user= -p "$upid"), CapEff $(awk '/^CapEff:/ {p
 # tamper_seen <regex>: a TAMPER line matches.
 tamper_seen() { seen "TAMPER .*$1" 1; }
 has_tamper_page() { tamper_pages | jq -e --arg k "$1" 'select(.evidence | map(startswith($k)) | any)' >/dev/null; }
+
+log "tamper: restarting the proxy (its cgroup is removed and created again) is not tamper"
+links_now() { sudo sh -c "cat /proc/$upid/fdinfo/* 2>/dev/null" | awk '/^link_type:/ {t = $2} /^link_id:/ && t == "cgroup" {print $2}' | sort -un | tr '\n' ' '; }
+links_before=$(links_now)
+sudo systemctl restart "$PROXY_UNIT"
+reattached() { [ -n "$(links_now)" ] && [ "$(links_now)" != "$links_before" ]; }
+wait_for "the connect links re-attached to the new cgroup" 15 reattached
+sleep 3 # three more tamper passes
+! seen "TAMPER .*probe_detached" 1 || fail "a proxy restart raised probe_detached: $(grep 'TAMPER' "$work/watch.log" | tail -2)"
+echo "proxy restart: links $links_before-> $(links_now), no tamper"
 
 log "tamper: ptrace"
 sudo python3 -c 'import ctypes, sys, time

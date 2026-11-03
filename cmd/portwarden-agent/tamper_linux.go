@@ -87,6 +87,10 @@ func tamperLoop(ctx context.Context, every time.Duration, mon *tamper.Monitor, p
 		if tr.Changed() {
 			pub.Tamper(tr)
 			for _, f := range tr.Raised {
+				if f.Info {
+					log.Info("tamper information", "kind", f.Kind, "subject", f.Subject, "detail", f.Detail)
+					continue
+				}
 				log.Warn("tamper signal raised", "kind", f.Kind, "subject", f.Subject, "detail", f.Detail)
 			}
 			for _, f := range tr.Cleared {

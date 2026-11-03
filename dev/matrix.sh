@@ -8,8 +8,8 @@
 #   amd64  Ubuntu 24.04 on x86_64, VM "portwarden-amd64" (dev/lima-amd64.yaml; QEMU TCG on
 #          an arm64 host, KVM on an x86_64 one): every package's unit tests and the
 #          integration tests, cross-compiled for amd64 on the host and run as root in the
-#          VM (they load and attach the real BPF objects), then the amd64 .deb from dist/
-#          (make dist) is installed, its service must start, and it is purged.
+#          VM (they load and attach the real BPF objects), then dev/deb-check.sh runs the
+#          amd64 .deb from dist/ (make dist) through install, upgrade, disable, purge.
 # A missing VM is created and provisioned (dev/provision.sh from this checkout). VMs are
 # left running for the next run: `limactl stop <vm>` or `limactl delete -f <vm>` removes
 # them. Logs go to .matrix/<leg>/. MATRIX_MOUNT (CI) mounts that directory instead of
@@ -82,19 +82,20 @@ run_cross() {
 			status=FAIL
 		fi
 	done <<<"$pkgs"
+	# The .deb lifecycle (dev/deb-check.sh): install dist/'s amd64 agent package, upgrade it
+	# to a second build with a higher version (checking the upgrade is not tamper), keep
+	# an administrator's disable, purge.
 	local debfile
 	debfile=$(ls dist/portwarden-agent_*_amd64.deb 2>/dev/null | head -1 || true)
 	if [ -n "$debfile" ]; then
 		deb=FAIL
-		if limactl shell "$vm" bash -c "set -e
-			sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q '$repo/$debfile' >/dev/null
-			sleep 5
-			systemctl is-active --quiet portwarden-agent
-			sudo journalctl -u portwarden-agent -o cat --no-pager | grep -q '\"msg\":\"started\"'
-			sudo journalctl -u portwarden-agent -o cat --no-pager | tail -n 5
-			portwarden-agent --version
-			sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y -q portwarden-agent >/dev/null
-			! systemctl is-active --quiet portwarden-agent" >"$out/$leg/deb.log" 2>&1; then
+		local v2dir="$out/$leg/dist-upgrade" base
+		base=${debfile#dist/portwarden-agent_}
+		base=${base%-1_amd64.deb}
+		rm -rf "${v2dir:?}"
+		if ARCHES=amd64 SBOM=0 VERSION="$base+upgradetest" DIST_DIR="$v2dir" dev/dist.sh >"$out/$leg/dist-upgrade.log" 2>&1 &&
+			limactl shell "$vm" bash -c "cd '$repo' && dev/deb-check.sh '$repo/$debfile' '$(ls "$v2dir"/portwarden-agent_*_amd64.deb)'" \
+				</dev/null >"$out/$leg/deb.log" 2>&1; then
 			deb=ok
 		fi
 	fi

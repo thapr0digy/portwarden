@@ -39,10 +39,12 @@
 #      the same rules then leaves both unchanged. M8: a listener started with secret
 #      arguments (--password=, --api-key, PGPASSWORD=, URL userinfo) reaches the inventory
 #      with them masked as ***; /v1/hosts?limit=1 gives an X-Next-Cursor that leads to the
-#      other host; a second fake host (e2eghost) stopped and forgotten with
-#      `portwarden-inventory forget-host` leaves the API (404), the alerter forgets it,
-#      and no host_silent page comes for it, also after an alerter restart (its heartbeat
-#      consumer replays the ghost's last heartbeat); when it sends again it is a new host
+#      other host; a second fake host (e2eghost): the read token cannot forget it (403),
+#      and while it runs `portwarden-inventory forget-host` refuses (not silent); stopped,
+#      it goes silent and pages host_silent once; forgotten with the admin token it leaves
+#      the API (404), the alerter forgets it, and no further page comes for it, also after
+#      an alerter restart (its heartbeat consumer replays the ghost's last heartbeat); when
+#      it sends again it is a new host
 #      (new first_seen, no host_recovered page). The host API carries a tamper status.
 #  11. hardened unit and tamper (M6): until here the agent ran with --tamper-interval 1s and
 #      must have raised no tamper signal. Then the deploy/ unit itself (as the .deb installs
@@ -653,6 +655,7 @@ sudo -u postgres psql -q -v ON_ERROR_STOP=1 -c "CREATE DATABASE $pg_db OWNER $pg
 ( umask 077
   echo "postgres://$pg_db:$pg_pass@127.0.0.1:5432/$pg_db?sslmode=disable" >"$work/inventory.dsn"
   openssl rand -hex 24 >"$work/inventory.token"
+  openssl rand -hex 24 >"$work/inventory-admin.token"
   openssl rand -hex 32 >"$work/webhook.secret" )
 api_token=$(cat "$work/inventory.token")
 
@@ -706,6 +709,7 @@ sudo ip netns exec "$M5_NETNS" ip link set lo up
 cat >"$work/inventory.json" <<JSON
 {"nats": {"url": "$nats_url", "nkey_file": "$work/users/inventory.nk"},
  "postgres_dsn_file": "$work/inventory.dsn", "token_file": "$work/inventory.token",
+ "api": {"admin_token_file": "$work/inventory-admin.token"},
  "listen": "127.0.0.1:$INV_PORT", "silent_after": "${SILENT_AFTER_S}s"}
 JSON
 cat >"$work/alerter.json" <<JSON
@@ -874,16 +878,31 @@ stop_ghost() { kill "$ghost_pid" 2>/dev/null || true; wait "$ghost_pid" 2>/dev/n
 ghost_heard() { api "/v1/hosts/$ghost" 2>/dev/null | jq -e '.last_heartbeat != null' >/dev/null 2>&1; }
 ghost_code() { curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $api_token" "http://127.0.0.1:$INV_PORT/v1/hosts/$ghost"; }
 ghost_pages() { jq -c "select(.host == \"$ghost\")" "$work/hook.jsonl"; }
+ghost_page_count() { ghost_pages | wc -l; }
+ghost_silent() { api "/v1/hosts/$ghost" 2>/dev/null | jq -e '.silent == true' >/dev/null 2>&1; }
+forget_host() { "$work/portwarden-inventory" forget-host --config "$work/inventory.json" "$@" 2>&1; }
 start_ghost
 wait_for "the inventory to hold $ghost" 15 ghost_heard
 ghost_first_seen=$(api "/v1/hosts/$ghost" | jq -r .first_seen)
+# The read token never forgets; a host that is not silent needs --force.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $api_token" "http://127.0.0.1:$INV_PORT/v1/hosts/$ghost")
+[ "$code" = 403 ] || fail "DELETE with the read token answered $code"
+if refused=$(forget_host "$ghost"); then fail "forget-host forgot a live host: $refused"; fi
+grep -q "not silent" <<<"$refused" || fail "forget-host refused a live host for another reason: $refused"
 stop_ghost
-forget_out=$("$work/portwarden-inventory" forget-host --config "$work/inventory.json" "$ghost") || fail "forget-host failed: $forget_out"
+wait_for "$ghost silent in the inventory" $((SILENT_AFTER_S + 15)) ghost_silent
+ghost_silent_page() { [ "$(ghost_page_count)" -ge 1 ]; }
+wait_for "a host_silent page for $ghost" $((SILENT_AFTER_S + 15)) ghost_silent_page
+[ "$(ghost_pages | jq -r .kind)" = host_silent ] || fail "the ghost's page: $(ghost_pages)"
+forget_out=$(forget_host "$ghost") || fail "forget-host failed: $forget_out"
 jq -e '.host == "e2eghost" and .existed == true and .stream_seq > 0' <<<"$forget_out" >/dev/null || fail "forget-host answered $forget_out"
 [ "$(ghost_code)" = 404 ] || fail "the forgotten host is still in the API ($(ghost_code))"
 wait_for "the alerter to forget $ghost" 10 seen_in "$work/alerter.log" "\"msg\":\"host forgotten\".*\"host\":\"$ghost\"" 1
+seen_in "$work/inventory.log" "\"msg\":\"api: host forgotten\".*\"token\":\"admin\".*\"host\":\"$ghost\".*\"force\":false" 1 ||
+	fail "the inventory did not log the forget's caller"
 # A restarted alerter replays every host's last heartbeat, the ghost's included: the
-# forget watermark must keep it from seeding liveness.
+# forget mark must keep it from seeding liveness (without it, the ghost's silence would
+# page again once its mark was gone).
 kill "$alerter_pid"
 wait "$alerter_pid" 2>/dev/null || true
 "$work/portwarden-alerter" --config "$work/alerter.json" >>"$work/alerter.log" 2>&1 &
@@ -891,16 +910,16 @@ alerter_pid=$!
 pids+=($alerter_pid)
 wait_for "the restarted alerter consuming" 20 seen_in "$work/alerter.log" '"msg":"alerter running"' 2
 sleep $((2 * SILENT_AFTER_S + 4)) # the restart's grace (one silent_after), then a silent_after, with margin
-[ -z "$(ghost_pages)" ] || fail "the forgotten host paged: $(ghost_pages)"
+[ "$(ghost_page_count)" -eq 1 ] || fail "the forgotten host paged again: $(ghost_pages)"
 [ "$(ghost_code)" = 404 ] || fail "the forgotten host came back without sending ($(ghost_code))"
 start_ghost
 wait_for "$ghost back as a new host" 15 ghost_heard
 [ "$(api "/v1/hosts/$ghost" | jq -r .first_seen)" != "$ghost_first_seen" ] || fail "the returning host kept its old first_seen"
 sleep 2
-[ -z "$(ghost_pages)" ] || fail "the returning host paged: $(ghost_pages)"
+[ "$(ghost_page_count)" -eq 1 ] || fail "the returning host paged (no host_recovered for a new host): $(ghost_pages)"
 stop_ghost
-"$work/portwarden-inventory" forget-host --config "$work/inventory.json" "$ghost" >/dev/null || fail "the second forget-host failed"
-echo "forget: $ghost gone from the API and the alerter, no page across an alerter restart and $((2 * SILENT_AFTER_S + 4)) s; back as a new host"
+forget_host --force "$ghost" >/dev/null || fail "forget-host --force of a host that is not silent yet failed"
+echo "forget: read token 403, live host refused; $ghost paged host_silent once, forgotten, no page across an alerter restart and $((2 * SILENT_AFTER_S + 4)) s; back as a new host; --force"
 
 log "tamper: no signal from a healthy agent (checks every 1 s during steps 1-10)"
 ! seen " TAMPER " 1 || fail "a healthy agent raised tamper signals: $(grep ' TAMPER ' "$work/watch.log" | head -3)"

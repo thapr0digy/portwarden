@@ -5,10 +5,14 @@
 # The VMs are x86_64 here, so these legs are also the amd64 run of the real probes.
 name: ci
 
+# Turned off on 2026-11-03 by the user's decision: CI runs only when started by hand
+# (Actions tab, or `gh workflow run ci.yml`). Local and VM verify (`flowryn verify`,
+# dev/vm-verify.sh) are the gate. To re-enable, restore these triggers above
+# workflow_dispatch:
+#   push:
+#     branches: [main]
+#   pull_request:
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:

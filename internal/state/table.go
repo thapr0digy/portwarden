@@ -28,8 +28,11 @@ type Change struct {
 // Listener is a currently open listener and the processes holding its sockets. The
 // table leaves Exposure empty; the agent fills it in.
 type Listener struct {
-	Key      model.ListenerKey
-	Procs    []model.Process
+	Key   model.ListenerKey
+	Procs []model.Process
+	// V6Only is the sockets' IPV6_V6ONLY flag: On when every socket of the key is
+	// v6-only, Off when any is dual-stack, otherwise Unknown.
+	V6Only   model.V6Only
 	Exposure model.Exposure
 	// BehindProxy lists the proxy routes ending at the listener; the agent fills it in.
 	BehindProxy []model.ProxyRef
@@ -103,6 +106,10 @@ func (t *Table) open(o model.Observation) []Change {
 		// The socket stays under its stored key even if re-observed under another.
 		before := t.procsOf(stored.Key)
 		// A baseline taken in a race can miss the owner that the kernel event carries.
+		if stored.V6Only == model.V6OnlyUnknown && o.V6Only != model.V6OnlyUnknown {
+			stored.V6Only = o.V6Only
+			t.sockets[o.Cookie] = stored
+		}
 		if stored.Proc.IsZero() {
 			stored.Proc = o.Proc
 			t.sockets[o.Cookie] = stored
@@ -331,6 +338,26 @@ func (t *Table) procsOf(k model.ListenerKey) []model.Process {
 	return procs
 }
 
+// v6OnlyOf combines the IPV6_V6ONLY flags of a key's sockets: one dual-stack socket
+// takes IPv4 for the key, and an unread one leaves it unknown.
+func (t *Table) v6OnlyOf(key model.ListenerKey) model.V6Only {
+	on, unknown := false, false
+	for cookie := range t.byKey[key] {
+		switch t.sockets[cookie].V6Only {
+		case model.V6OnlyOff:
+			return model.V6OnlyOff
+		case model.V6OnlyOn:
+			on = true
+		default:
+			unknown = true
+		}
+	}
+	if on && !unknown {
+		return model.V6OnlyOn
+	}
+	return model.V6OnlyUnknown
+}
+
 // sameProcs reports whether two holder sets have the same owners. Only identity
 // fields count: a change of UID, Comm or Cmdline alone is stored silently and
 // shows in snapshots and later events.
@@ -344,7 +371,7 @@ func sameProcs(a, b []model.Process) bool {
 func (t *Table) Snapshot() []Listener {
 	out := make([]Listener, 0, len(t.byKey))
 	for key := range t.byKey {
-		out = append(out, Listener{Key: key, Procs: t.procsOf(key)})
+		out = append(out, Listener{Key: key, Procs: t.procsOf(key), V6Only: t.v6OnlyOf(key)})
 	}
 	slices.SortFunc(out, func(a, b Listener) int { return strings.Compare(a.Key.String(), b.Key.String()) })
 	return out

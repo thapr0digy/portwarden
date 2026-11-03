@@ -30,7 +30,7 @@ type ownerRecord struct {
 	NetNS    uint32
 	Family   uint16
 	Proto    uint8
-	_        [1]byte
+	V6Only   uint8 // model.V6Only
 	Port     uint16
 	Addr     [16]uint8
 	Comm     [16]int8
@@ -126,6 +126,7 @@ func decodeOwners(raw []byte) ([]owner, error) {
 		owners = append(owners, owner{
 			Cookie: r.Cookie,
 			Key:    model.NewKey(r.NetNS, proto, addr, r.Port),
+			V6Only: probes.V6Only(r.V6Only),
 			Proc: model.Process{
 				PID:      r.Tgid,
 				UID:      r.Uid,

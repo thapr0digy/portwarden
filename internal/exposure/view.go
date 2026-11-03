@@ -47,8 +47,8 @@ type View struct {
 	natMaps []Mapping
 	// natTargets are every DNAT target in a NAT table, whatever leads to it.
 	natTargets []natTarget
-	// opaque names NAT mechanisms the simulation cannot follow (kube-proxy nftables or
-	// IPVS mode, Cilium, Swarm ingress, LoadBalancer IPs, DNATs without a port match):
+	// opaque names NAT mechanisms the simulation cannot follow (kube-proxy IPVS mode,
+	// Cilium, Swarm ingress, LoadBalancer IPs, DNATs without a port match):
 	// with any of them, an unmapped container listener is undetermined, not local.
 	opaque []string
 	// unreadable lists what could not be read ("fw:unreadable …"); judgements are then
@@ -250,9 +250,17 @@ func (v *View) Judge(ls []state.Listener) map[model.ListenerKey]model.Exposure {
 	for _, l := range ls {
 		var e model.Exposure
 		if l.Key.NetNS == v.hostNetNS {
-			e = v.judgeHostPort(l.Key.Proto, l.Key.Addr, l.Key.Port)
+			e = v.judgeListener(l.Key.Proto, l.Key.Addr, l.Key.Port, l.V6Only)
 		} else {
 			e = v.judgeNetns(l, maps)
+		}
+		if l.Key.Addr.Is6() && l.Key.Addr.IsUnspecified() && l.V6Only == model.V6OnlyUnknown {
+			// After the host listener's "bind:any"; at the end of a container's evidence.
+			at := len(e.Evidence)
+			if l.Key.NetNS == v.hostNetNS && at > 0 && e.Evidence[0] == "bind:any" {
+				at = 1
+			}
+			e.Evidence = slices.Insert(e.Evidence, at, evV6OnlyUnknown)
 		}
 		if len(v.unreadable) > 0 && !(e.Level == model.ExposureLocal && slices.Contains(e.Evidence, "bind:loopback")) {
 			e = v.degraded(e)
@@ -317,17 +325,32 @@ func (v *View) external(v4, v6 bool) []candidate {
 	return out
 }
 
-// judgeHostPort judges a host-netns port bound to addr.
+// Evidence for a [::] listener's IPV6_V6ONLY flag.
+const (
+	evV6Only        = "bind:any (IPv6 only)"
+	evV6OnlyUnknown = "bind:v6only unknown (IPv4 judged too)"
+)
+
+// judgeHostPort judges a host port bound to addr that is not a socket's own key (the
+// host side of a mapping): a [::] one is judged for IPv4 too.
 func (v *View) judgeHostPort(proto string, addr netip.Addr, port uint16) model.Exposure {
+	return v.judgeListener(proto, addr, port, model.V6OnlyOff)
+}
+
+// judgeListener judges a host-netns port bound to addr. A [::] socket also takes IPv4
+// unless it is IPV6_V6ONLY: v6-only is judged for IPv6 alone, dual-stack or unknown
+// for both families (Judge notes the unknown).
+func (v *View) judgeListener(proto string, addr netip.Addr, port uint16, v6only model.V6Only) model.Exposure {
 	var ev []string
 	var cands []candidate
 	switch {
 	case addr.IsLoopback():
 		return model.Exposure{Level: model.ExposureLocal, Evidence: []string{"bind:loopback"}}
+	case addr.IsUnspecified() && addr.Is6() && v6only == model.V6OnlyOn:
+		ev = []string{evV6Only}
+		cands = v.external(false, true)
 	case addr.IsUnspecified():
 		ev = []string{"bind:any"}
-		// A [::] socket also takes IPv4 unless it is IPV6_V6ONLY, which the key does
-		// not carry: it is judged for both.
 		cands = v.external(true, addr.Is6())
 	default:
 		if v.ifErr != nil {
@@ -486,8 +509,10 @@ func (v *View) judgeNetns(l state.Listener, maps []Mapping) model.Exposure {
 		all, err := v.netnsAddrs(k.NetNS, l.Procs)
 		addrErr = err
 		addrs = nil
+		v6only := l.V6Only == model.V6OnlyOn
 		for _, a := range all {
-			if a.Is4() || k.Addr.Is6() {
+			// A [::] socket takes IPv4 too unless it is v6-only.
+			if (a.Is4() && !(k.Addr.Is6() && v6only)) || (a.Is6() && k.Addr.Is6()) {
 				addrs = append(addrs, a)
 			}
 		}

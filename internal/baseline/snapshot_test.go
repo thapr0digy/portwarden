@@ -84,3 +84,29 @@ func sameObservation(a, b model.Observation) bool {
 	return a.Kind == b.Kind && a.Cookie == b.Cookie && a.Key == b.Key &&
 		a.Proc.Equal(b.Proc) && a.At.Equal(b.At) && a.Source == b.Source
 }
+
+// The dumps' IPV6_V6ONLY flag goes on every observation of the socket; a host socket
+// whose dump record lacks it takes the owner record's, and a foreign-netns socket has
+// only the owner record's.
+func TestJoinCarriesV6Only(t *testing.T) {
+	v6 := netip.IPv6Unspecified()
+	app := model.Process{PID: 20, Comm: "app"}
+	tcp := []diagSocket{
+		{Cookie: 1, Family: afInet6, Addr: v6, Port: 8080, V6Only: model.V6OnlyOn},
+		{Cookie: 2, Family: afInet6, Addr: v6, Port: 8081},
+	}
+	udp := []diagSocket{{Cookie: 3, Family: afInet6, Addr: v6, Port: 5353, V6Only: model.V6OnlyOff}}
+	foreign := model.NewKey(4026532999, model.ProtoTCP, v6, 80)
+	owners := []owner{
+		{Cookie: 1, Key: model.NewKey(hostNetNS, model.ProtoTCP, v6, 8080), V6Only: model.V6OnlyOn, Proc: app},
+		{Cookie: 2, Key: model.NewKey(hostNetNS, model.ProtoTCP, v6, 8081), V6Only: model.V6OnlyOff, Proc: app},
+		{Cookie: 4, Key: foreign, V6Only: model.V6OnlyOn, Proc: app},
+	}
+	got := join(hostNetNS, tcp, udp, owners, at)
+	checkObservations(t, got, []model.Observation{
+		{Kind: model.Opened, Cookie: 1, Key: model.NewKey(hostNetNS, model.ProtoTCP, v6, 8080), Proc: app, At: at, Source: model.SourceBaseline, V6Only: model.V6OnlyOn},
+		{Kind: model.Opened, Cookie: 2, Key: model.NewKey(hostNetNS, model.ProtoTCP, v6, 8081), Proc: app, At: at, Source: model.SourceBaseline, V6Only: model.V6OnlyOff},
+		{Kind: model.Opened, Cookie: 3, Key: model.NewKey(hostNetNS, model.ProtoUDP, v6, 5353), At: at, Source: model.SourceBaseline, V6Only: model.V6OnlyOff},
+		{Kind: model.Opened, Cookie: 4, Key: foreign, Proc: app, At: at, Source: model.SourceBaseline, V6Only: model.V6OnlyOn},
+	})
+}

@@ -164,9 +164,10 @@ func TestJudgeDualStackAndIPv6(t *testing.T) {
 	ifs := vmIfs()
 	ifs[1].Prefixes = append(ifs[1].Prefixes, netip.MustParsePrefix("2600:1f18::15/64"))
 	v := NewView("start", hostNS, fw, nil, ifs, ctrAddrs)
+	dual := func(l state.Listener) state.Listener { l.V6Only = model.V6OnlyOff; return l }
 	checkJudge(t, v, []state.Listener{
-		lst(hostNS, "tcp", "::", 8443),
-		lst(hostNS, "tcp", "::", 80),
+		dual(lst(hostNS, "tcp", "::", 8443)),
+		dual(lst(hostNS, "tcp", "::", 80)),
 		lst(hostNS, "tcp", "2600:1f18::15", 8443),
 		lst(hostNS, "tcp", "::1", 25),
 	}, map[string]want{

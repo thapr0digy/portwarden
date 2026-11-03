@@ -17,7 +17,8 @@ type udpRecord struct {
 	Family uint16
 	Port   uint16
 	Addr   [16]uint8
-	_      [4]byte
+	V6Only uint8 // model.V6Only
+	_      [3]byte
 }
 
 // UDPSockets runs the iter/udp program once and returns every UDP socket bound to an
@@ -44,7 +45,7 @@ func UDPSockets() ([]diagSocket, error) {
 		if err != nil {
 			return nil, fmt.Errorf("udp socket %#x: %w", r.Cookie, err)
 		}
-		socks = append(socks, diagSocket{Cookie: r.Cookie, Family: uint8(r.Family), Addr: addr, Port: r.Port})
+		socks = append(socks, diagSocket{Cookie: r.Cookie, Family: uint8(r.Family), Addr: addr, Port: r.Port, V6Only: probes.V6Only(r.V6Only)})
 	}
 	return socks, nil
 }

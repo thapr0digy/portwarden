@@ -253,6 +253,7 @@ func decode(raw []byte) (model.Observation, error) {
 		obs.Key = model.NewKey(ev.Netns, proto, addr, ev.Port)
 		obs.Proc.UID = ev.Uid
 		obs.Proc.Exe = ExePath(ev.Tgid)
+		obs.V6Only = V6Only(ev.V6only)
 	default:
 		return model.Observation{}, fmt.Errorf("unknown event kind %d", ev.Kind)
 	}
@@ -309,4 +310,15 @@ func monotonicToWall(tsNs uint64) time.Time {
 		return now
 	}
 	return now.Add(-time.Duration(uint64(mono.Nano()) - tsNs))
+}
+
+// V6Only reads the BPF records' IPV6_V6ONLY byte (0 not read, 1 dual-stack, 2 v6-only).
+func V6Only(raw uint8) model.V6Only {
+	switch raw {
+	case 1:
+		return model.V6OnlyOff
+	case 2:
+		return model.V6OnlyOn
+	}
+	return model.V6OnlyUnknown
 }

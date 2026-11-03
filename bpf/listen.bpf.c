@@ -50,6 +50,7 @@ struct event {
 	__u8 addr[16];
 	__u8 kind;
 	__u8 proto; // IPPROTO_TCP or IPPROTO_UDP
+	__u8 v6only; // see v6only_of
 	char comm[16];
 };
 
@@ -72,6 +73,15 @@ static __always_inline void count(__u32 index)
 
 	if (value)
 		*value += 1; // per-CPU slot: no atomics needed
+}
+
+// IPV6_V6ONLY as the model encodes it (model.V6Only): 0 not read (an IPv4 socket),
+// 1 dual-stack, 2 v6-only. Fixed once the socket is bound.
+static __always_inline __u8 v6only_of(struct sock *sk)
+{
+	if (sk->__sk_common.skc_family != AF_INET6)
+		return 0;
+	return BPF_CORE_READ_BITFIELD(&sk->__sk_common, skc_ipv6only) ? 2 : 1;
 }
 
 // Reserves and fills the fields common to both kinds, or returns NULL when the
@@ -116,6 +126,7 @@ static __always_inline void emit_opened(struct sock *sk, __u8 proto)
 	family = sk->__sk_common.skc_family;
 	e->family = family;
 	e->port = sk->__sk_common.skc_num;
+	e->v6only = v6only_of(sk);
 	if (family == AF_INET6) {
 		for (i = 0; i < 16; i++)
 			e->addr[i] = sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr8[i];

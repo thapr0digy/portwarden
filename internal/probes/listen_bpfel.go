@@ -26,8 +26,9 @@ type listenEvent struct {
 	Addr     [16]uint8
 	Kind     uint8
 	Proto    uint8
+	V6only   uint8
 	Comm     [16]int8
-	_        [6]byte
+	_        [5]byte
 }
 
 // Names of all BPF objects in the ELF.

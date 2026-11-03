@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Tests for dev/vmlock.sh and dev/vm-verify.sh's file list (make dev-test). Host only,
-# no VM: every lock lives in a scratch directory. Each test is named after the
-# assumption it checks; prints ok/FAIL per test and exits non-zero on any failure.
+# Tests for dev/vmlock.sh, dev/vm-verify.sh's file list and failure logs, and dev/dist.sh's
+# offline tool build (make dev-test). Host only, no VM: every lock lives in a scratch
+# directory. Each test is named after the assumption it checks; prints ok/FAIL per test and exits non-zero on any failure.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 repo=$PWD
@@ -227,6 +227,85 @@ test_copy_reproduces_files_modes_and_dangling_symlinks_without_git() {
 	want=$(cd "$c" && dev/vm-verify.sh --list-files | wc -l | tr -d ' ')
 	got=$(cd "$copy" && find . \( -type f -o -type l \) | wc -l | tr -d ' ')
 	[ "$want" = "$got" ] || { echo "copy holds $got files, list has $want"; return 1; }
+}
+
+# failing_run <name> <legs> [setup command]: a scratch clone whose dev/matrix.sh is a stub
+# that fails leg 2404's itest; limactl is a stub too. Runs vm-verify on it with a scratch
+# root and prints "rc=<status>" after its output. The setup command runs in the clone.
+failing_run() {
+	local c root stubs rc=0
+	c=$(clone_with_scripts "$1")
+	root=$scratch/root-$1
+	stubs=$scratch/stubs-$1
+	mkdir -p "$root" "$stubs"
+	printf '#!/bin/sh\nexit 0\n' >"$stubs/limactl"
+	chmod +x "$stubs/limactl"
+	cat >"$c/dev/matrix.sh" <<'STUB'
+#!/usr/bin/env bash
+cd "$(dirname "$0")/.."
+mkdir -p .matrix/2404
+echo "itest: stub failure marker" >.matrix/2404/itest.log
+echo "e2e: fine" >.matrix/2404/e2e.log
+printf 'leg | system | result | time\n2404 | stub | itest=FAIL e2e=ok | 1s\n' >.matrix/summary.txt
+exit 1
+STUB
+	chmod +x "$c/dev/matrix.sh"
+	[ -z "${3:-}" ] || (cd "$c" && eval "$3")
+	(cd "$c" && PATH="$stubs:$PATH" VMVERIFY_ROOT=$root dev/vm-verify.sh --legs "$2" 2>&1) || rc=$?
+	echo "rc=$rc"
+}
+
+test_failing_leg_leaves_its_logs_in_vmverify_logs_and_prints_their_tail() {
+	local out root dir
+	out=$(failing_run failleg 2404)
+	root=$(cd "$scratch/root-failleg" && pwd -P)
+	grep -q '^rc=1$' <<<"$out" || { echo "want rc=1: $out"; return 1; }
+	dir=$(sed -n 's/^vm-verify: failed; logs kept in //p' <<<"$out")
+	case $dir in "$root/.vmverify/logs/"*-*) ;; *) echo "no logs path printed: $out"; return 1 ;; esac
+	[ -f "$dir/2404/itest.log" ] && [ -f "$dir/2404/e2e.log" ] && [ -f "$dir/summary.txt" ] ||
+		{ echo "logs missing in $dir: $(ls -R "$dir")"; return 1; }
+	grep -q 'last 40 lines of 2404/itest.log' <<<"$out" || { echo "itest.log tail not printed: $out"; return 1; }
+	grep -q 'stub failure marker' <<<"$out" || { echo "itest.log content not printed: $out"; return 1; }
+	grep -q 'last 40 lines of 2404/e2e.log' <<<"$out" && { echo "a passing log was printed: $out"; return 1; }
+	[ -z "$(find "$root/.vmverify" -maxdepth 1 -name '*-*' -type d)" ] || { echo "copy not removed"; return 1; }
+}
+
+test_failed_make_dist_leaves_dist_log_in_vmverify_logs() {
+	local out dir
+	out=$(failing_run faildist amd64 'printf "dist:\n\t@echo dist stub failure marker; exit 1\n" >Makefile')
+	grep -q '^rc=1$' <<<"$out" || { echo "want rc=1: $out"; return 1; }
+	grep -q 'make dist failed' <<<"$out" || { echo "no dist failure note: $out"; return 1; }
+	dir=$(sed -n 's/^vm-verify: failed; logs kept in //p' <<<"$out")
+	[ -f "$dir/dist.log" ] || { echo "dist.log not kept: $out"; return 1; }
+	grep -q 'dist stub failure marker' <<<"$out" || { echo "dist.log tail not printed: $out"; return 1; }
+}
+
+test_only_the_newest_20_failure_log_dirs_are_kept() {
+	local logs i out dir
+	logs=$scratch/root-prune/.vmverify/logs
+	mkdir -p "$logs"
+	for i in $(seq 25); do
+		mkdir "$logs/old$i"
+		touch -t "2001010100$(printf %02d "$i")" "$logs/old$i"
+	done
+	out=$(failing_run prune 2404)
+	dir=$(sed -n 's/^vm-verify: failed; logs kept in //p' <<<"$out")
+	[ -d "$dir" ] || { echo "new log dir gone: $out"; return 1; }
+	[ "$(find "$logs" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = 20 ] || { echo "kept: $(ls "$logs")"; return 1; }
+	[ ! -e "$logs/old6" ] && [ -d "$logs/old7" ] || { echo "pruned the wrong ones: $(ls "$logs")"; return 1; }
+}
+
+# The flaky make dist (2026-11-03): `go install pkg@version` asked proxy.golang.org about
+# the tool even with the module cached, and failed when the proxy timed out.
+test_dist_builds_its_cached_tools_without_network() {
+	local tool
+	for tool in $(grep -E '^(NFPM|CYCLONEDX)=' dev/dist.sh | cut -d= -f2-); do
+		GOBIN=$scratch/prime go install "$tool" || { echo "could not fetch $tool to prime the cache"; return 1; }
+	done
+	HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 ARCHES=amd64 DIST_DIR=$scratch/dist-offline \
+		dev/dist.sh >"$scratch/dist-offline.log" 2>&1 || { tail -20 "$scratch/dist-offline.log"; return 1; }
+	ls "$scratch"/dist-offline/portwarden-agent_*_amd64.deb >/dev/null || { echo "no .deb"; return 1; }
+	[ -n "$(ls "$scratch"/dist-offline/sbom/*.cdx.json 2>/dev/null)" ] || { echo "no SBOMs"; return 1; }
 }
 
 test_vm_verify_rejects_unknown_legs() {

@@ -108,10 +108,14 @@ func run(path string) error {
 	}
 	defer store.Close()
 
+	forgotten, err := store.Forgotten(ctx)
+	if err != nil {
+		return fmt.Errorf("forgotten hosts: %w", err)
+	}
 	silentAfter := cfg.Rules.SilentAfter.D(90 * time.Second)
 	a := &app{engine: alerter.NewEngine(rules, bus.NewEventID), store: store, live: liveness.New(silentAfter),
 		feed: liveness.NewFeed(silentAfter, time.Now()), hook: hook, maxAttempts: cfg.Webhook.MaxAttempts,
-		tamperSig: map[string]string{}, noSilence: map[string]bool{}}
+		tamperSig: map[string]string{}, noSilence: map[string]bool{}, forgotten: alerter.NewForgotten(forgotten)}
 	if a.maxAttempts <= 0 {
 		a.maxAttempts = 20
 	}
@@ -157,9 +161,11 @@ func run(path string) error {
 // heartbeatConsumer re-creates the heartbeat consumer from each host's last heartbeat and
 // last tamper event, so a host that died while the alerter was down is still noticed.
 // Heartbeats and tamper events share it, so each host's tamper status is judged in the
-// host's order. Messages up to the stream's last sequence at creation are a replay: they
-// seed liveness and feed the tamper rule (whose marks make it idempotent), never a
-// recovery page.
+// host's order; so do the inventory's forgotten-host announcements (M8), so a forget
+// takes its place among them. Messages up to the stream's last sequence at creation are a
+// replay: they seed liveness and feed the tamper rule (whose marks make it idempotent),
+// never a recovery page; a forgotten host's messages stored before its announcement are
+// skipped, replay or not.
 func heartbeatConsumer(ctx context.Context, js jetstream.JetStream, stream jetstream.Stream, a *app) (jetstream.Consumer, error) {
 	info, err := stream.Info(ctx)
 	if err != nil {
@@ -170,7 +176,8 @@ func heartbeatConsumer(ctx context.Context, js jetstream.JetStream, stream jetst
 		return nil, fmt.Errorf("reset heartbeat consumer: %w", err)
 	}
 	return js.CreateOrUpdateConsumer(ctx, natsauth.StreamName, jetstream.ConsumerConfig{
-		Durable: natsauth.ConsumerAlerterHB, FilterSubjects: []string{"asm.*." + bus.KindHeartbeat, "asm.*." + bus.KindTamper},
+		Durable: natsauth.ConsumerAlerterHB, FilterSubjects: []string{"asm.*." + bus.KindHeartbeat, "asm.*." + bus.KindTamper,
+			"pwb." + bus.OriginInventory + ".*." + bus.KindForgotten},
 		DeliverPolicy: jetstream.DeliverLastPerSubjectPolicy, AckPolicy: jetstream.AckExplicitPolicy, AckWait: 30 * time.Second,
 	})
 }
@@ -190,6 +197,46 @@ type app struct {
 	// restart) falls back to the database.
 	tamperSig map[string]string
 	noSilence map[string]bool
+	// forgotten holds the forget watermarks (M8); it has its own lock.
+	forgotten *alerter.Forgotten
+}
+
+// streamSeq is a message's stream sequence (0 without metadata).
+func streamSeq(m jetstream.Msg) uint64 {
+	if md, err := m.Metadata(); err == nil {
+		return md.Sequence.Stream
+	}
+	return 0
+}
+
+// forget applies the inventory's announcement that an operator forgot a host: the host's
+// marks and probe results go (in one transaction, with the watermark), then its liveness
+// and caches. An announcement already applied (the start-up replay, a redelivery) is
+// skipped, so the marks of a host that came back since stay.
+func (a *app) forget(ctx context.Context, host string, seq uint64, data []byte) error {
+	var ev asmv1.HostForgotten
+	if err := proto.Unmarshal(data, &ev); err != nil {
+		return svc.Permanent(err)
+	}
+	if ev.GetHostId() != host {
+		return svc.Permanent(fmt.Errorf("forged host forgotten (host %q on %s's subject)", ev.GetHostId(), host))
+	}
+	if a.forgotten.Covers(host, seq) {
+		return nil
+	}
+	if err := a.decide(ctx, "forget "+host, func(st alerter.State) (alerter.Decision, error) {
+		return alerter.Decision{}, a.engine.Forget(ctx, st, host, seq)
+	}); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.live.Forget(host)
+	delete(a.tamperSig, host)
+	delete(a.noSilence, host)
+	a.mu.Unlock()
+	a.forgotten.Set(host, seq, time.Now())
+	slog.Info("host forgotten", "host", host, "stream_seq", seq)
+	return nil
 }
 
 func (a *app) connected(ok bool) {
@@ -217,15 +264,19 @@ func (a *app) decide(ctx context.Context, what string, f func(alerter.State) (al
 }
 
 func (a *app) heartbeat(ctx context.Context, m jetstream.Msg) error {
+	seq := streamSeq(m)
+	if p, ok := bus.Parse(m.Subject()); ok && p.Origin == bus.OriginInventory && p.Kind == bus.KindForgotten {
+		return a.forget(ctx, p.Host, seq, m.Data())
+	}
 	host, kind, ok := bus.ParseSubject(m.Subject())
 	if !ok {
 		return nil
 	}
-	now := time.Now()
-	replay := false
-	if md, err := m.Metadata(); err == nil && md.Sequence.Stream <= a.replayUpTo {
-		replay = true
+	if a.forgotten.Leftover(host, seq) {
+		return nil
 	}
+	now := time.Now()
+	replay := seq != 0 && seq <= a.replayUpTo
 	status, err := tamperStatus(host, kind, m.Data())
 	if err != nil {
 		return svc.Permanent(err)
@@ -333,6 +384,9 @@ func (a *app) watch(ctx context.Context) {
 				a.retry(ctx, "feed", func(st alerter.State) (alerter.Decision, error) { return a.engine.Feed(ctx, st, ev, now) })
 			}
 			for _, tr := range silent {
+				if a.forgotten.Since(tr.Host, tr.At) {
+					continue // forgotten while this check ran
+				}
 				a.retry(ctx, "host silent "+tr.Host, func(st alerter.State) (alerter.Decision, error) { return a.engine.Silent(ctx, st, tr) })
 				// After the mark is stored: the host's next heartbeat checks it (and pages
 				// the recovery).
@@ -363,6 +417,9 @@ func (a *app) retry(ctx context.Context, what string, f func(alerter.State) (ale
 func (a *app) exposure(ctx context.Context, m jetstream.Msg) error {
 	p, ok := bus.Parse(m.Subject())
 	if !ok {
+		return nil
+	}
+	if a.forgotten.Leftover(p.Host, streamSeq(m)) {
 		return nil
 	}
 	now := time.Now()

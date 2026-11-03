@@ -9,14 +9,27 @@ import (
 
 // MemState is an in-memory State (tests, and the stdout-only mode has no use for it).
 type MemState struct {
-	Paged  map[string]time.Time
-	Probes map[string]string
-	Queue  []*Alert
+	Paged     map[string]time.Time
+	Probes    map[string]string
+	Forgotten map[string]uint64
+	Queue     []*Alert
 }
 
 // NewMemState returns an empty state.
 func NewMemState() *MemState {
-	return &MemState{Paged: map[string]time.Time{}, Probes: map[string]string{}}
+	return &MemState{Paged: map[string]time.Time{}, Probes: map[string]string{}, Forgotten: map[string]uint64{}}
+}
+func (m *MemState) ClearProbes(_ context.Context, prefix string) error {
+	for k := range m.Probes {
+		if strings.HasPrefix(k, prefix) {
+			delete(m.Probes, k)
+		}
+	}
+	return nil
+}
+func (m *MemState) SetForgotten(_ context.Context, host string, seq uint64) error {
+	m.Forgotten[host] = max(m.Forgotten[host], seq)
+	return nil
 }
 
 func (m *MemState) LastPaged(_ context.Context, key string) (time.Time, bool, error) {

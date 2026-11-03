@@ -23,7 +23,7 @@ func open(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	if _, err := s.pool.Exec(context.Background(), "TRUNCATE alerter_pages, alerter_dedupe, alerter_probe"); err != nil {
+	if _, err := s.pool.Exec(context.Background(), "TRUNCATE alerter_pages, alerter_dedupe, alerter_probe, alerter_forgotten"); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -128,5 +128,50 @@ func TestPagedKeysPrefix(t *testing.T) {
 func TestLikePrefixEscapes(t *testing.T) {
 	if got := likePrefix(`tamper:h_%\/`); got != `tamper:h\_\%\\/%` {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// A forget drops the host's marks and probe results (and no other host's, even one whose
+// id has LIKE wildcards or shares a prefix), and its watermark survives a reopen.
+func TestForgetHost(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	e := alerter.NewEngine(alerter.Rules{}, func() string { return "x" })
+	hosts := []string{"web", "web-2", "w_b", "we%"}
+	if err := s.InTx(ctx, func(st alerter.State) error {
+		for _, h := range hosts {
+			for _, k := range []string{"silent:" + h, alerter.TamperPrefix(h) + "ptraced/self/1", "listener:" + h + "/k"} {
+				if err := st.SetPaged(ctx, k, now); err != nil {
+					return err
+				}
+			}
+			if err := st.SetProbeResult(ctx, h+"/k", "confirmed", now); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"w_b", "web"} {
+		if err := s.InTx(ctx, func(st alerter.State) error { return e.Forget(ctx, st, h, 77) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var marks, probes int
+	_ = s.pool.QueryRow(ctx, "SELECT count(*) FROM alerter_dedupe").Scan(&marks)
+	_ = s.pool.QueryRow(ctx, "SELECT count(*) FROM alerter_probe").Scan(&probes)
+	if marks != 6 || probes != 2 {
+		t.Fatalf("left %d marks and %d probes, want 6 and 2 (web-2 and we%% untouched)", marks, probes)
+	}
+	if err := s.InTx(ctx, func(st alerter.State) error { return st.SetForgotten(ctx, "web", 5) }); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s = open2(t)
+	got, err := s.Forgotten(ctx)
+	if err != nil || len(got) != 2 || got["web"] != 77 || got["w_b"] != 77 {
+		t.Fatalf("forgotten %v %v", got, err)
 	}
 }

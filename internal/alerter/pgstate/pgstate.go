@@ -167,6 +167,37 @@ func (t txState) SetProbeResult(ctx context.Context, key, result string, at time
 	return err
 }
 
+func (t txState) ClearProbes(ctx context.Context, prefix string) error {
+	_, err := t.tx.Exec(ctx, `DELETE FROM alerter_probe WHERE key LIKE $1 ESCAPE '\'`, likePrefix(clean(prefix)))
+	return err
+}
+
+func (t txState) SetForgotten(ctx context.Context, host string, seq uint64) error {
+	_, err := t.tx.Exec(ctx, `INSERT INTO alerter_forgotten (host, stream_seq) VALUES ($1, $2)
+		ON CONFLICT (host) DO UPDATE SET stream_seq = GREATEST(alerter_forgotten.stream_seq, EXCLUDED.stream_seq), at = now()`,
+		clean(host), int64(seq))
+	return err
+}
+
+// Forgotten returns every forgotten host's watermark (host to stream sequence).
+func (s *Store) Forgotten(ctx context.Context) (map[string]uint64, error) {
+	rows, err := s.pool.Query(ctx, "SELECT host, stream_seq FROM alerter_forgotten")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]uint64{}
+	for rows.Next() {
+		var h string
+		var seq int64
+		if err := rows.Scan(&h, &seq); err != nil {
+			return nil, err
+		}
+		out[h] = uint64(seq)
+	}
+	return out, rows.Err()
+}
+
 func (t txState) Enqueue(ctx context.Context, a *alerter.Alert) error {
 	b, err := cleanJSON(a)
 	if err != nil {

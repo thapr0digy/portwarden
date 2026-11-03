@@ -125,6 +125,10 @@ type State interface {
 	PagedKeys(ctx context.Context, prefix string) ([]string, error)
 	ProbeResult(ctx context.Context, key string) (string, error)
 	SetProbeResult(ctx context.Context, key, result string, at time.Time) error
+	// ClearProbes drops the probe results whose key starts with prefix.
+	ClearProbes(ctx context.Context, prefix string) error
+	// SetForgotten records a forgotten host's watermark (the highest one wins).
+	SetForgotten(ctx context.Context, host string, streamSeq uint64) error
 	Enqueue(ctx context.Context, a *Alert) error
 }
 

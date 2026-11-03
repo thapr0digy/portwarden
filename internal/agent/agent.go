@@ -20,10 +20,21 @@ type EventSource interface {
 // Snapshotter takes the baseline of currently listening sockets.
 type Snapshotter func() ([]model.Observation, error)
 
-// Sink receives what the agent publishes.
+// Sink receives what the agent publishes. Calls come from one goroutine, in order: a
+// listener's Opened comes before its first ExposureChange.
 type Sink interface {
 	Changes([]state.Change)
 	Snapshot([]state.Listener)
+	ExposureChanges([]state.ExposureChange)
+}
+
+// Judge rates every listener's exposure under one reading of the host (its firewall
+// and interfaces); see exposure.View. It is used from the agent loop only.
+type Judge interface {
+	Judge([]state.Listener) map[model.ListenerKey]model.Exposure
+	// Trigger says why this judge was made (firewall, interfaces, recheck, …); it is
+	// the trigger of the exposure changes a new judge causes.
+	Trigger() string
 }
 
 // Options tunes the agent beyond M1. The zero value behaves as M1: no
@@ -46,6 +57,12 @@ type Options struct {
 	// Settle is how long live events keep being applied after a recheck dump
 	// returns, before it is reconciled.
 	Settle time.Duration
+	// Judge rates exposure; nil leaves every listener's exposure empty and publishes
+	// no ExposureChanges.
+	Judge Judge
+	// Judges delivers newer judges (the firewall or the interfaces changed); each one
+	// re-rates every listener. Ignored without Judge.
+	Judges <-chan Judge
 }
 
 const defaultDropsCheck = 10 * time.Second
@@ -82,13 +99,19 @@ func Run(ctx context.Context, src EventSource, snap Snapshotter, sink Sink, opts
 	for _, o := range baseline {
 		table.Apply(enrich(o))
 	}
-	sink.Snapshot(table.Snapshot())
 
 	l := &loop{
 		table: table, sink: sink, snap: snap, enrich: enrich, opts: opts,
 		lastDrops: lastDrops, grace: stoppedTimer(), settle: stoppedTimer(),
-		dumps: make(chan dumpResult, 1),
+		dumps: make(chan dumpResult, 1), judge: opts.Judge,
+		levels: make(map[model.ListenerKey]model.Exposure),
 	}
+	// The baseline's exposures travel in its snapshot; it causes no ExposureChanges,
+	// as it causes no Opened.
+	if l.judge != nil {
+		l.levels = l.judge.Judge(table.Snapshot())
+	}
+	l.snapshot()
 	defer l.grace.Stop()
 	defer l.settle.Stop()
 	for _, o := range buffered {
@@ -120,6 +143,11 @@ type loop struct {
 	dumped  []model.Observation
 	settle  *time.Timer
 	settleC <-chan time.Time
+
+	// judge rates exposure (nil: off); levels holds each listener's last exposure,
+	// kept through a pending close so a restart inside the grace is no change.
+	judge  Judge
+	levels map[model.ListenerKey]model.Exposure
 }
 
 type dumpResult struct {
@@ -129,6 +157,10 @@ type dumpResult struct {
 
 func (l *loop) run(ctx context.Context, events <-chan model.Observation) error {
 	var recheckC, dropsC <-chan time.Time
+	var judges <-chan Judge
+	if l.judge != nil {
+		judges = l.opts.Judges
+	}
 	if l.opts.Recheck > 0 {
 		t := time.NewTicker(l.opts.Recheck)
 		defer t.Stop()
@@ -167,6 +199,13 @@ func (l *loop) run(ctx context.Context, events <-chan model.Observation) error {
 		case <-l.settleC:
 			l.settleC = nil
 			l.reconcile()
+		case j, ok := <-judges:
+			if !ok {
+				judges = nil
+				continue
+			}
+			l.judge = j
+			l.rejudge(nil, j.Trigger())
 		}
 	}
 }
@@ -175,10 +214,15 @@ func (l *loop) apply(o model.Observation) {
 	l.publish(l.table.Apply(o))
 }
 
-// publish sends changes and re-arms the grace timer at the table's next
-// deadline, since every table mutation can move it.
+// publish sends changes, with their listeners' exposure and any exposure change they
+// cause, and re-arms the grace timer at the table's next deadline, since every table
+// mutation can move it.
 func (l *loop) publish(changes []state.Change) {
-	publish(l.sink, changes)
+	if len(changes) > 0 && l.judge != nil {
+		l.rejudge(changes, triggerListener)
+	} else {
+		publish(l.sink, changes)
+	}
 	deadline, ok := l.table.NextDeadline()
 	if !ok {
 		l.grace.Stop()
@@ -238,7 +282,62 @@ func (l *loop) reconcile() {
 	l.touched, l.dumped = nil, nil
 	l.lastDrops = l.dropsAtStart
 	l.publish(changes)
-	l.sink.Snapshot(l.table.Snapshot())
+	l.snapshot()
+}
+
+// snapshot publishes the open listeners with their current exposure.
+func (l *loop) snapshot() {
+	listeners := l.table.Snapshot()
+	for i := range listeners {
+		listeners[i].Exposure = l.levels[listeners[i].Key]
+	}
+	l.sink.Snapshot(listeners)
+}
+
+const (
+	triggerOpened   = "opened"
+	triggerListener = "listener"
+)
+
+// rejudge rates every open listener, publishes changes (which may be nil) with their
+// listeners' exposure, then one ExposureChange per listener that is newly opened or
+// whose level moved. A listener's evidence is updated silently when only it changed.
+func (l *loop) rejudge(changes []state.Change, trigger string) {
+	listeners := l.table.Snapshot()
+	judged := l.judge.Judge(listeners)
+	now := time.Now()
+	openedAt := make(map[model.ListenerKey]time.Time)
+	for i, c := range changes {
+		switch c.Kind {
+		case model.Opened, model.OwnerChanged:
+			changes[i].Exposure = judged[c.Key]
+			if c.Kind == model.Opened {
+				openedAt[c.Key] = c.At
+			}
+		case model.Closed:
+			changes[i].Exposure = l.levels[c.Key]
+			delete(l.levels, c.Key)
+		}
+	}
+	publish(l.sink, changes)
+
+	var out []state.ExposureChange
+	for _, li := range listeners {
+		e := judged[li.Key]
+		old, had := l.levels[li.Key]
+		l.levels[li.Key] = e
+		if had && old.Level == e.Level {
+			continue
+		}
+		ec := state.ExposureChange{Key: li.Key, Procs: li.Procs, Exposure: e, Previous: old, Trigger: trigger, At: now}
+		if at, ok := openedAt[li.Key]; ok && !had {
+			ec.Trigger, ec.At = triggerOpened, at
+		}
+		out = append(out, ec)
+	}
+	if len(out) > 0 {
+		l.sink.ExposureChanges(out)
+	}
 }
 
 func stoppedTimer() *time.Timer {

@@ -25,13 +25,20 @@ func (f fakeSource) Events() <-chan model.Observation { return f }
 type recorder struct {
 	snapshots chan []state.Listener
 	changes   chan []state.Change
+	exposures chan []state.ExposureChange
 
 	mu    sync.Mutex
 	order []string // "changes" / "snapshot", in call order
 }
 
 func newRecorder() *recorder {
-	return &recorder{snapshots: make(chan []state.Listener, 8), changes: make(chan []state.Change, 64)}
+	return &recorder{snapshots: make(chan []state.Listener, 8), changes: make(chan []state.Change, 64),
+		exposures: make(chan []state.ExposureChange, 64)}
+}
+
+func (r *recorder) ExposureChanges(c []state.ExposureChange) {
+	r.note("exposures")
+	r.exposures <- c
 }
 
 func (r *recorder) Snapshot(l []state.Listener) {

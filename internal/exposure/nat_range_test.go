@@ -2,7 +2,10 @@ package exposure
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/thapr0digy/portwarden/internal/model"
@@ -111,4 +114,27 @@ func TestJudgeNATRangesNftables(t *testing.T) {
 			"nat: dnat udp/40000-40999 -> 172.17.0.3:5000", "bind:192.168.5.15 (eth0)",
 			"nat: dnat udp/40000 -> 172.17.0.3:5000", "firewall: accept udp/40000 from 0/0 (eth0, no filter rules)"}},
 	})
+}
+
+// A ranged packet cut into more pieces than the evaluator follows: the mappings may be
+// incomplete, so an unmapped container listener is not provably local.
+func TestJudgeNATRangeTooManyPieces(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("*nat\n:PREROUTING ACCEPT [0:0]\n")
+	b.WriteString("-A PREROUTING -p tcp -m tcp --dport 20000:29999 -j DNAT --to-destination 172.17.0.2:20000-29999\nCOMMIT\n")
+	b.WriteString("*filter\n:INPUT ACCEPT [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n")
+	for p := 20000; p < 20000+2*300; p += 2 {
+		fmt.Fprintf(&b, "-A FORWARD -p tcp -m tcp --dport %d -j ACCEPT\n", p)
+	}
+	b.WriteString("COMMIT\n")
+	fw, err := Merge(MergeInput{IPT4: []byte(b.String())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := NewView("start", hostNS, fw, nil, vmIfs(), natRangeAddrs)
+	l := lst(4026532709, "tcp", "0.0.0.0", 80, model.Process{PID: 5009})
+	e := v.Judge([]state.Listener{l})[l.Key]
+	if e.Level != model.ExposureBound || !slices.Contains(e.Evidence, "fw:undetermined netns mapping (too many NAT paths)") {
+		t.Fatalf("%v %q", e.Level, e.Evidence)
+	}
 }

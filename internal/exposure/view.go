@@ -179,8 +179,13 @@ func (v *View) init() {
 		AddrCuts: addrCuts(v.ifs),
 	}
 	if v.fw != nil {
-		v.natMaps = v.findNATMappings()
+		var truncated bool
+		v.natMaps, truncated = v.findNATMappings()
 		v.natTargets, v.opaque = v.scanNAT()
+		if truncated {
+			// Some mapping may be missing: no unmapped container is provably local.
+			v.opaque = append(v.opaque, "too many NAT paths")
+		}
 		for _, p := range v.fw.Partial {
 			v.unreadable = append(v.unreadable, "fw:unreadable "+p)
 		}
@@ -753,8 +758,9 @@ const natPortLimit = 64
 // findNATMappings simulates a packet from the outside to every (protocol, port) a NAT
 // table matches on, in a rule or in a verdict map's keys (kube-proxy's nftables mode
 // keeps its node ports in maps), at every external address, and keeps each forwarded
-// outcome.
-func (v *View) findNATMappings() []Mapping {
+// outcome. truncated reports an evaluation past the path bound, whose mappings may be
+// incomplete.
+func (v *View) findNATMappings() (maps []Mapping, truncated bool) {
 	type pp struct {
 		proto  string
 		lo, hi uint16
@@ -821,6 +827,7 @@ func (v *View) findNATMappings() []Mapping {
 	for _, p := range ports {
 		for _, c := range cands {
 			r := v.evaluateRange(p.proto, c, p.lo, p.hi)
+			truncated = truncated || r.Truncated
 			for _, o := range r.Outcomes {
 				if !o.Forwarded {
 					continue
@@ -829,7 +836,7 @@ func (v *View) findNATMappings() []Mapping {
 			}
 		}
 	}
-	return slices.CompactFunc(out, func(a, b Mapping) bool { return a == b })
+	return slices.CompactFunc(out, func(a, b Mapping) bool { return a == b }), truncated
 }
 
 // natMapping turns a forwarded outcome of a packet to host:port into a mapping.

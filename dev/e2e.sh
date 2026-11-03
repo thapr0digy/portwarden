@@ -91,6 +91,8 @@ M5_FW_PORT=8091
 M7_UNUSED_PORT=8089 # nothing listens here: a rule for it moves no listener's exposure
 M8_SECRET_PORT=8088 # a loopback listener started with secret arguments (M8 redaction)
 UNIT_PORT=8090
+M9_V6ONLY_PORT=8087 # a [::] listener with IPV6_V6ONLY (M9): judged for IPv6 only
+M9_DUAL_PORT=8086   # a dual-stack [::] listener: judged for IPv4 too
 TAMPER_WINDOW_S=10
 UNIT_DROPIN_DIR=/run/systemd/system/portwarden-agent.service.d
 UNIT_CRED_DIR=/run/portwarden-e2e
@@ -315,7 +317,8 @@ signal.pause()' "$1" &
 }
 
 for port in "$SERVER_PORT" "$RESTART_PORT" "$NETNS_PORT" "$SPOOL_PORT" "$EXPOSURE_PORT" "$DOCKER_HOST_PORT" \
-	"$PROXY_PORT" "$BACKEND_PORT" "$BACKEND2_PORT" "$M5_OPEN_PORT" "$M5_FW_PORT" "$INV_PORT" "$HOOK_PORT" "$UNIT_PORT"; do
+	"$PROXY_PORT" "$BACKEND_PORT" "$BACKEND2_PORT" "$M5_OPEN_PORT" "$M5_FW_PORT" "$INV_PORT" "$HOOK_PORT" "$UNIT_PORT" \
+	"$M9_V6ONLY_PORT" "$M9_DUAL_PORT"; do
 	ss -Hltn "sport = :$port" | grep -q . && fail "tcp port $port is already in use"
 done
 for port in "$UDP_PORT" "$MARKER_PORT"; do
@@ -439,6 +442,37 @@ echo "exposure firewall latency: $(((t1 - t0) / 1000000)) ms ($(grep -m1 -- "EXP
 kill "$exposure_pid"
 wait "$exposure_pid" 2>/dev/null || true
 sudo nft delete table inet "$NFT_TABLE"
+
+log "v6only: [::]:$M9_V6ONLY_PORT with IPV6_V6ONLY, [::]:$M9_DUAL_PORT dual-stack"
+# hold_v6 <port> <v6only 0|1>: a TCP listener on [::]:<port> with IPV6_V6ONLY set as asked.
+hold_v6() {
+	python3 -c 'import signal, socket, sys
+s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, int(sys.argv[2]))
+s.bind(("::", int(sys.argv[1])))
+s.listen(8)
+signal.pause()' "$1" "$2" &
+	pids+=($!)
+}
+hold_v6 "$M9_V6ONLY_PORT" 1
+v6only_pid=$!
+hold_v6 "$M9_DUAL_PORT" 0
+dual_pid=$!
+# No filter rule stops either port, and eth0's only IPv6 address is link-local: the
+# dual-stack socket is open over IPv4, the v6-only one has no external address.
+wait_for "EXPOSURE tcp [::]:$M9_V6ONLY_PORT (IPv6 only)" "$LINE_TIMEOUT_S" \
+	seen "EXPOSURE tcp \[::\]:$M9_V6ONLY_PORT new->[a-z_]+ trigger=opened .*bind:any \(IPv6 only\)" 1
+wait_for "EXPOSURE tcp [::]:$M9_DUAL_PORT new->host_firewall_open" "$LINE_TIMEOUT_S" \
+	seen "EXPOSURE tcp \[::\]:$M9_DUAL_PORT new->host_firewall_open trigger=opened .*bind:any; " 1
+v6only_line=$(grep -m1 -- "EXPOSURE tcp \[::\]:$M9_V6ONLY_PORT " "$work/watch.log")
+if ! ip -6 addr show scope global | grep -q inet6; then
+	grep -q -- "new->bound " <<<"$v6only_line" || fail "v6-only listener judged over IPv4: $v6only_line"
+fi
+grep -q -- "v6only unknown" "$work/watch.log" && fail "a listener's IPV6_V6ONLY was not read"
+echo "v6only: $(cut -d' ' -f4- <<<"$v6only_line")"
+echo "dual-stack: $(grep -m1 -- "EXPOSURE tcp \[::\]:$M9_DUAL_PORT " "$work/watch.log" | cut -d' ' -f4-)"
+kill "$v6only_pid" "$dual_pid"
+wait "$v6only_pid" "$dual_pid" 2>/dev/null || true
 
 log "docker: container listener behind -p $DOCKER_HOST_PORT:80"
 if ! command -v docker >/dev/null || ! sudo docker info >/dev/null 2>&1; then

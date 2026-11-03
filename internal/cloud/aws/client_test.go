@@ -114,8 +114,8 @@ var responses = map[string]string{
 type fakeAWS struct {
 	failELB bool
 	mu      sync.Mutex
-	calls []string
-	nacl  string // the association.subnet-id filter value seen
+	calls   []string
+	nacl    string // the association.subnet-id filter value seen
 }
 
 func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {

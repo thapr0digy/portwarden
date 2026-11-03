@@ -36,7 +36,11 @@ fi
 systemctl is-active --quiet postgresql || { echo "itest: postgresql is not running (dev/install-postgres.sh)" >&2; exit 1; }
 pg_db="pw_itest_$$"
 pg_pass=$(openssl rand -hex 24)
-sudo -u postgres psql -q -v ON_ERROR_STOP=1 -c "CREATE ROLE $pg_db LOGIN PASSWORD '$pg_pass'" -c "CREATE DATABASE $pg_db OWNER $pg_db" >/dev/null
+# The password goes through stdin, not the command line (ps).
+sudo -u postgres psql -q -v ON_ERROR_STOP=1 -f - >/dev/null <<SQL
+CREATE ROLE $pg_db LOGIN PASSWORD '$pg_pass';
+SQL
+sudo -u postgres psql -q -v ON_ERROR_STOP=1 -c "CREATE DATABASE $pg_db OWNER $pg_db" >/dev/null
 pg_dsn="postgres://$pg_db:$pg_pass@127.0.0.1:5432/$pg_db?sslmode=disable"
 
 # Captured first so that set -e catches a load error (a broken integration-tagged file).

@@ -28,9 +28,12 @@
 #      (a throwaway PostgreSQL database), portwarden-alerter (a local HMAC-checking webhook)
 #      and portwarden-verifier (in its own netns, probing the VM over a veth pair) run. A
 #      listener opened behind an nft accept reaches the inventory API within 10 s; the
-#      verifier publishes confirmed for it and unreachable for one behind an nft drop; the
-#      webhook gets exactly one page for the accepted port and none for the dropped one;
-#      stopping the agent makes the host silent in the inventory and pages host_silent.
+#      verifier (driven by the inventory's probe requests) publishes confirmed for it and
+#      unreachable for one behind an nft drop; the webhook gets exactly one page for the
+#      accepted port and none for the dropped one; the host user cannot publish under
+#      another host's prefix nor forge a verifier or cloud verdict for itself; with a
+#      second (fake) host still sending heartbeats, stopping the agent makes the host
+#      silent in the inventory and pages host_silent.
 # Self-contained: it builds its own binaries, runs its own nats-server on a private port
 # and store, runs its agent with its own spool directory, stops the portwarden-agent
 # systemd unit while it runs (it would share the BPF programs' run counters) and puts
@@ -219,7 +222,7 @@ nats_setup() {
 		"$work/portwarden-natsauth" mint --dir "$work/users" --role "$role" >/dev/null
 	done
 	"$work/portwarden-natsauth" mint --dir "$work/users" --role host --host "$host_id" >/dev/null
-	"$work/portwarden-natsauth" mint --dir "$work/users" --role host --host e2eother >/dev/null
+	"$work/portwarden-natsauth" mint --dir "$work/users" --role host --host e2eother >/dev/null # dev/fakehost
 	"$work/portwarden-natsauth" render --dir "$work/users" --out "$work/users.conf" >/dev/null
 	cat >"$work/nats.conf" <<CONF
 listen: 0.0.0.0:$NATS_PORT
@@ -279,6 +282,7 @@ go build -o "$work/portwarden-watch" ./cmd/portwarden-watch
 for b in portwarden-natsauth portwarden-inventory portwarden-alerter portwarden-verifier; do
 	go build -o "$work/$b" "./cmd/$b"
 done
+go build -o "$work/fakehost" ./dev/fakehost
 systemctl is-active --quiet postgresql || fail "postgresql is not running (dev/install-postgres.sh)"
 nats_setup
 
@@ -287,7 +291,7 @@ $unit_was_active && sudo systemctl stop portwarden-agent
 
 start_nats
 # Host users may not create the stream: the admin does, as an operator would.
-natscli stream add ASM_EVENTS --subjects 'asm.>' --storage file --retention limits --max-age 168h \
+natscli stream add ASM_EVENTS --subjects 'asm.>' --subjects 'pwb.>' --storage file --retention limits --max-age 168h \
 	--dupe-window 2m --replicas 1 --allow-direct --defaults >/dev/null || fail "creating the stream as admin"
 start_agent
 wait_for "stream ASM_EVENTS" 15 stream_ready
@@ -592,12 +596,28 @@ log "backend: inventory, alerter, verifier (netns $M5_NETNS), webhook"
 # A throwaway database and role with a generated password.
 pg_db="pw_e2e_$$"
 pg_pass=$(openssl rand -hex 24)
-sudo -u postgres psql -q -v ON_ERROR_STOP=1 -c "CREATE ROLE $pg_db LOGIN PASSWORD '$pg_pass'" -c "CREATE DATABASE $pg_db OWNER $pg_db" >/dev/null
+# The password goes through stdin, not the command line (ps).
+sudo -u postgres psql -q -v ON_ERROR_STOP=1 -f - >/dev/null <<SQL
+CREATE ROLE $pg_db LOGIN PASSWORD '$pg_pass';
+SQL
+sudo -u postgres psql -q -v ON_ERROR_STOP=1 -c "CREATE DATABASE $pg_db OWNER $pg_db" >/dev/null
 ( umask 077
   echo "postgres://$pg_db:$pg_pass@127.0.0.1:5432/$pg_db?sslmode=disable" >"$work/inventory.dsn"
   openssl rand -hex 24 >"$work/inventory.token"
   openssl rand -hex 32 >"$work/webhook.secret" )
 api_token=$(cat "$work/inventory.token")
+
+log "backend: a host's credentials cannot publish under another host's prefix, nor forge verdicts"
+host_nats() { nats --server "$nats_url" --nkey "$work/users/host-$host_id.nk" "$@"; }
+for forged in "asm.e2evictim.heartbeat" "pwb.verifier.$host_id.exposure" "pwb.cloud.$host_id.exposure" "asm.$host_id.exposure.confirmed"; do
+	host_nats pub "$forged" forged >>"$work/natspub.log" 2>&1 || true
+done
+sleep 1
+for forged in "asm.e2evictim.heartbeat" "pwb.verifier.$host_id.exposure" "pwb.cloud.$host_id.exposure" "asm.$host_id.exposure.confirmed"; do
+	! natscli stream get ASM_EVENTS --last-for "$forged" >/dev/null 2>&1 || fail "host $host_id published $forged"
+done
+natscli stream get ASM_EVENTS --last-for "asm.$host_id.heartbeat" >/dev/null 2>&1 || fail "the agent's own heartbeats (as its host user) are not in the stream"
+echo "host credentials: own heartbeats stored; asm.e2evictim.heartbeat, pwb.verifier/pwb.cloud verdicts for itself and asm exposure.confirmed refused"
 
 # The webhook receiver: accepts only correctly signed alerts, one JSON line each.
 cat >"$work/hook.py" <<'PY'
@@ -641,8 +661,9 @@ cat >"$work/inventory.json" <<JSON
 JSON
 cat >"$work/alerter.json" <<JSON
 {"nats": {"url": "$nats_url", "nkey_file": "$work/users/alerter.nk"},
+ "postgres_dsn_file": "$work/inventory.dsn",
  "rules": {"page_level": "host_firewall_open", "silent_after": "${SILENT_AFTER_S}s", "dedupe_window": "1h"},
- "webhook": {"url": "http://127.0.0.1:$HOOK_PORT/", "secret_file": "$work/webhook.secret", "timeout": "2s", "max_attempts": 3}}
+ "webhook": {"url": "http://127.0.0.1:$HOOK_PORT/", "secret_file": "$work/webhook.secret", "timeout": "2s", "allow_insecure": true}}
 JSON
 cat >"$work/verifier.json" <<JSON
 {"nats": {"url": "nats://$M5_HOST_IP:$NATS_PORT", "nkey_file": "$work/users/verifier.nk"},
@@ -652,6 +673,8 @@ cat >"$work/verifier.json" <<JSON
  "timeouts": {"connect": "2s", "banner": "1s"}, "min_gap": "1s"}
 JSON
 "$work/portwarden-inventory" --config "$work/inventory.json" >>"$work/inventory.log" 2>&1 &
+pids+=($!)
+"$work/fakehost" --nats-url "$nats_url" --nats-nkey "$work/users/host-e2eother.nk" --host e2eother >>"$work/fakehost.log" 2>&1 &
 pids+=($!)
 "$work/portwarden-alerter" --config "$work/alerter.json" >>"$work/alerter.log" 2>&1 &
 pids+=($!)
@@ -710,16 +733,7 @@ seen_in "$work/alerter.log" '"msg":"alert suppressed".*"rule":"dedupe"' 1 || fai
 echo "alerter: one page for :$M5_OPEN_PORT ($(jq -r "select(.listener.port == $M5_OPEN_PORT) | .kind + \" \" + .summary" "$work/hook.jsonl")), none for :$M5_FW_PORT"
 ! grep -q "bad signature" "$work/hook.log" || fail "the webhook saw a bad signature"
 
-log "backend: a host's credentials cannot publish under another host's prefix"
-host_nats() { nats --server "$nats_url" --nkey "$work/users/host-$host_id.nk" "$@"; }
-host_nats pub "asm.e2eother.heartbeat" forged >"$work/natspub.log" 2>&1 || true
-host_nats pub "asm.$host_id.e2e-control" ok >>"$work/natspub.log" 2>&1 || fail "host could not publish under its own prefix"
-sleep 1
-natscli stream get ASM_EVENTS --last-for "asm.$host_id.e2e-control" >/dev/null 2>&1 || fail "control publish under the host's own prefix is not in the stream"
-! natscli stream get ASM_EVENTS --last-for "asm.e2eother.heartbeat" >/dev/null 2>&1 || fail "host $host_id published under asm.e2eother"
-echo "host credentials: asm.$host_id.e2e-control stored, asm.e2eother.heartbeat refused"
-
-log "backend: stopping the agent makes the host silent"
+log "backend: stopping the agent makes the host silent (another host keeps the feed alive)"
 stop_agent
 t0=$(now_ns)
 inv_silent() { api "/v1/hosts/$host_id" | jq -e '.silent == true' >/dev/null; }

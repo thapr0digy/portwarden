@@ -158,12 +158,12 @@ func (t txState) SetProbeResult(ctx context.Context, key, result string, at time
 }
 
 func (t txState) Enqueue(ctx context.Context, a *alerter.Alert) error {
-	b, err := json.Marshal(a)
+	b, err := cleanJSON(a)
 	if err != nil {
 		return err
 	}
 	_, err = t.tx.Exec(ctx, `INSERT INTO alerter_pages (id, kind, host, payload) VALUES ($1, $2, $3, $4)
-		ON CONFLICT (id) DO NOTHING`, a.ID, a.Kind, clean(a.Host), json.RawMessage(clean(string(b))))
+		ON CONFLICT (id) DO NOTHING`, a.ID, a.Kind, clean(a.Host), json.RawMessage(b))
 	return err
 }
 
@@ -223,4 +223,35 @@ func (s *Store) Prune(ctx context.Context, now time.Time, window time.Duration) 
 	_, err := s.pool.Exec(ctx, `DELETE FROM alerter_pages WHERE (delivered_at IS NOT NULL OR gave_up_at IS NOT NULL)
 		AND created_at < $1`, now.Add(-7*24*time.Hour))
 	return err
+}
+
+// cleanJSON encodes v with every string cleaned (jsonb rejects \u0000).
+func cleanJSON(v any) ([]byte, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var generic any
+	if err := json.Unmarshal(b, &generic); err != nil {
+		return nil, err
+	}
+	return json.Marshal(cleanValue(generic))
+}
+
+func cleanValue(v any) any {
+	switch x := v.(type) {
+	case string:
+		return clean(x)
+	case []any:
+		for i := range x {
+			x[i] = cleanValue(x[i])
+		}
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[clean(k)] = cleanValue(e)
+		}
+		return out
+	}
+	return v
 }

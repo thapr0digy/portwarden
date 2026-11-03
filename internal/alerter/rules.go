@@ -294,20 +294,22 @@ func (e *Engine) Feed(ctx context.Context, st State, ev liveness.FeedEvent, now 
 
 // Tamper judges an agent's tamper status (from a tamper event or a heartbeat, in the
 // host's order): one page per flag newly present, with a mark per flag
-// ("tamper:<host>/<kind>/<subject>") so a flag that stays raised never pages again; marks
-// of flags no longer present are dropped, so a flag raised again later pages again. A
-// nil status (an agent without tamper checks) changes nothing.
+// ("tamper:<host>/<kind>/<subject>/<fingerprint>"), so a flag that stays raised never
+// pages again but a new observation of the same subject (another edit, another tracer)
+// does (ruling R-c); marks of flags no longer present are dropped. Informational flags
+// (an upgrade by the package, drops below the agent's page rate) never page. A nil
+// status (an agent without tamper checks) changes nothing.
 func (e *Engine) Tamper(ctx context.Context, st State, host string, status *asmv1.TamperStatus, now time.Time) (Decision, error) {
 	if status == nil {
 		return Decision{}, nil
 	}
-	prefix := "tamper:" + host + "/"
+	prefix := TamperPrefix(host)
 	current := map[string]*asmv1.TamperFlag{}
 	for _, f := range status.GetFlags() {
-		if slices.Contains(e.rules.TamperIgnore, f.GetKind()) {
+		if f.GetInfo() || slices.Contains(e.rules.TamperIgnore, f.GetKind()) {
 			continue
 		}
-		current[prefix+f.GetKind()+"/"+f.GetSubject()] = f
+		current[prefix+f.GetKind()+"/"+f.GetSubject()+"/"+f.GetFingerprint()] = f
 	}
 	marked, err := st.PagedKeys(ctx, prefix)
 	if err != nil {
@@ -342,6 +344,23 @@ func (e *Engine) Tamper(ctx context.Context, st State, host string, status *asmv
 	}
 	return e.queue(ctx, st, &Alert{ID: e.newID(), Kind: KindTamper, Host: host, At: now, Origin: "agent", Evidence: fresh,
 		Summary: fmt.Sprintf("host %s: agent tamper signal: %s", host, strings.Join(fresh, "; "))})
+}
+
+// TamperPrefix is the prefix of a host's tamper marks.
+func TamperPrefix(host string) string { return "tamper:" + host + "/" }
+
+// TamperSignature identifies the pageable part of a status (sorted kind/subject/
+// fingerprint of the non-informational flags): the alerter skips the database for a
+// message whose signature equals the last one it stored for the host.
+func TamperSignature(status *asmv1.TamperStatus) string {
+	var keys []string
+	for _, f := range status.GetFlags() {
+		if !f.GetInfo() {
+			keys = append(keys, f.GetKind()+"/"+f.GetSubject()+"/"+f.GetFingerprint())
+		}
+	}
+	slices.Sort(keys)
+	return strings.Join(keys, "\x00")
 }
 
 func listener(l *asmv1.Listener) *Listener {

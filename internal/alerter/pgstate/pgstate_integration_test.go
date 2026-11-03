@@ -124,3 +124,9 @@ func TestPagedKeysPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLikePrefixEscapes(t *testing.T) {
+	if got := likePrefix(`tamper:h_%\/`); got != `tamper:h\_\%\\/%` {
+		t.Fatalf("got %q", got)
+	}
+}

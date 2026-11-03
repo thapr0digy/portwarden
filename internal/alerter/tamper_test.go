@@ -78,3 +78,31 @@ func TestTamperIgnoreAndOff(t *testing.T) {
 		t.Fatalf("nil status: %+v %v", d, st.Paged)
 	}
 }
+
+// A second, different change to the same file pages again; informational flags never
+// page (rulings R-b, R-c).
+func TestTamperFingerprintAndInfo(t *testing.T) {
+	e := engine(t, Rules{PageOnTamper: true})
+	st := NewMemState()
+	must := mustD(t)
+	now := time.Now()
+	flag := func(fp string, info bool) *asmv1.TamperStatus {
+		return &asmv1.TamperStatus{Flags: []*asmv1.TamperFlag{{Kind: "unit_changed", Subject: "/etc/x.service", Fingerprint: fp, Info: info}}}
+	}
+	if d := must(e.Tamper(bg, st, "h1", flag("aaaa", false), now)); d.Alert == nil {
+		t.Fatal("first edit must page")
+	}
+	if d := must(e.Tamper(bg, st, "h1", flag("aaaa", false), now)); d.Alert != nil {
+		t.Fatal("the same edit must not page again")
+	}
+	if d := must(e.Tamper(bg, st, "h1", flag("bbbb", false), now)); d.Alert == nil {
+		t.Fatal("a second edit of a flagged file must page")
+	}
+	upgraded := &asmv1.TamperStatus{Flags: []*asmv1.TamperFlag{{Kind: "upgraded", Subject: "/usr/bin/portwarden-agent", Info: true}}}
+	if d := must(e.Tamper(bg, st, "h2", upgraded, now)); d.Alert != nil || len(st.Paged) != 1 {
+		t.Fatalf("info flags must not page or mark: %+v %v", d.Alert, st.Paged)
+	}
+	if TamperSignature(upgraded) != "" || TamperSignature(flag("aaaa", false)) == TamperSignature(flag("bbbb", false)) {
+		t.Fatal("signature")
+	}
+}

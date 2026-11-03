@@ -64,6 +64,16 @@ type harness struct {
 
 func startWatcher(t *testing.T, fwErr error, recheck time.Duration) *harness {
 	t.Helper()
+	return startWatcherWith(t, func(c *WatchConfig) {
+		c.Recheck = recheck
+		if fwErr != nil {
+			c.FirewallChanges = func(context.Context) (<-chan struct{}, error) { return nil, fwErr }
+		}
+	})
+}
+
+func startWatcherWith(t *testing.T, tune func(*WatchConfig)) *harness {
+	t.Helper()
 	h := &harness{
 		host:  &fakeHost{rules: dropAll, ifs: vmIfs()},
 		fwC:   make(chan struct{}, 1),
@@ -71,19 +81,16 @@ func startWatcher(t *testing.T, fwErr error, recheck time.Duration) *harness {
 		views: make(chan *View, 16),
 		done:  make(chan struct{}),
 	}
-	w := NewWatcher(WatchConfig{
-		Config:   Config{HostNetNS: hostNS, Run: h.host.run, Interfaces: h.host.interfaces},
-		Debounce: 20 * time.Millisecond,
-		Poll:     30 * time.Millisecond,
-		Recheck:  recheck,
-		FirewallChanges: func(context.Context) (<-chan struct{}, error) {
-			if fwErr != nil {
-				return nil, fwErr
-			}
-			return h.fwC, nil
-		},
+	cfg := WatchConfig{
+		Config:           Config{HostNetNS: hostNS, Run: h.host.run, Interfaces: h.host.interfaces},
+		Debounce:         20 * time.Millisecond,
+		MaxWait:          time.Second,
+		Poll:             30 * time.Millisecond,
+		FirewallChanges:  func(context.Context) (<-chan struct{}, error) { return h.fwC, nil },
 		InterfaceChanges: func(context.Context) (<-chan struct{}, error) { return h.ifC, nil },
-	})
+	}
+	tune(&cfg)
+	w := NewWatcher(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	h.stop = cancel
 	initial := w.Initial(ctx)
@@ -182,5 +189,57 @@ func TestWatcherClosedNotificationFallsBackToPolling(t *testing.T) {
 	h.host.set(accept22, nil)
 	if v := h.next(t); v.Trigger() != TriggerFirewall {
 		t.Fatalf("trigger %q", v.Trigger())
+	}
+}
+
+func TestWatcherMaxWaitUnderSteadyNotifications(t *testing.T) {
+	h := startWatcherWith(t, func(c *WatchConfig) { c.Debounce, c.MaxWait = 50*time.Millisecond, 150*time.Millisecond })
+	h.host.set(accept22, nil)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(10 * time.Millisecond):
+				select {
+				case h.fwC <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	select {
+	case v := <-h.views:
+		if v.Trigger() != TriggerFirewall {
+			t.Fatalf("trigger %q", v.Trigger())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a steady stream of notifications postponed the read past the max wait")
+	}
+}
+
+func TestWatcherSubscribesBeforeInitialRead(t *testing.T) {
+	var order []string
+	var mu sync.Mutex
+	note := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock() }
+	host := &fakeHost{rules: dropAll, ifs: vmIfs()}
+	w := NewWatcher(WatchConfig{
+		Config: Config{HostNetNS: hostNS, Run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			note("read " + name)
+			return host.run(ctx, name, args...)
+		}, Interfaces: host.interfaces},
+		Debounce: time.Millisecond, Poll: time.Hour,
+		FirewallChanges:  func(context.Context) (<-chan struct{}, error) { note("subscribe"); return make(chan struct{}), nil },
+		InterfaceChanges: func(context.Context) (<-chan struct{}, error) { return make(chan struct{}), nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.Initial(ctx)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) == 0 || order[0] != "subscribe" {
+		t.Fatalf("order %v", order)
 	}
 }

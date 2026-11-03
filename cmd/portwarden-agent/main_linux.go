@@ -43,7 +43,8 @@ const (
 	defaultCloseWait = 2 * time.Second
 	defaultRecheck   = 5 * time.Minute
 	defaultFWPoll    = 30 * time.Second
-	viewDebounce     = time.Second // a burst of firewall or address changes is read once
+	viewDebounce     = time.Second     // a burst of firewall or address changes is read once
+	viewMaxWait      = 5 * time.Second // …but no later than this after its first change
 	imdsTimeout      = 2 * time.Second
 	imdsRetry        = 30 * time.Second
 	dmiDir           = "/sys/class/dmi/id"
@@ -143,7 +144,8 @@ func run(opts options, log *slog.Logger) error {
 	enrich := newEnricher(procinfo.NewResolver("/proc", "/sys/fs/cgroup", hashMaxBytes), matcher, hostNetNS)
 
 	// The first exposure view (firewall and interfaces; each tool read is bounded) is read
-	// before the probes start, so the probe buffer is not held open for it.
+	// before the probes start, so the probe buffer is not held open for it. The watcher
+	// joins the change notifications first, so a change during startup is not missed.
 	watcher := exposure.NewWatcher(exposure.WatchConfig{
 		Config: exposure.Config{
 			HostNetNS:  hostNetNS,
@@ -152,6 +154,7 @@ func run(opts options, log *slog.Logger) error {
 			NetnsAddrs: exposure.ProcNetnsAddrs("/proc"),
 		},
 		Debounce:         viewDebounce,
+		MaxWait:          viewMaxWait,
 		Poll:             opts.firewallPoll,
 		Recheck:          opts.recheck,
 		FirewallChanges:  netif.WatchNftables,

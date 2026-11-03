@@ -30,7 +30,7 @@ type recorder struct {
 
 	mu          sync.Mutex
 	snapProxies []model.ProxyRoutes // proxies of the latest snapshot
-	order []string // "changes" / "snapshot", in call order
+	order       []string            // "changes" / "snapshot", in call order
 }
 
 func newRecorder() *recorder {

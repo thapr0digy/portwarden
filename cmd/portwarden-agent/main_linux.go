@@ -167,6 +167,7 @@ func run(opts options, log *slog.Logger) error {
 	if ifs, err := initialView.Interfaces(); err == nil {
 		hostInfo.SetInterfaces(ifs)
 	}
+	hostInfo.SetConditions(initialView.Conditions())
 
 	// Probes first, so no listener is missed while the baseline is taken.
 	pr, err := probes.Start()
@@ -192,6 +193,7 @@ func run(opts options, log *slog.Logger) error {
 		if ifs, err := v.Interfaces(); err == nil {
 			hostInfo.SetInterfaces(ifs)
 		}
+		hostInfo.SetConditions(v.Conditions())
 		offerLatest(judges, v)
 	})
 	if opts.imds == "auto" {

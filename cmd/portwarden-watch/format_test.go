@@ -243,3 +243,11 @@ func TestFormatHostChanged(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestFormatHostConditions(t *testing.T) {
+	ev := &asmv1.HostEvent{HostId: hostID, RunId: "r1", Seq: 3, ObservedAt: at, Host: &asmv1.HostInfo{Conditions: []string{"fw:unreadable iptables-save: Permission denied"}}}
+	got, err := formatEvent("asm."+hostID+".host.changed", mustMarshal(t, ev))
+	if err != nil || !strings.HasSuffix(got, " HOST ips=- conditions=fw:unreadable iptables-save: Permission denied") {
+		t.Fatalf("got %q %v", got, err)
+	}
+}

@@ -18,6 +18,7 @@ type Collector struct {
 	ifaces  []model.PublicIP
 	cloud   Info
 	ingest  netip.Addr
+	conds   []string
 	last    model.HostInfo
 	started bool
 }
@@ -58,6 +59,12 @@ func (c *Collector) SetIngestLocal(a netip.Addr) {
 	c.update(func() { c.ingest = a })
 }
 
+// SetConditions takes the host-level conditions (an incomplete firewall read).
+func (c *Collector) SetConditions(conds []string) {
+	conds = slices.Clone(conds)
+	c.update(func() { c.conds = conds })
+}
+
 // Host returns the current host block.
 func (c *Collector) Host() model.HostInfo {
 	c.mu.Lock()
@@ -79,7 +86,7 @@ func (c *Collector) update(change func()) {
 
 // build orders the candidates: cloud metadata, then interfaces, then the ingest view.
 func (c *Collector) build() model.HostInfo {
-	h := model.HostInfo{Cloud: c.cloud.Cloud, InstanceID: c.cloud.InstanceID}
+	h := model.HostInfo{Cloud: c.cloud.Cloud, InstanceID: c.cloud.InstanceID, Conditions: slices.Clone(c.conds)}
 	for _, a := range c.cloud.PublicIPs {
 		h.PublicIPs = append(h.PublicIPs, model.PublicIP{IP: a.Unmap(), Via: model.ViaIMDS, Dir: model.DirIn})
 	}

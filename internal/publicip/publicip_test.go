@@ -252,3 +252,15 @@ func TestCollector(t *testing.T) {
 		t.Fatal("Host() differs from the last published block")
 	}
 }
+
+func TestCollectorConditions(t *testing.T) {
+	var got []model.HostInfo
+	c := NewCollector(func(h model.HostInfo) { got = append(got, h) })
+	c.SetConditions(nil)
+	c.SetConditions([]string{"fw:unreadable iptables-save: Permission denied"})
+	c.SetConditions([]string{"fw:unreadable iptables-save: Permission denied"})
+	c.SetConditions(nil)
+	if len(got) != 3 || len(got[1].Conditions) != 1 || len(got[2].Conditions) != 0 {
+		t.Fatalf("published %+v", got)
+	}
+}

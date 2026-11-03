@@ -194,9 +194,14 @@ func hostSuffix(h *asmv1.HostInfo) string {
 		ips = append(ips, v)
 	}
 	if len(ips) == 0 {
-		return s + " ips=-"
+		s += " ips=-"
+	} else {
+		s += " ips=" + strings.Join(ips, ",")
 	}
-	return s + " ips=" + strings.Join(ips, ",")
+	if c := h.GetConditions(); len(c) > 0 {
+		s += " conditions=" + strings.Join(c, "; ")
+	}
+	return s
 }
 
 func verb(k asmv1.Kind) string {

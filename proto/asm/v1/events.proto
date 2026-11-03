@@ -132,6 +132,10 @@ message HostInfo {
   // aws, gcp or azure when cloud metadata answered; empty otherwise.
   string cloud = 2;
   string instance_id = 3;
+  // Host-level problems that weaken the agent's judgements, e.g.
+  // "fw:unreadable iptables-save: Permission denied" while the firewall cannot be read in
+  // full (listeners then keep their last known level). Empty when all is read.
+  repeated string conditions = 4;
 }
 
 // ExposureEvent is published on asm.<host>.exposure.changed when a listener's level

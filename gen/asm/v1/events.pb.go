@@ -956,8 +956,12 @@ type HostInfo struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	PublicIps []*PublicIP            `protobuf:"bytes,1,rep,name=public_ips,json=publicIps,proto3" json:"public_ips,omitempty"`
 	// aws, gcp or azure when cloud metadata answered; empty otherwise.
-	Cloud         string `protobuf:"bytes,2,opt,name=cloud,proto3" json:"cloud,omitempty"`
-	InstanceId    string `protobuf:"bytes,3,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	Cloud      string `protobuf:"bytes,2,opt,name=cloud,proto3" json:"cloud,omitempty"`
+	InstanceId string `protobuf:"bytes,3,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	// Host-level problems that weaken the agent's judgements, e.g.
+	// "fw:unreadable iptables-save: Permission denied" while the firewall cannot be read in
+	// full (listeners then keep their last known level). Empty when all is read.
+	Conditions    []string `protobuf:"bytes,4,rep,name=conditions,proto3" json:"conditions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1011,6 +1015,13 @@ func (x *HostInfo) GetInstanceId() string {
 		return x.InstanceId
 	}
 	return ""
+}
+
+func (x *HostInfo) GetConditions() []string {
+	if x != nil {
+		return x.Conditions
+	}
+	return nil
 }
 
 // ExposureEvent is published on asm.<host>.exposure.changed when a listener's level
@@ -1306,13 +1317,16 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x02ip\x18\x01 \x01(\tR\x02ip\x12\x10\n" +
 	"\x03via\x18\x02 \x01(\tR\x03via\x12\x10\n" +
 	"\x03dir\x18\x03 \x01(\tR\x03dir\x12\x14\n" +
-	"\x05iface\x18\x04 \x01(\tR\x05iface\"r\n" +
+	"\x05iface\x18\x04 \x01(\tR\x05iface\"\x92\x01\n" +
 	"\bHostInfo\x12/\n" +
 	"\n" +
 	"public_ips\x18\x01 \x03(\v2\x10.asm.v1.PublicIPR\tpublicIps\x12\x14\n" +
 	"\x05cloud\x18\x02 \x01(\tR\x05cloud\x12\x1f\n" +
 	"\vinstance_id\x18\x03 \x01(\tR\n" +
-	"instanceId\"\xa2\x03\n" +
+	"instanceId\x12\x1e\n" +
+	"\n" +
+	"conditions\x18\x04 \x03(\tR\n" +
+	"conditions\"\xa2\x03\n" +
 	"\rExposureEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +

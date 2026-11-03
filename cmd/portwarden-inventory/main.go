@@ -28,6 +28,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/backend/liveness"
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
 	"github.com/thapr0digy/portwarden/internal/cloud"
+	"github.com/thapr0digy/portwarden/internal/cloud/reach"
 	cloudaws "github.com/thapr0digy/portwarden/internal/cloud/aws"
 	"github.com/thapr0digy/portwarden/internal/inventory"
 	"github.com/thapr0digy/portwarden/internal/inventory/api"
@@ -121,6 +122,19 @@ type CloudConfig struct {
 	Endpoint string       `json:"endpoint"`
 	// Regions, when set, are the only regions looked up.
 	Regions []string `json:"regions"`
+	// VPNCIDRs are the operator's VPN egress or office ranges (M10). The reach rule counts
+	// every source address a cloud rule allows as the internet unless it is private
+	// (RFC 1918, CGNAT, ULA and the other special-purpose ranges) or listed here.
+	VPNCIDRs []string `json:"vpn_cidrs"`
+}
+
+// policy parses vpn_cidrs into the reach rule; a bad range is refused at start.
+func (c CloudConfig) policy() (reach.Policy, error) {
+	vpn, err := reach.ParseVPN(c.VPNCIDRs)
+	if err != nil {
+		return reach.Policy{}, fmt.Errorf("cloud.%w", err)
+	}
+	return reach.NewPolicy(vpn), nil
 }
 
 func main() {
@@ -150,6 +164,10 @@ func run(path string) error {
 		cfg.Listen = defaultListen
 	}
 	if err := cfg.Retention.validate(); err != nil {
+		return err
+	}
+	policy, err := cfg.Cloud.policy()
+	if err != nil {
 		return err
 	}
 	if err := checkListen(cfg.Listen, cfg.AllowInsecureListen); err != nil {
@@ -248,7 +266,7 @@ func run(path string) error {
 	slog.Info("retention", "history", ret.History.String(), "quarantine", ret.Quarantine.String(), "interval", ret.Interval.String(), "batch", ret.Batch)
 	wg.Go(func() { ret.Run(ctx, store) })
 	if cfg.Cloud.AWS {
-		prov, err := cloudaws.New(ctx, cloudaws.Options{Endpoint: cfg.Cloud.Endpoint, Regions: cfg.Cloud.Regions})
+		prov, err := cloudaws.New(ctx, cloudaws.Options{Endpoint: cfg.Cloud.Endpoint, Regions: cfg.Cloud.Regions, Policy: policy})
 		if err != nil {
 			return err
 		}

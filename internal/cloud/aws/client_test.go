@@ -58,10 +58,30 @@ var responses = map[string]string{
   <entrySet>
     <item><ruleNumber>100</ruleNumber><protocol>-1</protocol><ruleAction>allow</ruleAction><egress>false</egress><cidrBlock>0.0.0.0/0</cidrBlock></item>
     <item><ruleNumber>32767</ruleNumber><protocol>-1</protocol><ruleAction>deny</ruleAction><egress>false</egress><cidrBlock>0.0.0.0/0</cidrBlock></item>
+    <item><ruleNumber>100</ruleNumber><protocol>-1</protocol><ruleAction>allow</ruleAction><egress>true</egress><cidrBlock>0.0.0.0/0</cidrBlock></item>
+    <item><ruleNumber>32767</ruleNumber><protocol>-1</protocol><ruleAction>deny</ruleAction><egress>true</egress><cidrBlock>0.0.0.0/0</cidrBlock></item>
   </entrySet>
   <associationSet><item><networkAclAssociationId>aclassoc-1</networkAclAssociationId><networkAclId>acl-1</networkAclId><subnetId>subnet-1</subnetId></item></associationSet>
 </item></networkAclSet>
 </DescribeNetworkAclsResponse>`,
+	// The subnet has no association of its own: the VPC's main table applies.
+	"ec2:DescribeRouteTables": `<DescribeRouteTablesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+<requestId>r3b</requestId>
+<routeTableSet>
+  <item><routeTableId>rtb-main</routeTableId><vpcId>vpc-1</vpcId>
+    <routeSet>
+      <item><destinationCidrBlock>10.0.0.0/16</destinationCidrBlock><gatewayId>local</gatewayId><state>active</state><origin>CreateRouteTable</origin></item>
+      <item><destinationCidrBlock>0.0.0.0/0</destinationCidrBlock><gatewayId>igw-1</gatewayId><state>active</state><origin>CreateRoute</origin></item>
+    </routeSet>
+    <associationSet><item><routeTableAssociationId>rtbassoc-1</routeTableAssociationId><routeTableId>rtb-main</routeTableId><main>true</main>
+      <associationState><state>associated</state></associationState></item></associationSet>
+  </item>
+  <item><routeTableId>rtb-private</routeTableId><vpcId>vpc-1</vpcId>
+    <routeSet><item><destinationCidrBlock>0.0.0.0/0</destinationCidrBlock><natGatewayId>nat-1</natGatewayId><state>active</state></item></routeSet>
+    <associationSet><item><routeTableAssociationId>rtbassoc-2</routeTableAssociationId><routeTableId>rtb-private</routeTableId><subnetId>subnet-9</subnetId><main>false</main></item></associationSet>
+  </item>
+</routeTableSet>
+</DescribeRouteTablesResponse>`,
 	"elbv2:DescribeLoadBalancers": `<DescribeLoadBalancersResponse xmlns="http://elasticloadbalancing.amazonaws.com/doc/2015-12-01/">
 <DescribeLoadBalancersResult><LoadBalancers>
   <member><LoadBalancerArn>arn:lb/web</LoadBalancerArn><LoadBalancerName>web-alb</LoadBalancerName><Scheme>internet-facing</Scheme>
@@ -116,6 +136,9 @@ type fakeAWS struct {
 	mu      sync.Mutex
 	calls   []string
 	nacl    string // the association.subnet-id filter value seen
+	routes  string // the vpc-id filter value seen
+	// failRoutes answers DescribeRouteTables with UnauthorizedOperation (an M5 IAM policy).
+	failRoutes bool
 }
 
 func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +154,15 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if action == "DescribeNetworkAcls" {
 		f.nacl = r.Form.Get("Filter.1.Name") + "=" + r.Form.Get("Filter.1.Value.1")
 	}
+	if action == "DescribeRouteTables" {
+		f.routes = r.Form.Get("Filter.1.Name") + "=" + r.Form.Get("Filter.1.Value.1")
+	}
 	f.mu.Unlock()
+	if f.failRoutes && action == "DescribeRouteTables" {
+		w.WriteHeader(403)
+		_, _ = w.Write([]byte(`<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>not authorized</Message></Error></Errors><RequestID>x</RequestID></Response>`))
+		return
+	}
 	if f.failELB && svc != "ec2" {
 		w.WriteHeader(503)
 		_, _ = w.Write([]byte(`<ErrorResponse><Error><Code>ServiceUnavailable</Code><Message>down</Message></Error><RequestId>x</RequestId></ErrorResponse>`))
@@ -185,6 +216,9 @@ func TestProviderAgainstRecordedAPI(t *testing.T) {
 	}
 	if fake.nacl != "association.subnet-id=subnet-1" {
 		t.Errorf("nacl filter %q", fake.nacl)
+	}
+	if fake.routes != "vpc-id=vpc-1" {
+		t.Errorf("route table filter %q", fake.routes)
 	}
 	for _, c := range fake.calls {
 		action := c[strings.Index(c, ":")+1:]
@@ -245,6 +279,26 @@ func TestLBFailureIsIncompleteNotFatal(t *testing.T) {
 	if !vs[0].Open || vs[0].Complete || vs[1].Open || vs[1].Complete ||
 		!strings.Contains(strings.Join(vs[1].Evidence, "\n"), "cloud:incomplete (load balancers unreadable") {
 		t.Fatalf("%+v", vs)
+	}
+}
+
+// An IAM policy from before M10 (no ec2:DescribeRouteTables) does not fail the host: its
+// direct paths are undetermined (not open, not complete), so nothing is raised or lowered.
+func TestRouteTablesUnreadableIsUndetermined(t *testing.T) {
+	fake := &fakeAWS{failRoutes: true}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	cfg := awssdk.Config{Region: "eu-west-1", Credentials: credentials.NewStaticCredentialsProvider("AKIDTEST", "x", ""),
+		Retryer: func() awssdk.Retryer { return awssdk.NopRetryer{} }}
+	p := NewWithConfig(cfg, Options{Endpoint: srv.URL})
+	vs, err := p.Evaluate(context.Background(), cloud.Host{InstanceID: "i-0abc", Region: "eu-west-1"},
+		[]cloud.Port{{Key: "a", Proto: "tcp", Addr: "0.0.0.0", Port: 443, AgentLevel: 3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := strings.Join(vs[0].Evidence, "\n")
+	if vs[0].Open || vs[0].Complete || !strings.Contains(ev, "cloud:undetermined (eni-1: route tables not read") || !strings.Contains(ev, "UnauthorizedOperation") {
+		t.Fatalf("%+v", vs[0])
 	}
 }
 

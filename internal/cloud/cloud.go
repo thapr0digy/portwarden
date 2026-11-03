@@ -40,6 +40,12 @@ type Verdict struct {
 // IncompleteEvidence prefixes the evidence line naming what was not read in full.
 const IncompleteEvidence = "cloud:incomplete"
 
+// UndeterminedEvidence prefixes the evidence line of a verdict the cloud's data cannot
+// decide (a layer not read, a route to an appliance, a rule naming what cannot be
+// resolved). Such a verdict is not open and not complete: the listener keeps its level,
+// neither raised nor lowered.
+const UndeterminedEvidence = "cloud:undetermined"
+
 // Provider evaluates one host's listeners. Verdicts come in the order of ports.
 type Provider interface {
 	Evaluate(ctx context.Context, h Host, ports []Port) ([]Verdict, error)

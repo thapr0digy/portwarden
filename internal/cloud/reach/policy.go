@@ -43,18 +43,14 @@ var notGlobal = MustParse(
 	"2001:db8::/32", "2001:2::/48", "2001:10::/28",
 ))
 
-// Policy is the reach rule with the operator's VPN ranges.
-type Policy struct {
-	vpn     Set
-	trusted Set
-}
+// Policy is the reach rule with the operator's VPN ranges. The zero Policy has none.
+type Policy struct{ vpn Set }
 
 // NewPolicy returns the rule with vpn as the operator's VPN or office ranges, which
 // never count as the internet.
-func NewPolicy(vpn []netip.Prefix) Policy {
-	v := Prefixes(vpn...)
-	return Policy{vpn: v, trusted: v.Union(notGlobal)}
-}
+func NewPolicy(vpn []netip.Prefix) Policy { return Policy{vpn: Prefixes(vpn...)} }
+
+func (p Policy) trusted() Set { return p.vpn.Union(notGlobal) }
 
 // ParseVPN parses the config's vpn_cidrs.
 func ParseVPN(cidrs []string) ([]netip.Prefix, error) {
@@ -71,12 +67,12 @@ func ParseVPN(cidrs []string) ([]netip.Prefix, error) {
 
 // Internet returns the family's addresses that count as the internet.
 func (p Policy) Internet(f Family) Set {
-	return All(f).Subtract(p.trusted)
+	return All(f).Subtract(p.trusted())
 }
 
 // Exposed returns the part of allowed that is the internet (both families).
 func (p Policy) Exposed(allowed Set) Set {
-	return allowed.Subtract(p.trusted)
+	return allowed.Subtract(p.trusted())
 }
 
 // Describe names a set of internet addresses for evidence: "0.0.0.0/0" or "::/0" when it

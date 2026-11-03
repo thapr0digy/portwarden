@@ -20,6 +20,7 @@ import (
 	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
 	"github.com/thapr0digy/portwarden/internal/cloud"
+	"github.com/thapr0digy/portwarden/internal/cloud/reach"
 )
 
 // EC2API is the read-only EC2 subset the look-up calls.
@@ -27,6 +28,7 @@ type EC2API interface {
 	ec2.DescribeInstancesAPIClient
 	ec2.DescribeSecurityGroupsAPIClient
 	ec2.DescribeNetworkAclsAPIClient
+	ec2.DescribeRouteTablesAPIClient
 }
 
 // ELBv2API is the read-only ELBv2 subset the look-up calls.
@@ -68,6 +70,8 @@ type Options struct {
 	// Regions, when set, are the only regions looked up (a host block naming another is an
 	// error). At most 64 regions get clients either way.
 	Regions []string
+	// Policy is the reach rule: the operator's VPN ranges never count as the internet.
+	Policy reach.Policy
 }
 
 const maxRegions = 64
@@ -212,7 +216,18 @@ func (p *Provider) Evaluate(ctx context.Context, h cloud.Host, ports []cloud.Por
 	if aclTrunc {
 		incomplete = append(incomplete, "network ACLs truncated")
 	}
-	verdicts := Evaluate(HostData{Instance: inst, SecurityGroups: sgs, NACLs: nacls, LBs: lbs}, ports)
+	data := HostData{Instance: inst, SecurityGroups: sgs, NACLs: nacls, LBs: lbs, Policy: p.opts.Policy}
+	// Route tables are read after the M5 permissions: one that fails (an IAM policy without
+	// ec2:DescribeRouteTables) leaves the direct paths undetermined, never fails the host.
+	rts, rtTrunc, err := p.routeTables(ctx, c, instanceVPCs(inst))
+	switch {
+	case err != nil:
+		data.RoutesErr = err.Error()
+	case rtTrunc:
+		incomplete = append(incomplete, "route tables truncated")
+	}
+	data.RouteTables = rts
+	verdicts := Evaluate(data, ports)
 	if len(incomplete) > 0 {
 		for i := range verdicts {
 			verdicts[i].Complete = false
@@ -279,6 +294,24 @@ func (p *Provider) nacls(ctx context.Context, c Clients, subnets []string) (map[
 				}
 			}
 		}
+	}
+	return out, pg.HasMorePages(), nil
+}
+
+func (p *Provider) routeTables(ctx context.Context, c Clients, vpcs []string) ([]ec2types.RouteTable, bool, error) {
+	if len(vpcs) == 0 {
+		return nil, false, nil
+	}
+	var out []ec2types.RouteTable
+	pg := ec2.NewDescribeRouteTablesPaginator(c.EC2, &ec2.DescribeRouteTablesInput{
+		Filters: []ec2types.Filter{{Name: awssdk.String("vpc-id"), Values: vpcs}},
+	})
+	for page := 0; pg.HasMorePages() && page < p.opts.MaxPages; page++ {
+		res, err := pg.NextPage(ctx)
+		if err != nil {
+			return nil, false, fmt.Errorf("aws: DescribeRouteTables: %w", err)
+		}
+		out = append(out, res.RouteTables...)
 	}
 	return out, pg.HasMorePages(), nil
 }

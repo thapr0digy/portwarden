@@ -12,7 +12,8 @@
 # Environment: VERSION (default: from the latest v* tag, else 0.0.0~git<date>.<sha>),
 # SOURCE_DATE_EPOCH and COMMIT (default: from git; set all three to build without git),
 # DIST_DIR (default dist), ARCHES (default "amd64 arm64"), SBOM=0 skips the SBOMs.
-# CYCLONEDX and NFPM below are tools, built for the host.
+# CYCLONEDX and NFPM below are tools, built for the host from the module cache when it
+# holds them (see install_tool), so a build needs no network once they were fetched.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -33,6 +34,19 @@ safe_dist_dir() {
 		echo "dist: refusing DIST_DIR=${1} (/, \$HOME or a top-level directory)" >&2
 		return 1
 	fi
+}
+
+# install_tool <pkg@version> <dir>: builds a pinned tool into dir. First from the module
+# cache alone (GOPROXY=file://...): `go install pkg@version` otherwise asks the proxy
+# about the package's own path and the module's deprecation even when the module is
+# cached, so a slow or unreachable proxy failed the build at random. Falls back to the
+# configured GOPROXY when the cache lacks the tool.
+install_tool() {
+	local tool=$1 dir=$2 cache
+	cache="file://$(go env GOMODCACHE)/cache/download"
+	GOBIN="$dir" GOPROXY="$cache" go install "$tool" 2>/dev/null && return 0
+	echo "dist: $tool is not in the module cache; fetching it" >&2
+	GOBIN="$dir" go install "$tool"
 }
 
 sha256() {
@@ -99,6 +113,8 @@ portwarden ($VERSION-1) unstable; urgency=medium
 CHANGELOG
 gzip -n -9 <"$out/work/changelog.Debian" >"$out/work/changelog.Debian.gz"
 
+install_tool "$NFPM" "$out/work"
+
 # The nFPM configs name ${PW_*} placeholders; nFPM does not expand them everywhere
 # (contents, mtime), so they are substituted here into a rendered copy.
 for arch in $ARCHES; do
@@ -106,7 +122,7 @@ for arch in $ARCHES; do
 		sed -e "s#\${PW_ARCH}#$arch#g" -e "s#\${PW_VERSION}#$VERSION#g" -e "s#\${PW_MTIME}#$mtime#g" \
 			-e "s#\${PW_BIN}#$out/bin/linux_$arch#g" -e "s#\${PW_WORK}#$out/work#g" \
 			"deploy/packaging/nfpm-$pkg.yaml" >"$out/work/nfpm-$pkg-$arch.yaml"
-		go run "$NFPM" pkg --packager deb --config "$out/work/nfpm-$pkg-$arch.yaml" --target "$out/" >/dev/null
+		"$out/work/nfpm" pkg --packager deb --config "$out/work/nfpm-$pkg-$arch.yaml" --target "$out/" >/dev/null
 	done
 done
 
@@ -115,7 +131,7 @@ if [ "${SBOM:-1}" != 0 ]; then
 	# cyclonedx-gomod reads each binary's embedded build info (bin mode: it needs no git
 	# metadata, which it cannot read in a git worktree); no serial or time, so the SBOMs
 	# are reproducible too.
-	GOBIN="$out/work" go install "$CYCLONEDX"
+	install_tool "$CYCLONEDX" "$out/work"
 	for arch in $ARCHES; do
 		for c in "${COMMANDS[@]}"; do
 			# GOOS/GOARCH: it labels the purls with them (its own platform otherwise).

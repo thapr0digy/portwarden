@@ -1,0 +1,73 @@
+# kube-proxy (iptables mode, v1.30 chain layout) for one NodePort service default/web
+# (port 80, nodePort 30080, two endpoints) and a CNI portmap hostPort pod (8088 -> 10.42.0.12:80),
+# with flannel's forward accepts. Loaded with iptables-restore in a scratch netns and
+# recorded with iptables-save / nft -j (see m3-ledger.md).
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+:CNI-HOSTPORT-DNAT - [0:0]
+:CNI-HOSTPORT-MASQ - [0:0]
+:CNI-HOSTPORT-SETMARK - [0:0]
+:CNI-DN-1b2a4c0e8d6f2a1b3c4d5 - [0:0]
+:KUBE-EXT-ABCDEF1234567890 - [0:0]
+:KUBE-MARK-MASQ - [0:0]
+:KUBE-NODEPORTS - [0:0]
+:KUBE-POSTROUTING - [0:0]
+:KUBE-SEP-AAAAAAAAAAAAAAAA - [0:0]
+:KUBE-SEP-BBBBBBBBBBBBBBBB - [0:0]
+:KUBE-SERVICES - [0:0]
+:KUBE-SVC-ABCDEF1234567890 - [0:0]
+-A PREROUTING -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+-A PREROUTING -m addrtype --dst-type LOCAL -j CNI-HOSTPORT-DNAT
+-A OUTPUT -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+-A OUTPUT -m addrtype --dst-type LOCAL -j CNI-HOSTPORT-DNAT
+-A POSTROUTING -m comment --comment "kubernetes postrouting rules" -j KUBE-POSTROUTING
+-A POSTROUTING -m comment --comment "CNI portfwd requiring masquerade" -j CNI-HOSTPORT-MASQ
+-A CNI-DN-1b2a4c0e8d6f2a1b3c4d5 -s 10.42.0.0/24 -p tcp -m tcp --dport 8088 -j CNI-HOSTPORT-SETMARK
+-A CNI-DN-1b2a4c0e8d6f2a1b3c4d5 -s 127.0.0.1/32 -p tcp -m tcp --dport 8088 -j CNI-HOSTPORT-SETMARK
+-A CNI-DN-1b2a4c0e8d6f2a1b3c4d5 -p tcp -m tcp --dport 8088 -j DNAT --to-destination 10.42.0.12:80
+-A CNI-HOSTPORT-DNAT -p tcp -m comment --comment "dnat name: \"cbr0\" id: \"0f3e\"" -m multiport --dports 8088 -j CNI-DN-1b2a4c0e8d6f2a1b3c4d5
+-A CNI-HOSTPORT-MASQ -m mark --mark 0x2000/0x2000 -j MASQUERADE
+-A CNI-HOSTPORT-SETMARK -m comment --comment "CNI portfwd masquerade mark" -j MARK --set-xmark 0x2000/0x2000
+-A KUBE-EXT-ABCDEF1234567890 -m comment --comment "masquerade traffic for default/web:http external destinations" -j KUBE-MARK-MASQ
+-A KUBE-EXT-ABCDEF1234567890 -j KUBE-SVC-ABCDEF1234567890
+-A KUBE-MARK-MASQ -j MARK --set-xmark 0x4000/0x4000
+-A KUBE-NODEPORTS -p tcp -m comment --comment "default/web:http" -m tcp --dport 30080 -j KUBE-EXT-ABCDEF1234567890
+-A KUBE-POSTROUTING -m mark ! --mark 0x4000/0x4000 -j RETURN
+-A KUBE-POSTROUTING -j MARK --set-xmark 0x4000/0x0
+-A KUBE-POSTROUTING -m comment --comment "kubernetes service traffic requiring SNAT" -j MASQUERADE --random-fully
+-A KUBE-SEP-AAAAAAAAAAAAAAAA -s 10.42.0.9/32 -m comment --comment "default/web:http" -j KUBE-MARK-MASQ
+-A KUBE-SEP-AAAAAAAAAAAAAAAA -p tcp -m comment --comment "default/web:http" -m tcp -j DNAT --to-destination 10.42.0.9:8080
+-A KUBE-SEP-BBBBBBBBBBBBBBBB -s 10.42.0.10/32 -m comment --comment "default/web:http" -j KUBE-MARK-MASQ
+-A KUBE-SEP-BBBBBBBBBBBBBBBB -p tcp -m comment --comment "default/web:http" -m tcp -j DNAT --to-destination 10.42.0.10:8080
+-A KUBE-SERVICES -d 10.43.12.34/32 -p tcp -m comment --comment "default/web:http cluster IP" -m tcp --dport 80 -j KUBE-SVC-ABCDEF1234567890
+-A KUBE-SERVICES -m comment --comment "kubernetes service nodeports; NOTE: this must be the last rule in this chain" -m addrtype --dst-type LOCAL -j KUBE-NODEPORTS
+-A KUBE-SVC-ABCDEF1234567890 ! -s 10.42.0.0/16 -d 10.43.12.34/32 -p tcp -m comment --comment "default/web:http cluster IP" -m tcp --dport 80 -j KUBE-MARK-MASQ
+-A KUBE-SVC-ABCDEF1234567890 -m comment --comment "default/web:http -> 10.42.0.10:8080" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-BBBBBBBBBBBBBBBB
+-A KUBE-SVC-ABCDEF1234567890 -m comment --comment "default/web:http -> 10.42.0.9:8080" -j KUBE-SEP-AAAAAAAAAAAAAAAA
+COMMIT
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:KUBE-EXTERNAL-SERVICES - [0:0]
+:KUBE-FIREWALL - [0:0]
+:KUBE-FORWARD - [0:0]
+:KUBE-NODEPORTS - [0:0]
+:KUBE-PROXY-FIREWALL - [0:0]
+:KUBE-SERVICES - [0:0]
+-A INPUT -m conntrack --ctstate NEW -m comment --comment "kubernetes load balancer firewall" -j KUBE-PROXY-FIREWALL
+-A INPUT -m comment --comment "kubernetes health check service ports" -j KUBE-NODEPORTS
+-A INPUT -m conntrack --ctstate NEW -m comment --comment "kubernetes externally visible service portals" -j KUBE-EXTERNAL-SERVICES
+-A INPUT -j KUBE-FIREWALL
+-A FORWARD -m conntrack --ctstate NEW -m comment --comment "kubernetes load balancer firewall" -j KUBE-PROXY-FIREWALL
+-A FORWARD -m comment --comment "kubernetes forwarding rules" -j KUBE-FORWARD
+-A FORWARD -m conntrack --ctstate NEW -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+-A FORWARD -m conntrack --ctstate NEW -m comment --comment "kubernetes externally visible service portals" -j KUBE-EXTERNAL-SERVICES
+-A KUBE-FIREWALL ! -s 127.0.0.0/8 -d 127.0.0.0/8 -m comment --comment "block incoming localnet connections" -m conntrack ! --ctstate RELATED,ESTABLISHED,DNAT -j DROP
+-A KUBE-FORWARD -m conntrack --ctstate INVALID -j DROP
+-A KUBE-FORWARD -m comment --comment "kubernetes forwarding rules" -m mark --mark 0x4000/0x4000 -j ACCEPT
+-A KUBE-FORWARD -m comment --comment "kubernetes forwarding conntrack rule" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+COMMIT

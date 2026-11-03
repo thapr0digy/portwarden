@@ -499,7 +499,7 @@ func (m Match) applies(p pktState) bool {
 	switch m.Field {
 	case FieldDPort, FieldSPort:
 		return m.Proto == "" || m.Proto == p.proto
-	case FieldSAddr, FieldDAddr:
+	case FieldSAddr, FieldDAddr, FieldL4Proto:
 		return m.Family == 0 || m.Family == p.family
 	}
 	return true
@@ -524,10 +524,20 @@ func (m Match) contains(p pktState, env Env) (tri, string) {
 				return yes, ""
 			}
 		}
+		for _, r := range m.Ranges {
+			if r.Lo.IsUnspecified() && (r.Hi == netip.MustParseAddr("255.255.255.255") || r.Hi == maxIPv6) {
+				return yes, ""
+			}
+		}
 		return no, ""
 	case FieldDAddr:
 		for _, pfx := range m.Pfx {
 			if pfx.Contains(p.daddr) {
+				return yes, ""
+			}
+		}
+		for _, r := range m.Ranges {
+			if r.Lo.Compare(p.daddr) <= 0 && p.daddr.Compare(r.Hi) <= 0 {
 				return yes, ""
 			}
 		}
@@ -561,6 +571,8 @@ func (m Match) contains(p pktState, env Env) (tri, string) {
 	}
 	return maybe, m.Unknown
 }
+
+var maxIPv6 = netip.MustParseAddr("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
 
 func portIn(ranges []PortRange, port uint16) bool {
 	for _, r := range ranges {

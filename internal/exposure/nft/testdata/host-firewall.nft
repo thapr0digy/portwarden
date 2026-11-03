@@ -1,0 +1,40 @@
+table inet pwfx_filter {
+	set allowed_tcp {
+		type inet_service
+		elements = { 22, 443 }
+	}
+	set admin_nets {
+		type ipv4_addr
+		flags interval
+		elements = { 10.0.0.0/8, 192.168.0.0/16 }
+	}
+	chain input {
+		type filter hook input priority filter; policy drop;
+		ct state established,related accept
+		ct state invalid drop
+		iif "lo" accept
+		meta l4proto { icmp, ipv6-icmp } accept
+		tcp dport @allowed_tcp accept
+		tcp dport { 80, 8443 } accept
+		tcp dport 9000-9100 accept
+		ip saddr @admin_nets tcp dport 5432 accept
+		ip saddr 10.0.0.0/8 tcp dport 6379 accept
+		ip saddr != 10.0.0.0/8 tcp dport 3306 drop
+		udp dport 51820 accept
+		ip6 saddr fe80::/10 udp dport 546 accept
+		iifname "eth*" tcp dport 8000 accept
+		tcp dport 7000 limit rate 10/second accept
+		th dport 7100 accept
+		meta l4proto udp udp dport 7200 accept
+		jump extra
+		tcp dport 8100 counter reject with tcp reset
+	}
+	chain extra {
+		tcp dport 8200 accept
+		tcp dport 8300 return
+		udp dport 8400 goto extra_udp
+	}
+	chain extra_udp {
+		accept
+	}
+}

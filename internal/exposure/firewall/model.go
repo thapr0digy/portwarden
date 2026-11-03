@@ -115,6 +115,9 @@ const (
 	OpNe           // not in the set
 )
 
+// AddrRange is an inclusive address range.
+type AddrRange struct{ Lo, Hi netip.Addr }
+
 // PortRange is an inclusive port range.
 type PortRange struct{ Lo, Hi uint16 }
 
@@ -126,6 +129,7 @@ type Match struct {
 	Family Family // FieldSAddr, FieldDAddr: FamilyIP or FamilyIP6
 	Ports  []PortRange
 	Pfx    []netip.Prefix
+	Ranges []AddrRange // FieldSAddr, FieldDAddr: inclusive address ranges
 	Names  []string
 	Mark   uint32
 	Mask   uint32

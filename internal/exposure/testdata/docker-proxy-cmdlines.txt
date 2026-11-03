@@ -1,0 +1,5 @@
+/usr/bin/docker-proxy -proto udp -host-ip 0.0.0.0 -host-port 18053 -container-ip 172.17.0.2 -container-port 53 -use-listen-fd
+/usr/bin/docker-proxy -proto udp -host-ip :: -host-port 18053 -container-ip 172.17.0.2 -container-port 53 -use-listen-fd
+/usr/bin/docker-proxy -proto tcp -host-ip 0.0.0.0 -host-port 18080 -container-ip 172.17.0.2 -container-port 80 -use-listen-fd
+/usr/bin/docker-proxy -proto tcp -host-ip :: -host-port 18080 -container-ip 172.17.0.2 -container-port 80 -use-listen-fd
+/usr/bin/docker-proxy -proto tcp -host-ip 127.0.0.1 -host-port 18081 -container-ip 172.17.0.2 -container-port 81 -use-listen-fd

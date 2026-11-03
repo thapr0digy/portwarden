@@ -14,7 +14,11 @@ type Packet struct {
 	Proto  string // tcp or udp
 	DAddr  netip.Addr
 	DPort  uint16
-	IIf    string
+	// DPortHi, when above DPort, makes the packet stand for every port DPort..DPortHi
+	// at once: the evaluation splits the interval only where a rule tells its ports
+	// apart, and each outcome says which part of it (OrigPort..OrigPortHi) it covers.
+	DPortHi uint16
+	IIf     string
 }
 
 // Env answers the routing questions the rules depend on.
@@ -25,6 +29,11 @@ type Env struct {
 	// Route returns the output interface for a forwarded destination; false when no
 	// connected interface covers it.
 	Route func(netip.Addr) (string, bool)
+	// AddrCuts lists, sorted, the addresses where IsLocal or Route may change from the
+	// address before (a host address and the one after it, a connected prefix's first
+	// address and the one after its last). A destination range (a DNAT to an address
+	// range) is split there before either is asked; nil treats every range as one piece.
+	AddrCuts []netip.Addr
 }
 
 // Outcome is one way the packet's evaluation can end.
@@ -35,6 +44,16 @@ type Outcome struct {
 	// DAddr and DPort are where the packet ends up (after any DNAT or redirect).
 	DAddr netip.Addr
 	DPort uint16
+	// DAddrHi and DPortHi are set when a DNAT to a range leaves the destination any
+	// address DAddr..DAddrHi or port DPort..DPortHi (invalid and 0 for a single one).
+	DAddrHi netip.Addr
+	DPortHi uint16
+	// Ranged is set for a packet that stood for a port interval (Packet.DPortHi):
+	// OrigPort..OrigPortHi is the part of it this outcome covers, and PortKept says the
+	// destination port is the packet's own (a port-preserving range DNAT, or none).
+	Ranged               bool
+	OrigPort, OrigPortHi uint16
+	PortKept             bool
 	// Origin and Where locate the decision: for a drop the dropping chain (a policy reads
 	// "policy ip filter INPUT"); for an accept the last filter chain that accepted it, or
 	// "" when no filter chain saw the packet.
@@ -127,15 +146,20 @@ func (rs *Ruleset) Evaluate(p Packet, env Env) Result {
 	for _, c := range rs.Chains {
 		e.index[chainKey{c.Origin, c.Family, c.Table, c.Name}] = c
 	}
+	hi := p.DPort
+	if p.DPortHi > p.DPort {
+		hi = p.DPortHi
+	}
 	start := state{pkt: pktState{
-		family: p.Family, proto: p.Proto, daddr: p.DAddr, dport: p.DPort,
+		family: p.Family, proto: p.Proto, daddr: p.DAddr, daddrHi: p.DAddr, dport: p.DPort, dportHi: hi,
+		odport: p.DPort, odportHi: hi, portKept: true, ranged: hi != p.DPort,
 		iif: p.IIf, oifKnown: true, markKnown: true,
 	}}
 	var out []Outcome
 	passed, final := e.hook(HookPrerouting, []state{start})
 	out = append(out, final...)
 	var local, fwd []state
-	for _, s := range passed {
+	for _, s := range e.splitAddrs(passed, env.AddrCuts) {
 		switch {
 		case s.lost:
 			out = append(out, s.outcome(false, true))
@@ -165,15 +189,23 @@ func (rs *Ruleset) Evaluate(p Packet, env Env) Result {
 
 // pktState is the packet as the rules see it; comparable, so paths can be deduplicated.
 type pktState struct {
-	family          Family
-	proto           string
-	daddr           netip.Addr
-	dport           uint16
-	iif, oif        string
-	oifKnown        bool
-	mark            uint32
-	markKnown       bool
-	dnat, forwarded bool
+	family Family
+	proto  string
+	// daddr..daddrHi and dport..dportHi: the destination, an interval after a range
+	// DNAT or for a ranged packet. Matches see daddr and dport once the state has been
+	// split so that the whole interval decides alike.
+	daddr, daddrHi netip.Addr
+	dport, dportHi uint16
+	// odport..odportHi: the packet's own ports this path covers; portKept: the
+	// destination port is still the packet's own, port for port.
+	odport, odportHi uint16
+	portKept         bool
+	ranged           bool
+	iif, oif         string
+	oifKnown         bool
+	mark             uint32
+	markKnown        bool
+	dnat, forwarded  bool
 }
 
 // state is one path through the rules.
@@ -222,6 +254,15 @@ func (s state) outcome(accept, undecidable bool) Outcome {
 	o := Outcome{
 		Accept: accept, Forwarded: s.pkt.forwarded, DAddr: s.pkt.daddr, DPort: s.pkt.dport,
 		Origin: s.origin, Where: s.where, Undecidable: undecidable,
+	}
+	if s.pkt.daddrHi != s.pkt.daddr {
+		o.DAddrHi = s.pkt.daddrHi
+	}
+	if s.pkt.dportHi != s.pkt.dport {
+		o.DPortHi = s.pkt.dportHi
+	}
+	if s.pkt.ranged {
+		o.Ranged, o.OrigPort, o.OrigPortHi, o.PortKept = true, s.pkt.odport, s.pkt.odportHi, s.pkt.portKept
 	}
 	if s.maybe != "" {
 		o.Maybe = strings.Split(s.maybe, ",")
@@ -348,6 +389,7 @@ func (e *evaluator) rule(c *Chain, r *Rule, s state, depth int) (terms []termina
 		}
 		switch x := x.(type) {
 		case Match:
+			cur = e.splitFor(x, cur)
 			var keep []state
 			for _, st := range cur {
 				switch m, why := x.eval(st.pkt, e.env); m {
@@ -376,9 +418,11 @@ func (e *evaluator) rule(c *Chain, r *Rule, s state, depth int) (terms []termina
 			if x.Kind == NATOther {
 				continue
 			}
-			for i := range cur {
-				applyNAT(&cur[i], x, e.env)
+			var nated []state
+			for _, st := range cur {
+				nated = append(nated, e.applyNAT(st, x)...)
 			}
+			cur = nated
 			if e.base.Type == TypeNAT {
 				for _, st := range cur {
 					terms = append(terms, terminal{st, VerdictAccept, c})
@@ -397,10 +441,30 @@ func (e *evaluator) rule(c *Chain, r *Rule, s state, depth int) (terms []termina
 				}
 				continue
 			}
+			if x.Pick {
+				// numgen: exactly one element, any of them.
+				var rest []state
+				for _, st := range cur {
+					st = st.withMaybe("numgen")
+					for _, el := range x.Elems {
+						t, n, rt := e.verdict(c, el.Verdict, st, depth)
+						terms, next, returned = append(terms, t...), append(next, n...), append(returned, rt...)
+					}
+					if !x.PickAll {
+						rest = append(rest, st)
+					}
+				}
+				cur = rest
+				continue
+			}
 			var rest []state
 			for _, st := range cur {
 				pending := []state{st}
 				for _, el := range x.Elems {
+					pending = e.splitFor(el.Match, pending)
+					for _, m := range el.And {
+						pending = e.splitFor(m, pending)
+					}
 					var unmatched []state
 					for _, ps := range pending {
 						switch m, why := el.eval(ps.pkt, e.env); m {
@@ -480,26 +544,56 @@ func (e *evaluator) verdict(c *Chain, v Verdict, s state, depth int) (terms []te
 	return nil, []state{s}, nil
 }
 
-func applyNAT(s *state, n NAT, env Env) {
+// applyNAT rewrites the destination. A port range splits the path: the part of its
+// ports inside the range keeps them (unless the NAT is random), the rest may get any
+// port of the range.
+func (e *evaluator) applyNAT(s state, n NAT) []state {
 	if n.Unknown != "" {
-		*s = s.withMaybe(n.Unknown)
+		s = s.withMaybe(n.Unknown)
 		s.lost = true
-		return
+		return []state{s}
 	}
 	if n.Kind == NATDnat && n.Addr.IsValid() {
-		s.pkt.daddr = n.Addr.Unmap()
-	}
-	if n.Port != 0 {
-		s.pkt.dport = n.Port
-	}
-	s.pkt.dnat = true
-	if n.Kind == NATRedirect {
-		// Redirect delivers to the host itself: keep a local destination.
-		if !env.IsLocal(s.pkt.daddr) {
-			s.lost = true
-			*s = s.withMaybe("redirect")
+		s.pkt.daddr, s.pkt.daddrHi = n.Addr.Unmap(), n.Addr.Unmap()
+		if n.AddrHi.IsValid() && n.AddrHi.Unmap().Compare(s.pkt.daddr) > 0 {
+			s.pkt.daddrHi = n.AddrHi.Unmap()
+			s = s.withMaybe("dnat address range") // which address a connection gets
 		}
 	}
+	s.pkt.dnat = true
+	if n.Kind == NATRedirect && !e.env.IsLocal(s.pkt.daddr) {
+		// Redirect delivers to the host itself: keep a local destination.
+		s.lost = true
+		s = s.withMaybe("redirect")
+	}
+	if n.Port == 0 {
+		return []state{s}
+	}
+	lo, hi := n.Port, max(n.Port, n.PortHi)
+	setAny := func(st state) state {
+		st.pkt.dport, st.pkt.dportHi = lo, hi
+		st.pkt.portKept = lo == hi && st.pkt.odport == lo && st.pkt.odportHi == lo
+		if lo != hi {
+			st = st.withMaybe("dnat port range") // which port a connection gets
+		}
+		return st
+	}
+	if lo == hi || n.Random {
+		return []state{setAny(s)}
+	}
+	// The kernel (nf_nat_core get_unique_tuple) keeps the packet's port when it is in
+	// the range and the resulting tuple is unused; it picks another port of the range
+	// only for a tuple already in use. The first packet of a new connection from an
+	// arbitrary outside source makes a tuple nothing else uses, so its port is kept.
+	var out []state
+	for _, piece := range splitPorts(s, portCuts([]PortRange{{lo, hi}})) {
+		if piece.pkt.dport >= lo && piece.pkt.dportHi <= hi {
+			out = append(out, piece) // inside the range: the port is kept
+		} else {
+			out = append(out, setAny(piece))
+		}
+	}
+	return out
 }
 
 // dedupe drops identical paths, keeping order, and flags truncation past the bound.
@@ -534,6 +628,8 @@ func dedupeOutcomes(in []Outcome) []Outcome {
 
 func outcomeEqual(a, b Outcome) bool {
 	return a.Accept == b.Accept && a.Forwarded == b.Forwarded && a.DAddr == b.DAddr && a.DPort == b.DPort &&
+		a.DAddrHi == b.DAddrHi && a.DPortHi == b.DPortHi && a.Ranged == b.Ranged &&
+		a.OrigPort == b.OrigPort && a.OrigPortHi == b.OrigPortHi && a.PortKept == b.PortKept &&
 		a.Origin == b.Origin && a.Where == b.Where && a.Undecidable == b.Undecidable &&
 		slices.Equal(a.Maybe, b.Maybe) && slices.Equal(a.Notes, b.Notes)
 }

@@ -11,6 +11,7 @@ import (
 type owner struct {
 	Cookie uint64
 	Key    model.ListenerKey
+	V6Only model.V6Only
 	Proc   model.Process
 }
 
@@ -25,13 +26,21 @@ type owner struct {
 // only the host's.
 func join(hostNetNS uint32, tcp, udp []diagSocket, owners []owner, at time.Time) []model.Observation {
 	procs := make(map[uint64][]model.Process, len(owners))
+	ownerV6 := make(map[uint64]model.V6Only, len(owners))
 	for _, o := range owners {
 		procs[o.Cookie] = append(procs[o.Cookie], o.Proc)
+		if o.V6Only != model.V6OnlyUnknown {
+			ownerV6[o.Cookie] = o.V6Only
+		}
 	}
 
 	obs := make([]model.Observation, 0, len(tcp)+len(udp)+len(owners))
-	emit := func(cookie uint64, key model.ListenerKey, holders []model.Process) {
-		base := model.Observation{Kind: model.Opened, Cookie: cookie, Key: key, At: at, Source: model.SourceBaseline}
+	// A dump's IPV6_V6ONLY is used, else the owner record's.
+	emit := func(cookie uint64, key model.ListenerKey, v6 model.V6Only, holders []model.Process) {
+		if v6 == model.V6OnlyUnknown {
+			v6 = ownerV6[cookie]
+		}
+		base := model.Observation{Kind: model.Opened, Cookie: cookie, Key: key, At: at, Source: model.SourceBaseline, V6Only: v6}
 		if len(holders) == 0 {
 			obs = append(obs, base)
 			return
@@ -43,14 +52,14 @@ func join(hostNetNS uint32, tcp, udp []diagSocket, owners []owner, at time.Time)
 		}
 	}
 	for _, s := range tcp {
-		emit(s.Cookie, model.NewKey(hostNetNS, model.ProtoTCP, s.Addr, s.Port), procs[s.Cookie])
+		emit(s.Cookie, model.NewKey(hostNetNS, model.ProtoTCP, s.Addr, s.Port), s.V6Only, procs[s.Cookie])
 	}
 	for _, s := range udp {
-		emit(s.Cookie, model.NewKey(hostNetNS, model.ProtoUDP, s.Addr, s.Port), procs[s.Cookie])
+		emit(s.Cookie, model.NewKey(hostNetNS, model.ProtoUDP, s.Addr, s.Port), s.V6Only, procs[s.Cookie])
 	}
 	for _, o := range owners {
 		if o.Key.NetNS != hostNetNS {
-			emit(o.Cookie, o.Key, []model.Process{o.Proc})
+			emit(o.Cookie, o.Key, o.V6Only, []model.Process{o.Proc})
 		}
 	}
 	return obs

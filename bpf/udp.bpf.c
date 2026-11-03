@@ -21,6 +21,7 @@ struct udp_socket {
 	__u16 family;
 	__u16 port; // host byte order
 	__u8 addr[16];
+	__u8 v6only; // 0 IPv4, 1 dual-stack, 2 IPV6_V6ONLY; in what was padding
 };
 
 // Puts struct udp_socket in the object's BTF, so bpf2go can generate it for the layout test.
@@ -44,6 +45,9 @@ int udp_sockets(struct bpf_iter__udp *ctx)
 	rec.family = sk->__sk_common.skc_family;
 	rec.port = sk->__sk_common.skc_num;
 	if (rec.family == AF_INET6) {
+		// 0 (not read) on a kernel without the field.
+		if (bpf_core_field_exists(sk->__sk_common.skc_ipv6only))
+			rec.v6only = BPF_CORE_READ_BITFIELD(&sk->__sk_common, skc_ipv6only) ? 2 : 1;
 		for (i = 0; i < 16; i++)
 			rec.addr[i] = sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr8[i];
 	} else {

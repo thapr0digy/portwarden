@@ -94,6 +94,23 @@ const (
 	SourceReconcile
 )
 
+// EvidenceV6Only is the exposure evidence of a v6-only [::] listener: the agent writes
+// it (exposure) and the inventory reads it to probe such a listener over IPv6 only.
+const EvidenceV6Only = "bind:any (IPv6 only)"
+
+// V6Only is an IPv6 socket's IPV6_V6ONLY flag as the kernel reports it. It is fixed
+// once the socket is bound, so a listener's value never changes.
+type V6Only uint8
+
+const (
+	// V6OnlyUnknown: not read (an IPv4 socket, or a source that did not say).
+	V6OnlyUnknown V6Only = iota
+	// V6OnlyOff: a dual-stack socket; bound to [::] it takes IPv4 too.
+	V6OnlyOff
+	// V6OnlyOn: IPv6 only.
+	V6OnlyOn
+)
+
 // Observation is a single listener open or close, as seen by a collector.
 type Observation struct {
 	Kind   Kind
@@ -102,4 +119,6 @@ type Observation struct {
 	Proc   Process
 	At     time.Time
 	Source Source
+	// V6Only is the socket's IPV6_V6ONLY flag (Opened only).
+	V6Only V6Only
 }

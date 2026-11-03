@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -184,5 +185,47 @@ func TestExecRunner(t *testing.T) {
 	}
 	if _, err := ExecRunner(context.Background(), "sh", "-c", "echo nope >&2; exit 3"); err == nil || !strings.Contains(err.Error(), "nope") {
 		t.Fatalf("failure: %v", err)
+	}
+}
+
+func TestMergePartial(t *testing.T) {
+	cases := []struct {
+		name string
+		in   MergeInput
+		want []string
+	}{
+		{"all read", MergeInput{NFT: readFixture(t, "docker-iptables-nft.json"), IPT4: readFixture(t, "docker-iptables-nft.v4.txt"), IPT6: readFixture(t, "docker-iptables-nft.v6.txt")}, nil},
+		{"nft-only host", MergeInput{NFT: []byte(`{"nftables":[]}`), IPT4Err: fmt.Errorf("iptables-save: %w", ErrToolMissing), IPT6Err: fmt.Errorf("ip6tables-save: %w", ErrToolMissing)}, nil},
+		{"iptables denied", MergeInput{NFT: []byte(`{"nftables":[]}`), IPT4Err: errors.New("iptables-save: Permission denied"), IPT6Err: fmt.Errorf("ip6tables-save: %w", ErrToolMissing)},
+			[]string{"iptables-save: Permission denied"}},
+		{"ip6 timed out", MergeInput{IPT4: readFixture(t, "ufw-docker.v4.txt"), IPT6Err: errors.New("ip6tables-save: timed out after 5s"), NFTErr: fmt.Errorf("nft: %w", ErrToolMissing)},
+			[]string{"ip6tables-save: timed out after 5s"}},
+		{"nft unparsable", MergeInput{NFT: []byte(`{"nftables":[{"rule":{"family":"ip","table":"x","chain":"y","expr":[]}}]}`), IPT4: readFixture(t, "ufw-docker.v4.txt")},
+			[]string{"nft: rule for unknown chain ip x y"}},
+		{"iptables unparsable", MergeInput{NFT: []byte(`{"nftables":[]}`), IPT4: []byte("*filter\n")},
+			[]string{"iptables: table filter has no COMMIT (truncated dump)"}},
+		{"legacy tool missing", MergeInput{NFT: []byte(`{"nftables":[]}`), Legacy4Err: fmt.Errorf("iptables-legacy-save: %w", ErrToolMissing)},
+			[]string{"iptables-legacy-save: not installed"}},
+	}
+	for _, c := range cases {
+		fw, err := Merge(c.in)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if !slices.Equal(fw.Partial, c.want) {
+			t.Errorf("%s: partial %q, want %q", c.name, fw.Partial, c.want)
+		}
+	}
+}
+
+func TestExecRunnerPrefersSystemDirs(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/sh", []byte("#!/bin/false\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	out, err := ExecRunner(context.Background(), "sh", "-c", "echo system")
+	if err != nil || string(out) != "system\n" {
+		t.Fatalf("a sh earlier in PATH ran: %q %v", out, err)
 	}
 }

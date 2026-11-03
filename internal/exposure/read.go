@@ -30,24 +30,28 @@ type Runner func(ctx context.Context, name string, args ...string) ([]byte, erro
 // ErrToolMissing is returned by a Runner for a tool that is not installed.
 var ErrToolMissing = errors.New("not installed")
 
-// toolDirs are searched after PATH: the tools live in /usr/sbin, which a service's PATH
-// may lack.
+// toolDirs are searched before PATH: the tools live there, and a service's PATH may
+// lack /usr/sbin.
 var toolDirs = []string{"/usr/sbin", "/sbin", "/usr/bin", "/bin"}
 
 // ExecRunner runs the real tools, each bounded by a 5 s deadline and 64 MiB of output;
 // a cut-off output is an error, never a partial ruleset.
 func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	path, err := exec.LookPath(name)
-	if err != nil {
-		for _, dir := range toolDirs {
-			if p, e := exec.LookPath(dir + "/" + name); e == nil {
-				path, err = p, nil
-				break
-			}
+	// The fixed system directories come first: the tool runs with the agent's
+	// CAP_NET_ADMIN, so a same-named binary earlier in PATH must not win.
+	path := ""
+	for _, dir := range toolDirs {
+		if p, e := exec.LookPath(dir + "/" + name); e == nil {
+			path = p
+			break
 		}
 	}
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", name, ErrToolMissing)
+	if path == "" {
+		p, err := exec.LookPath(name)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, ErrToolMissing)
+		}
+		path = p
 	}
 	ctx, cancel := context.WithTimeout(ctx, toolTimeout)
 	defer cancel()
@@ -116,6 +120,10 @@ type Firewall struct {
 	Fingerprint string
 	// Legacy: an iptables-legacy ruleset is in use; it sends no change notifications.
 	Legacy bool
+	// Partial lists the sources that exist but could not be read or parsed
+	// ("iptables-save: Permission denied"). The rules are then incomplete: verdicts
+	// from them are not trusted (see View).
+	Partial []string
 
 	legacyPresent bool
 }
@@ -171,6 +179,9 @@ func Merge(in MergeInput) (*Firewall, error) {
 	}
 	if in.NFTErr != nil {
 		fw.Notes = append(fw.Notes, in.NFTErr.Error())
+		if !errors.Is(in.NFTErr, ErrToolMissing) {
+			fw.Partial = append(fw.Partial, prefixed("nft", in.NFTErr))
+		}
 	}
 
 	type iptDump struct {
@@ -194,9 +205,16 @@ func Merge(in MergeInput) (*Firewall, error) {
 		{firewall.FamilyIP, in.Legacy4, in.Legacy4Err, "iptables-legacy"},
 		{firewall.FamilyIP6, in.Legacy6, in.Legacy6Err, "iptables-legacy"},
 	} {
+		tool := map[firewall.Family]string{firewall.FamilyIP: "iptables-save", firewall.FamilyIP6: "ip6tables-save"}[d.family]
+		if d.origin == "iptables-legacy" {
+			tool = strings.Replace(tool, "tables-save", "tables-legacy-save", 1)
+		}
 		if d.err != nil {
-			if !errors.Is(d.err, ErrToolMissing) || d.origin == "iptables" {
-				fw.Notes = append(fw.Notes, d.err.Error())
+			fw.Notes = append(fw.Notes, d.err.Error())
+			// A missing iptables-save is fine (an nft-only host); a missing legacy tool
+			// after iptables-nft warned that legacy tables exist is not.
+			if !errors.Is(d.err, ErrToolMissing) || d.origin == "iptables-legacy" {
+				fw.Partial = append(fw.Partial, prefixed(tool, d.err))
 			}
 			continue
 		}
@@ -206,6 +224,7 @@ func Merge(in MergeInput) (*Firewall, error) {
 		rs, err := iptables.Parse(d.data, d.family)
 		if err != nil {
 			fw.Notes = append(fw.Notes, err.Error())
+			fw.Partial = append(fw.Partial, prefixed(tool, err))
 			continue
 		}
 		read++
@@ -253,8 +272,17 @@ func Merge(in MergeInput) (*Firewall, error) {
 	if fw.Sources == "" {
 		fw.Sources = "none"
 	}
-	fw.Fingerprint = fingerprint(fw.Rules)
+	fw.Fingerprint = fingerprint(fw.Rules) + "|" + strings.Join(fw.Partial, ";")
 	return fw, nil
+}
+
+// prefixed is "<tool>: <err>" unless the error already names the tool.
+func prefixed(tool string, err error) string {
+	msg := err.Error()
+	if strings.HasPrefix(msg, tool+":") || strings.HasPrefix(msg, strings.TrimSuffix(tool, "-save")+":") {
+		return msg
+	}
+	return tool + ": " + msg
 }
 
 // fingerprint hashes the parsed rules, so counters and dump timestamps do not count.

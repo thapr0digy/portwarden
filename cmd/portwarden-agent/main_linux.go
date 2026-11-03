@@ -22,6 +22,7 @@ import (
 
 	"github.com/thapr0digy/portwarden/internal/agent"
 	"github.com/thapr0digy/portwarden/internal/baseline"
+	"github.com/thapr0digy/portwarden/internal/cgroupns"
 	"github.com/thapr0digy/portwarden/internal/exposure"
 	"github.com/thapr0digy/portwarden/internal/hostid"
 	"github.com/thapr0digy/portwarden/internal/model"
@@ -178,6 +179,15 @@ func run(opts options, log *slog.Logger) error {
 	matcher.Prime(primeCtx)
 	cancelPrime()
 	resolver := procinfo.NewResolver("/proc", "/sys/fs/cgroup", hashMaxBytes)
+	// In a container (a DaemonSet) /proc cgroup paths are relative to a private cgroup
+	// namespace; units, containers and the proxy cgroups need the host's paths.
+	cgns, err := cgroupns.Detect("/proc", "/sys/fs/cgroup")
+	if err != nil {
+		log.Warn("cgroup namespace root unknown; cgroup paths are used as /proc shows them", "err", err.Error())
+	} else if cgns.Root != "" {
+		log.Info("private cgroup namespace; translating cgroup paths", "root", cgns.Root)
+	}
+	resolver.SetCgroupTranslator(cgns.Host)
 	enrich := newEnricher(resolver, matcher, hostNetNS)
 
 	// The first exposure view (firewall and interfaces; each tool read is bounded) is read
@@ -284,7 +294,7 @@ func run(opts options, log *slog.Logger) error {
 	}
 	var proxyConns *probes.ProxyConns
 	if opts.proxyMap == "auto" {
-		proxyConns = startProxyMapping(ctx, opts, hostNetNS, resolver, &agentOpts, log)
+		proxyConns = startProxyMapping(ctx, opts, hostNetNS, resolver, cgns.Host, &agentOpts, log)
 	}
 
 	if opts.tamperInterval > 0 {

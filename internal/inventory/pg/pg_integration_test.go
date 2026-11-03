@@ -269,3 +269,81 @@ func TestConsumerNULDoesNotStall(t *testing.T) {
 		t.Fatalf("%+v %v", ls, err)
 	}
 }
+
+// M7: the host's firewall fingerprint and when it last changed, through the consumer so
+// run and sequence order apply as in production.
+func TestFirewallFingerprint(t *testing.T) {
+	s := open(t)
+	c := &inventory.Consumer{Store: s}
+	ctx := context.Background()
+	t0 := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	var n uint64
+	send := func(kind string, m proto.Message, at time.Time) {
+		t.Helper()
+		n++
+		subject := "asm." + h1 + "." + kind
+		if kind == "cloud" {
+			subject = "pwb.cloud." + h1 + ".exposure"
+		}
+		b, _ := proto.Marshal(m)
+		if err := c.Handle(ctx, subject, b, inventory.Meta{StreamSeq: 2000 + n, StreamTime: at}); err != nil {
+			t.Fatalf("%s: %v", kind, err)
+		}
+	}
+	fp := func(s string) *string { return &s }
+	host := func() inventory.HostView {
+		t.Helper()
+		hv, ok, err := s.Host(ctx, h1)
+		if err != nil || !ok {
+			t.Fatalf("host %v %v", ok, err)
+		}
+		return hv
+	}
+	beat := func(seq uint64, f *string) *asmv1.Heartbeat {
+		return &asmv1.Heartbeat{HostId: h1, RunId: "01A", Seq: seq, BootId: "b1", RunNumber: 3, FirewallFingerprint: f}
+	}
+	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+
+	// An agent without M7: nothing known.
+	send("snapshot", &asmv1.Snapshot{HostId: h1, RunId: "01A", Seq: 1, BootId: "b1", RunNumber: 3, Host: &asmv1.HostInfo{Cloud: "aws"}}, t0)
+	if hv := host(); hv.FirewallFingerprint != nil || hv.FirewallChangedAt != nil {
+		t.Fatalf("no fingerprint sent, stored %v %v", hv.FirewallFingerprint, hv.FirewallChangedAt)
+	}
+	// First sight sets both.
+	send("heartbeat", beat(2, fp(a)), t0.Add(time.Minute))
+	if hv := host(); hv.FirewallFingerprint == nil || *hv.FirewallFingerprint != a || !hv.FirewallChangedAt.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("first sight: %+v", hv)
+	}
+	// The same value (heartbeat, a snapshot's host block) leaves changed_at; a heartbeat
+	// without one (absent) leaves both.
+	send("heartbeat", beat(3, fp(a)), t0.Add(2*time.Minute))
+	send("snapshot", &asmv1.Snapshot{HostId: h1, RunId: "01A", Seq: 4, BootId: "b1", RunNumber: 3, Host: &asmv1.HostInfo{FirewallFingerprint: fp(a)}}, t0.Add(3*time.Minute))
+	send("heartbeat", beat(5, nil), t0.Add(4*time.Minute))
+	if hv := host(); *hv.FirewallFingerprint != a || !hv.FirewallChangedAt.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("unchanged: %+v", hv)
+	}
+	// A cloud verdict's host block is never the agent's firewall.
+	send("cloud", &asmv1.ExposureEvent{HostId: h1, RunId: "cloud-1", Trigger: "cloud", Listener: &asmv1.Listener{Key: "k"},
+		Exposure: &asmv1.Exposure{}, Host: &asmv1.HostInfo{FirewallFingerprint: fp(b)}}, t0.Add(5*time.Minute))
+	if hv := host(); *hv.FirewallFingerprint != a {
+		t.Fatalf("cloud event set it: %+v", hv)
+	}
+	// A change (an exposure event's host block) moves changed_at to the message's time.
+	send("exposure.changed", &asmv1.ExposureEvent{HostId: h1, RunId: "01A", Seq: 7, BootId: "b1", RunNumber: 3, Trigger: "firewall",
+		Listener: &asmv1.Listener{Key: "k"}, Exposure: &asmv1.Exposure{}, Host: &asmv1.HostInfo{FirewallFingerprint: fp(b)}}, t0.Add(6*time.Minute))
+	if hv := host(); *hv.FirewallFingerprint != b || !hv.FirewallChangedAt.Equal(t0.Add(6*time.Minute)) {
+		t.Fatalf("changed: %+v", hv)
+	}
+	// seq 6 arrives late (after 7, a gap): skipped, so it cannot roll the value back.
+	send("heartbeat", beat(6, fp(a)), t0.Add(7*time.Minute))
+	// A leftover of an earlier run of the same boot: skipped.
+	send("heartbeat", &asmv1.Heartbeat{HostId: h1, RunId: "00Z", Seq: 99, BootId: "b1", RunNumber: 2, FirewallFingerprint: fp(a)}, t0.Add(8*time.Minute))
+	if hv := host(); *hv.FirewallFingerprint != b || !hv.FirewallChangedAt.Equal(t0.Add(6*time.Minute)) {
+		t.Fatalf("a stale message rolled it back: %+v", hv)
+	}
+	// Unreadable: present and empty is a value, and a change.
+	send("heartbeat", beat(8, fp("")), t0.Add(9*time.Minute))
+	if hv := host(); hv.FirewallFingerprint == nil || *hv.FirewallFingerprint != "" || !hv.FirewallChangedAt.Equal(t0.Add(9*time.Minute)) {
+		t.Fatalf("unreadable: %+v", hv)
+	}
+}

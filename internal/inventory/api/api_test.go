@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thapr0digy/portwarden/internal/inventory"
 )
@@ -116,4 +117,41 @@ func TestListenerFilters(t *testing.T) {
 
 func containsSecret(s string) bool {
 	return strings.Contains(s, "secret") || strings.Contains(s, "boom")
+}
+
+// fwReader serves one host with a firewall fingerprint and one that never sent one.
+type fwReader struct{ fakeReader }
+
+var fwChanged = time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+
+func (f *fwReader) Host(_ context.Context, id string) (inventory.HostView, bool, error) {
+	if id == "old" {
+		return inventory.HostView{ID: id}, true, nil
+	}
+	fp := strings.Repeat("ab", 32)
+	return inventory.HostView{ID: id, FirewallFingerprint: &fp, FirewallChangedAt: &fwChanged}, true, nil
+}
+
+func TestHostFirewallFields(t *testing.T) {
+	s, _ := New(&fwReader{}, token)
+	h := s.Handler()
+	var got map[string]any
+	rec := get(t, h, "/v1/hosts/h1", token)
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if got["firewall_fingerprint"] != strings.Repeat("ab", 32) || got["firewall_changed_at"] != "2026-11-03T10:00:00Z" {
+		t.Fatalf("host = %s", rec.Body)
+	}
+	got = nil
+	rec = get(t, h, "/v1/hosts/old", token)
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := got["firewall_fingerprint"]; !ok || v != nil {
+		t.Fatalf("a host that never sent one: firewall_fingerprint must be null, got %s", rec.Body)
+	}
+	if v, ok := got["firewall_changed_at"]; !ok || v != nil {
+		t.Fatalf("a host that never sent one: firewall_changed_at must be null, got %s", rec.Body)
+	}
 }

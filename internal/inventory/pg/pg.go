@@ -235,11 +235,42 @@ func (s *Store) apply(ctx context.Context, e inventory.Event) error {
 		if err != nil {
 			return err
 		}
-		if e.Cursor != nil {
-			return setCursor(ctx, tx, host, *e.Cursor)
+		if e.Cursor == nil {
+			return nil // a backend event: never the host's firewall
 		}
-		return nil
+		if fp, ok := inventory.FirewallFingerprint(e.Msg); ok {
+			if err := setFirewall(ctx, tx, host, fp, at); err != nil {
+				return err
+			}
+		}
+		return setCursor(ctx, tx, host, *e.Cursor)
 	})
+}
+
+// setFirewall records the fingerprint an agent message carried (inventory.Firewall.Observe
+// decides). The consumer applies a host's messages in (boot_id, run_number, seq) order and
+// skips stale ones, so a late message cannot roll it back.
+func setFirewall(ctx context.Context, tx pgx.Tx, host, fp string, at time.Time) error {
+	var cur inventory.Firewall
+	var stored *string
+	var changedAt *time.Time
+	if err := tx.QueryRow(ctx, "SELECT firewall_fingerprint, firewall_changed_at FROM hosts WHERE host_id = $1 FOR UPDATE", host).
+		Scan(&stored, &changedAt); err != nil {
+		return err
+	}
+	if stored != nil {
+		cur = inventory.Firewall{Known: true, Fingerprint: *stored}
+		if changedAt != nil {
+			cur.ChangedAt = *changedAt
+		}
+	}
+	next, write, _ := cur.Observe(fp, at)
+	if !write {
+		return nil
+	}
+	_, err := tx.Exec(ctx, "UPDATE hosts SET firewall_fingerprint = $2, firewall_changed_at = $3, updated_at = now() WHERE host_id = $1",
+		host, clean(next.Fingerprint), next.ChangedAt)
+	return err
 }
 
 func setHostInfo(ctx context.Context, tx pgx.Tx, host string, h *asmv1.HostInfo) error {

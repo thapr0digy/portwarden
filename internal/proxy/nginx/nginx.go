@@ -146,7 +146,7 @@ func (p *parser) server(d *directive, outer scope, root string) []conf.Route {
 		switch {
 		case c.name == "return" && len(c.args) > 0:
 			rt := base
-			rt.Kind, rt.Target, rt.Source = model.RouteReturn, strings.Join(c.args, " "), c.source()
+			rt.Kind, rt.Target, rt.Source = model.RouteReturn, returnCode(c.args), c.source()
 			out = append(out, rt)
 		case c.name == "location" && c.block != nil:
 			hasLocation = true
@@ -212,7 +212,7 @@ func (p *parser) location(d *directive, base conf.Route, s scope, root string) [
 	if !handled {
 		rt := base
 		if ret != nil {
-			rt.Kind, rt.Target, rt.Source = model.RouteReturn, strings.Join(ret.args, " "), ret.source()
+			rt.Kind, rt.Target, rt.Source = model.RouteReturn, returnCode(ret.args), ret.source()
 		} else {
 			rt.Kind, rt.Target, rt.Root, rt.Source = model.RouteStatic, staticRoot, staticRoot, d.source()
 		}
@@ -261,23 +261,28 @@ func expand(s string, vars map[string][]string) (out []string, unresolved string
 
 // resolve fills rt's backends from target. kind "" is a stream proxy_pass (no scheme).
 func (p *parser) resolve(rt *conf.Route, target, kind string, s scope) {
-	targets, unresolved := expand(target, s.vars)
+	schemes, hostPort, unix := splitTarget(target, kind)
+	if unix != "" {
+		rt.Backends = append(rt.Backends, conf.Backend{Address: "unix:" + unix, Unix: unix})
+		return
+	}
+	// Only the host[:port] has to resolve; variables in the URI do not matter.
+	hosts, unresolved := expand(hostPort, s.vars)
 	if unresolved != "" {
 		note := "unresolved: variable " + unresolved
 		rt.Notes = append(rt.Notes, note)
-		rt.Backends = append(rt.Backends, conf.Backend{Address: target, Note: note})
+		rt.Backends = append(rt.Backends, conf.Backend{Address: hostPort, Note: note})
 		return
 	}
 	var ups []string
-	for _, t := range targets {
-		hostPort, def, unix := splitTarget(t, kind)
-		if unix != "" {
-			rt.Backends = append(rt.Backends, conf.Backend{Address: "unix:" + unix, Unix: unix})
+	for _, hp := range hosts {
+		if u, ok := strings.CutPrefix(hp, "unix:"); ok {
+			rt.Backends = append(rt.Backends, conf.Backend{Address: hp, Unix: u})
 			continue
 		}
-		if servers, ok := s.upstreams[hostPort]; ok {
-			if !slices.Contains(ups, hostPort) {
-				ups = append(ups, hostPort)
+		if servers, ok := s.upstreams[hp]; ok {
+			if !slices.Contains(ups, hp) {
+				ups = append(ups, hp)
 			}
 			for _, sv := range servers {
 				if u, ok := strings.CutPrefix(sv.addr, "unix:"); ok {
@@ -288,32 +293,74 @@ func (p *parser) resolve(rt *conf.Route, target, kind string, s scope) {
 			}
 			continue
 		}
-		rt.Backends = append(rt.Backends, p.names.Endpoint(hostPort, hostPort, def, ""))
+		b := p.names.Endpoint(hp, hp, defaultPort(schemes[0]), "")
+		for _, sc := range schemes[1:] { // $scheme: either default port may be the one
+			if extra := p.names.Endpoint(hp, hp, defaultPort(sc), ""); len(extra.Addrs) > 0 {
+				for _, a := range extra.Addrs {
+					if !slices.Contains(b.Addrs, a) {
+						b.Addrs = append(b.Addrs, a)
+					}
+				}
+			}
+		}
+		rt.Backends = append(rt.Backends, b)
 	}
 	rt.Upstream = strings.Join(ups, ",")
 }
 
-// splitTarget strips the scheme and URI from a *_pass argument: it returns the
-// "host[:port]" (or upstream name) and its default port, or a Unix socket path.
-func splitTarget(t, kind string) (hostPort string, def uint16, unix string) {
-	def = 80
+// returnCode keeps only a return's status code: its text or URL may carry secrets.
+func returnCode(args []string) string {
+	if len(args) > 0 && isDigits(args[0]) {
+		return args[0]
+	}
+	return "302" // "return URL;" is a temporary redirect
+}
+
+func defaultPort(scheme string) uint16 {
+	switch scheme {
+	case "https", "grpcs", "suwsgi":
+		return 443
+	}
+	return 80
+}
+
+// uriVars are variables that only ever form the URI part of a target.
+var uriVars = regexp.MustCompile(`^\$\{?(request_uri|uri|document_uri|is_args|args|query_string|request|arg_[A-Za-z0-9_]+|[0-9]+)\b`)
+
+// splitTarget splits a *_pass argument into its possible schemes ($scheme is http or
+// https), the host[:port] (or upstream name), with userinfo dropped and the URI cut off
+// at the first "/", "?" or URI variable, or a Unix socket path.
+func splitTarget(t, kind string) (schemes []string, hostPort, unix string) {
 	scheme, rest, hasScheme := strings.Cut(t, "://")
-	if !hasScheme {
-		rest = t
-	} else if scheme == "https" || scheme == "grpcs" || scheme == "suwsgi" {
-		def = 443
+	switch {
+	case !hasScheme:
+		rest, schemes = t, []string{"http"}
+	case scheme == "$scheme" || scheme == "${scheme}":
+		schemes = []string{"http", "https"}
+	default:
+		schemes = []string{scheme}
 	}
 	if u, ok := strings.CutPrefix(rest, "unix:"); ok {
 		// proxy_pass http://unix:/path:/uri — the socket path ends at the next colon.
 		if kind == model.RouteProxy && hasScheme {
 			u, _, _ = strings.Cut(u, ":")
 		}
-		return "", 0, u
+		return schemes, "", u
 	}
 	if hasScheme {
-		rest, _, _ = strings.Cut(rest, "/")
+		end := len(rest)
+		for i := 0; i < len(rest); i++ {
+			if rest[i] == '/' || rest[i] == '?' || (rest[i] == '$' && i > 0 && uriVars.MatchString(rest[i:])) {
+				end = i
+				break
+			}
+		}
+		rest = rest[:end]
+		if at := strings.LastIndexByte(rest, '@'); at >= 0 {
+			rest = rest[at+1:]
+		}
 	}
-	return rest, def, ""
+	return schemes, rest, ""
 }
 
 func listens(block []*directive) []string {

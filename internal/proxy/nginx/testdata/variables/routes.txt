@@ -11,7 +11,7 @@
     -> 127.0.0.1:8300 127.0.0.1:8300
     @ /etc/pw-vars/nginx.conf:44
 *:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/dyn" proxy "http://$host$request_uri"
-    -> http://$host$request_uri (unresolved: variable $host)
+    -> $host (unresolved: variable $host)
     note: unresolved: variable $host
     @ /etc/pw-vars/nginx.conf:48
 *:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/sock" proxy "http://unix:/run/sock/app.sock:/"
@@ -28,6 +28,23 @@
     -> 127.0.0.1:8500 127.0.0.1:8500
     note: conditional: limit_except GET
     @ /etc/pw-vars/nginx.conf:64
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/uri" proxy "http://127.0.0.1:8700$request_uri"
+    -> 127.0.0.1:8700 127.0.0.1:8700
+    @ /etc/pw-vars/nginx.conf:71
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="~ ^/re/(.*)$" proxy "http://blue/$1" upstream=blue
+    -> 127.0.0.1:8100 127.0.0.1:8100
+    @ /etc/pw-vars/nginx.conf:75
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/args" proxy "http://127.0.0.1:8701$uri$is_args$args"
+    -> 127.0.0.1:8701 127.0.0.1:8701
+    @ /etc/pw-vars/nginx.conf:79
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/scheme" proxy "$scheme://green" upstream=green
+    -> 127.0.0.1:8200 127.0.0.1:8200
+    @ /etc/pw-vars/nginx.conf:83
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/secret" proxy "http://127.0.0.1:8702/?token=abc"
+    -> 127.0.0.1:8702 127.0.0.1:8702
+    @ /etc/pw-vars/nginx.conf:87
+*:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="/redirect" return "302"
+    @ /etc/pw-vars/nginx.conf:91
 *:8080 names=~^(?<sub>.+)\.example\.com$,example.com path="@fallback" proxy "http://127.0.0.1:8600"
     -> 127.0.0.1:8600 127.0.0.1:8600
-    @ /etc/pw-vars/nginx.conf:70
+    @ /etc/pw-vars/nginx.conf:95

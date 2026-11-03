@@ -52,10 +52,10 @@ http {
 	for _, want := range []string{
 		"*:80 names= path=\"/\" proxy \"http://app.internal:9000\"\n    -> app.internal:9000 10.1.2.3:9000\n",
 		"-> example.com (unresolved: hostname example.com (no DNS lookups))",
-		"path=\"/y\" return \"301 https://example.com$request_uri\"",
+		"path=\"/y\" return \"301\"",
 		"10.0.0.1:80 names= path=\"\" return \"444\"",
 		"unix:/run/nginx.sock names= path=\"/\" static \"html\" root=html",
-		"-> http://$var$var2 (unresolved: variable $var)",
+		"-> $var$var2 (unresolved: variable $var)",
 		"config note: unreadable /etc/nginx/missing.conf: file does not exist",
 		"config note: unexpected end of file, expecting } in /etc/nginx/nginx.conf",
 	} {

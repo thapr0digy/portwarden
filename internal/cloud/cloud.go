@@ -14,9 +14,10 @@ import (
 	"fmt"
 )
 
-// Host is a host's cloud identity, from the agent's host block (IMDS).
+// Host is a host's cloud identity, from the agent's host block (IMDS). Resource is the
+// instance's full name in its cloud (GCP, Azure; M10), "" from older agents and on AWS.
 type Host struct {
-	ID, Cloud, InstanceID, Region string
+	ID, Cloud, InstanceID, Region, Resource string
 }
 
 // Port is one listener to judge.

@@ -130,7 +130,7 @@ func (l *CloudLookup) Check(ctx context.Context, host string) error {
 			stale = append(stale, cl)
 		}
 	}
-	verdicts, err := prov.Evaluate(ctx, cloud.Host{ID: h.ID, Cloud: h.Cloud, InstanceID: h.InstanceID, Region: h.Region}, ports)
+	verdicts, err := prov.Evaluate(ctx, cloud.Host{ID: h.ID, Cloud: h.Cloud, InstanceID: h.InstanceID, Region: h.Region, Resource: h.Resource}, ports)
 	if err != nil {
 		status := "error: " + err.Error()
 		if errors.Is(err, cloud.ErrUnsupported) {

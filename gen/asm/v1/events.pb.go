@@ -1374,8 +1374,13 @@ type HostInfo struct {
 	// empty while the firewall cannot be read in full (a "fw:unreadable" condition says
 	// why); unset from agents without it.
 	FirewallFingerprint *string `protobuf:"bytes,6,opt,name=firewall_fingerprint,json=firewallFingerprint,proto3,oneof" json:"firewall_fingerprint,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// The instance's full name in its cloud (M10), for the backend's GCP and Azure look-ups:
+	// GCP "projects/<project>/zones/<zone>/instances/<id>", Azure the VM's resource id
+	// ("/subscriptions/<id>/resourceGroups/<group>/providers/Microsoft.Compute/virtualMachines/<name>").
+	// Empty on AWS (instance_id and region suffice), off-cloud, and from older agents.
+	CloudResource string `protobuf:"bytes,7,opt,name=cloud_resource,json=cloudResource,proto3" json:"cloud_resource,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HostInfo) Reset() {
@@ -1446,6 +1451,13 @@ func (x *HostInfo) GetRegion() string {
 func (x *HostInfo) GetFirewallFingerprint() string {
 	if x != nil && x.FirewallFingerprint != nil {
 		return *x.FirewallFingerprint
+	}
+	return ""
+}
+
+func (x *HostInfo) GetCloudResource() string {
+	if x != nil {
+		return x.CloudResource
 	}
 	return ""
 }
@@ -2917,7 +2929,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x02ip\x18\x01 \x01(\tR\x02ip\x12\x10\n" +
 	"\x03via\x18\x02 \x01(\tR\x03via\x12\x10\n" +
 	"\x03dir\x18\x03 \x01(\tR\x03dir\x12\x14\n" +
-	"\x05iface\x18\x04 \x01(\tR\x05iface\"\xfb\x01\n" +
+	"\x05iface\x18\x04 \x01(\tR\x05iface\"\xa2\x02\n" +
 	"\bHostInfo\x12/\n" +
 	"\n" +
 	"public_ips\x18\x01 \x03(\v2\x10.asm.v1.PublicIPR\tpublicIps\x12\x14\n" +
@@ -2928,7 +2940,8 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"conditions\x18\x04 \x03(\tR\n" +
 	"conditions\x12\x16\n" +
 	"\x06region\x18\x05 \x01(\tR\x06region\x126\n" +
-	"\x14firewall_fingerprint\x18\x06 \x01(\tH\x00R\x13firewallFingerprint\x88\x01\x01B\x17\n" +
+	"\x14firewall_fingerprint\x18\x06 \x01(\tH\x00R\x13firewallFingerprint\x88\x01\x01\x12%\n" +
+	"\x0ecloud_resource\x18\a \x01(\tR\rcloudResourceB\x17\n" +
 	"\x15_firewall_fingerprint\"\xf2\x03\n" +
 	"\rExposureEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +

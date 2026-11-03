@@ -218,6 +218,11 @@ message HostInfo {
   // empty while the firewall cannot be read in full (a "fw:unreadable" condition says
   // why); unset from agents without it.
   optional string firewall_fingerprint = 6;
+  // The instance's full name in its cloud (M10), for the backend's GCP and Azure look-ups:
+  // GCP "projects/<project>/zones/<zone>/instances/<id>", Azure the VM's resource id
+  // ("/subscriptions/<id>/resourceGroups/<group>/providers/Microsoft.Compute/virtualMachines/<name>").
+  // Empty on AWS (instance_id and region suffice), off-cloud, and from older agents.
+  string cloud_resource = 7;
 }
 
 // ExposureEvent is published on asm.<host>.exposure.changed when a listener's level

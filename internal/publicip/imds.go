@@ -57,7 +57,11 @@ type Info struct {
 	Cloud      string
 	InstanceID string
 	// Region is best effort: empty when the metadata service does not say.
-	Region    string
+	Region string
+	// Resource is the instance's full name in its cloud (M10), best effort: GCP
+	// "projects/<project>/zones/<zone>/instances/<id>", the Azure VM's resource id; empty
+	// on AWS.
+	Resource  string
 	PublicIPs []netip.Addr
 }
 
@@ -196,7 +200,11 @@ func (c *Client) gcp(ctx context.Context) (Info, error) {
 	}
 	info := Info{Cloud: GCP, InstanceID: strings.TrimSpace(string(id))}
 	if zone, _, err := c.do(ctx, http.MethodGet, "/computeMetadata/v1/instance/zone", h); err == nil {
-		info.Region = gcpRegion(strings.TrimSpace(string(zone)))
+		z := strings.TrimSpace(string(zone))
+		info.Region = gcpRegion(z)
+		if project, _, err := c.do(ctx, http.MethodGet, "/computeMetadata/v1/project/project-id", h); err == nil {
+			info.Resource = gcpResource(strings.TrimSpace(string(project)), z, info.InstanceID)
+		}
 	}
 	for _, n := range nics {
 		for _, ac := range n.AccessConfigs {
@@ -220,8 +228,9 @@ func (c *Client) azure(ctx context.Context) (Info, error) {
 	}
 	var doc struct {
 		Compute struct {
-			VMID     string `json:"vmId"`
-			Location string `json:"location"`
+			VMID       string `json:"vmId"`
+			Location   string `json:"location"`
+			ResourceID string `json:"resourceId"`
 		} `json:"compute"`
 		Network struct {
 			Interface []struct {
@@ -241,7 +250,7 @@ func (c *Client) azure(ctx context.Context) (Info, error) {
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return Info{}, fmt.Errorf("azure: %w", err)
 	}
-	info := Info{Cloud: Azure, InstanceID: doc.Compute.VMID, Region: doc.Compute.Location}
+	info := Info{Cloud: Azure, InstanceID: doc.Compute.VMID, Region: doc.Compute.Location, Resource: doc.Compute.ResourceID}
 	for _, n := range doc.Network.Interface {
 		for _, a := range append(n.IPv4.IPAddress, n.IPv6.IPAddress...) {
 			if ip, err := netip.ParseAddr(a.PublicIPAddress); err == nil {
@@ -250,6 +259,17 @@ func (c *Client) azure(ctx context.Context) (Info, error) {
 		}
 	}
 	return info, nil
+}
+
+// gcpResource builds "projects/<project>/zones/<zone>/instances/<id>" from the metadata
+// server's project id, zone ("projects/<number>/zones/<zone>") and instance id; "" when
+// any part is missing.
+func gcpResource(project, zone, id string) string {
+	zone = zone[strings.LastIndex(zone, "/")+1:]
+	if project == "" || zone == "" || id == "" {
+		return ""
+	}
+	return "projects/" + project + "/zones/" + zone + "/instances/" + id
 }
 
 // gcpRegion turns "projects/<n>/zones/us-central1-a" into "us-central1".

@@ -322,8 +322,8 @@ func setHostInfo(ctx context.Context, tx pgx.Tx, host string, h *asmv1.HostInfo)
 		return err
 	}
 	_, err = tx.Exec(ctx, `UPDATE hosts SET cloud = $2, instance_id = $3, region = $4, public_ips = $5, conditions = $6,
-		updated_at = now() WHERE host_id = $1`,
-		host, h.GetCloud(), h.GetInstanceId(), h.GetRegion(), ips, json.RawMessage(conds))
+		cloud_resource = $7, updated_at = now() WHERE host_id = $1`,
+		host, h.GetCloud(), h.GetInstanceId(), h.GetRegion(), ips, json.RawMessage(conds), h.GetCloudResource())
 	return err
 }
 

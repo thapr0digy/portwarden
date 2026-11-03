@@ -124,6 +124,8 @@ func TestGCP(t *testing.T) {
 			w.Write([]byte("4419012345678"))
 		case "/computeMetadata/v1/instance/zone":
 			w.Write([]byte("projects/123456/zones/us-central1-a"))
+		case "/computeMetadata/v1/project/project-id":
+			w.Write([]byte("acme-prod\n"))
 		case "/computeMetadata/v1/instance/network-interfaces/":
 			if r.URL.Query().Get("recursive") != "true" {
 				http.NotFound(w, r)
@@ -139,8 +141,31 @@ func TestGCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []netip.Addr{netip.MustParseAddr("35.200.1.2"), netip.MustParseAddr("2600:1900:4000::1")}
-	if info.InstanceID != "4419012345678" || info.Region != "us-central1" || !slices.Equal(info.PublicIPs, want) {
+	if info.InstanceID != "4419012345678" || info.Region != "us-central1" || !slices.Equal(info.PublicIPs, want) ||
+		info.Resource != "projects/acme-prod/zones/us-central1-a/instances/4419012345678" {
 		t.Fatalf("info = %+v", info)
+	}
+}
+
+// Without a project id the resource stays empty (the backend then reports undetermined);
+// the rest of the identity still comes back.
+func TestGCPWithoutProjectID(t *testing.T) {
+	c := fakeIMDS(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Metadata-Flavor", "Google")
+		switch r.URL.Path {
+		case "/computeMetadata/v1/instance/id":
+			w.Write([]byte("1"))
+		case "/computeMetadata/v1/instance/zone":
+			w.Write([]byte("projects/1/zones/europe-west1-b"))
+		case "/computeMetadata/v1/instance/network-interfaces/":
+			w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	info, err := c.Fetch(context.Background(), GCP)
+	if err != nil || info.Resource != "" || info.Region != "europe-west1" {
+		t.Fatalf("info = %+v, %v", info, err)
 	}
 }
 
@@ -157,13 +182,14 @@ func TestAzure(t *testing.T) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		w.Write([]byte(`{"compute":{"vmId":"02aab8a4-74ef-476e-8182-f6d2ba4166a6","location":"westeurope"},"network":{"interface":[{"ipv4":{"ipAddress":[{"privateIpAddress":"10.0.0.4","publicIpAddress":"20.40.1.2"},{"privateIpAddress":"10.0.0.5","publicIpAddress":""}]},"ipv6":{"ipAddress":[]}}]}}`))
+		w.Write([]byte(`{"compute":{"vmId":"02aab8a4-74ef-476e-8182-f6d2ba4166a6","location":"westeurope","resourceId":"/subscriptions/8d10da13-8125-4ba9-a717-bf7490507b3d/resourceGroups/web/providers/Microsoft.Compute/virtualMachines/web-1"},"network":{"interface":[{"ipv4":{"ipAddress":[{"privateIpAddress":"10.0.0.4","publicIpAddress":"20.40.1.2"},{"privateIpAddress":"10.0.0.5","publicIpAddress":""}]},"ipv6":{"ipAddress":[]}}]}}`))
 	})
 	info, err := c.Fetch(context.Background(), Azure)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.InstanceID != "02aab8a4-74ef-476e-8182-f6d2ba4166a6" || info.Region != "westeurope" || !slices.Equal(info.PublicIPs, []netip.Addr{netip.MustParseAddr("20.40.1.2")}) {
+	if info.InstanceID != "02aab8a4-74ef-476e-8182-f6d2ba4166a6" || info.Region != "westeurope" || !slices.Equal(info.PublicIPs, []netip.Addr{netip.MustParseAddr("20.40.1.2")}) ||
+		info.Resource != "/subscriptions/8d10da13-8125-4ba9-a717-bf7490507b3d/resourceGroups/web/providers/Microsoft.Compute/virtualMachines/web-1" {
 		t.Fatalf("info = %+v", info)
 	}
 }

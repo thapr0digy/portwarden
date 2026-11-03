@@ -18,6 +18,7 @@ type HostView struct {
 	Cloud          string          `json:"cloud,omitempty"`
 	InstanceID     string          `json:"instance_id,omitempty"`
 	Region         string          `json:"region,omitempty"`
+	CloudResource  string          `json:"cloud_resource,omitempty"`
 	PublicIPs      json.RawMessage `json:"public_ips"`
 	Conditions     json.RawMessage `json:"conditions"`
 	RunID          string          `json:"run_id"`
@@ -148,7 +149,10 @@ type CloudListener struct {
 // CloudHost is what the cloud look-up needs about a host.
 type CloudHost struct {
 	ID, Cloud, InstanceID, Region string
-	Listeners                     []CloudListener
+	// Resource is the instance's full name in its cloud (GCP, Azure; M10); "" from agents
+	// before M10.
+	Resource  string
+	Listeners []CloudListener
 }
 
 // CloudState reads hosts for the cloud look-up and records its outcome.

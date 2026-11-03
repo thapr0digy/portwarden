@@ -22,6 +22,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
+	"github.com/thapr0digy/portwarden/internal/cloud"
 	"github.com/thapr0digy/portwarden/internal/inventory"
 )
 
@@ -323,8 +324,25 @@ func setHostInfo(ctx context.Context, tx pgx.Tx, host string, h *asmv1.HostInfo)
 	}
 	_, err = tx.Exec(ctx, `UPDATE hosts SET cloud = $2, instance_id = $3, region = $4, public_ips = $5, conditions = $6,
 		cloud_resource = $7, updated_at = now() WHERE host_id = $1`,
-		host, h.GetCloud(), h.GetInstanceId(), h.GetRegion(), ips, json.RawMessage(conds), h.GetCloudResource())
+		host, h.GetCloud(), h.GetInstanceId(), h.GetRegion(), ips, json.RawMessage(conds), checkedResource(host, h))
 	return err
+}
+
+// badResource holds the hosts already logged for an invalid cloud_resource.
+var badResource sync.Map
+
+// checkedResource returns the host block's cloud_resource when it has its cloud's shape
+// (cloud.ValidResource), else "" (dropped; logged once per host). The value
+// comes from the host, which must not steer the backend's cloud calls.
+func checkedResource(host string, h *asmv1.HostInfo) string {
+	r := h.GetCloudResource()
+	if err := cloud.ValidResource(h.GetCloud(), h.GetInstanceId(), r); err != nil {
+		if _, seen := badResource.LoadOrStore(host, true); !seen {
+			slog.Warn("inventory: dropping an invalid cloud_resource; logged once per host", "host", host, "cloud", h.GetCloud(), "err", err, "length", len(r))
+		}
+		return ""
+	}
+	return r
 }
 
 const effectiveLevel = "GREATEST(agent_level, cloud_level, CASE WHEN probe_result = 'confirmed' THEN 5 ELSE 0 END)"

@@ -212,6 +212,13 @@ func TestStoreLifecycle(t *testing.T) {
 	if hv, _, _ := s.Host(ctx, h1); hv.CloudResource != gcp.CloudResource {
 		t.Fatalf("api host %+v", hv)
 	}
+	// A resource naming another instance (or of the wrong shape) is dropped, not stored.
+	forged := &asmv1.HostInfo{Cloud: "gcp", InstanceId: "4419012345678", Region: "us-central1",
+		CloudResource: "projects/victim-prod/zones/us-central1-a/instances/999"}
+	apply(t, s, &inventory.Cursor{RunID: "01A", LastSeq: 3}, "host.changed", &asmv1.HostEvent{HostId: h1, RunId: "01A", Seq: 3, Host: forged})
+	if ch, _, err = s.CloudHost(ctx, h1); err != nil || ch.Resource != "" {
+		t.Fatalf("forged resource stored: %+v %v", ch, err)
+	}
 }
 
 // NUL bytes and invalid UTF-8 (which PostgreSQL rejects) are cleaned, so one host's bad

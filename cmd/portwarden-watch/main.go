@@ -14,6 +14,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/thapr0digy/portwarden/internal/version"
 )
 
 const streamName = "ASM_EVENTS"
@@ -50,6 +52,7 @@ func parseFlags(args []string) (options, error) {
 }
 
 func main() {
+	version.HandleFlag()
 	opts, err := parseFlags(os.Args[1:])
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {

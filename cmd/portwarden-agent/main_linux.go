@@ -34,6 +34,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/sdsocket"
 	"github.com/thapr0digy/portwarden/internal/state"
 	"github.com/thapr0digy/portwarden/internal/tamper"
+	"github.com/thapr0digy/portwarden/internal/version"
 )
 
 const (
@@ -137,6 +138,7 @@ func parseFlags(args []string) (options, error) {
 }
 
 func main() {
+	version.HandleFlag()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	slog.SetDefault(log)
 	opts, err := parseFlags(os.Args[1:])
@@ -259,7 +261,7 @@ func run(opts options, log *slog.Logger) error {
 			go publicip.RunIMDS(ctx, publicip.NewClient("", imdsTimeout), cloud, refresh, imdsRetry, hostInfo.SetCloud)
 		}
 	}
-	log.Info("started", "host_id", host, "netns", hostNetNS, "nats_url", opts.natsURL,
+	log.Info("started", "version", version.Version, "host_id", host, "netns", hostNetNS, "nats_url", opts.natsURL,
 		"spool_dir", opts.spoolDir, "spool_max", opts.spoolMax)
 
 	var beats sync.WaitGroup

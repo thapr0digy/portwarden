@@ -25,6 +25,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
 	"github.com/thapr0digy/portwarden/internal/natsauth"
 	"github.com/thapr0digy/portwarden/internal/verifier"
+	"github.com/thapr0digy/portwarden/internal/version"
 )
 
 // Config is the JSON config file (--config).
@@ -53,6 +54,7 @@ type Config struct {
 }
 
 func main() {
+	version.HandleFlag()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	path := flag.String("config", "/etc/portwarden/verifier.json", "config file (JSON)")
 	flag.Parse()

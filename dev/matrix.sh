@@ -30,7 +30,7 @@ mkdir -p "$out"
 trap vmlock_release EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-VMLOCK_COMMAND="dev/matrix.sh ($legs) in $repo"
+VMLOCK_COMMAND=${VMLOCK_COMMAND:-"dev/matrix.sh ($legs) in $repo"}
 vmlock_acquire
 
 vm_of() { case $1 in 2404) echo portwarden ;; 2604) echo portwarden-2604 ;; amd64) echo portwarden-amd64 ;; *) return 1 ;; esac; }

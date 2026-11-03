@@ -120,5 +120,5 @@ esac
 
 echo "vm-verify: running dev/matrix.sh on legs: $legs"
 rc=0
-MATRIX_LEGS=$legs "$copy/dev/matrix.sh" || rc=$?
+VMLOCK_COMMAND="dev/vm-verify.sh ($legs) from $src, copy $copy" MATRIX_LEGS=$legs "$copy/dev/matrix.sh" || rc=$?
 exit "$rc"

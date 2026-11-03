@@ -58,3 +58,15 @@ func TestParseFlagsM3(t *testing.T) {
 		}
 	}
 }
+
+func TestParseFlagsProxy(t *testing.T) {
+	o, err := parseFlags(nil)
+	if err != nil || o.proxyMap != "auto" || o.proxyPoll != 2*time.Second {
+		t.Fatalf("proxy defaults: %+v %v", o, err)
+	}
+	for _, args := range [][]string{{"--proxy-map", "maybe"}, {"--proxy-poll", "0s"}} {
+		if _, err := parseFlags(args); err == nil {
+			t.Fatalf("%v must be rejected", args)
+		}
+	}
+}

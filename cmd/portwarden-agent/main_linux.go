@@ -48,6 +48,8 @@ const (
 	imdsTimeout      = 2 * time.Second
 	imdsRetry        = 30 * time.Second
 	dmiDir           = "/sys/class/dmi/id"
+	defaultProxyPoll = 2 * time.Second
+	proxySettle      = 2 * time.Second // a changed proxy config is read once it held still this long
 )
 
 type options struct {
@@ -58,6 +60,8 @@ type options struct {
 	closeGrace, recheck                                       time.Duration
 	firewallPoll                                              time.Duration
 	imds                                                      string
+	proxyMap                                                  string
+	proxyPoll                                                 time.Duration
 }
 
 func parseFlags(args []string) (options, error) {
@@ -76,6 +80,8 @@ func parseFlags(args []string) (options, error) {
 	fs.DurationVar(&o.recheck, "recheck", defaultRecheck, "interval between full listener rechecks (0 disables)")
 	fs.DurationVar(&o.firewallPoll, "firewall-poll", defaultFWPoll, "firewall re-read interval when change notifications are unavailable or iptables-legacy is in use")
 	fs.StringVar(&o.imds, "imds", "auto", "cloud metadata for public IPs: auto (only when DMI says AWS, GCP or Azure) or off")
+	fs.StringVar(&o.proxyMap, "proxy-map", "auto", "map reverse proxies (nginx, Apache, HAProxy configs; observed proxy connections): auto or off")
+	fs.DurationVar(&o.proxyPoll, "proxy-poll", defaultProxyPoll, "how often proxy config files and connection counts are checked")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -84,6 +90,12 @@ func parseFlags(args []string) (options, error) {
 	}
 	if o.imds != "auto" && o.imds != "off" {
 		return o, fmt.Errorf("--imds must be auto or off, got %q", o.imds)
+	}
+	if o.proxyMap != "auto" && o.proxyMap != "off" {
+		return o, fmt.Errorf("--proxy-map must be auto or off, got %q", o.proxyMap)
+	}
+	if o.proxyPoll <= 0 {
+		return o, fmt.Errorf("--proxy-poll must be positive, got %s", o.proxyPoll)
 	}
 	if o.heartbeat <= 0 {
 		return o, fmt.Errorf("--heartbeat must be positive, got %s", o.heartbeat)
@@ -141,7 +153,8 @@ func run(opts options, log *slog.Logger) error {
 	primeCtx, cancelPrime := context.WithTimeout(ctx, socketUnitPrime)
 	matcher.Prime(primeCtx)
 	cancelPrime()
-	enrich := newEnricher(procinfo.NewResolver("/proc", "/sys/fs/cgroup", hashMaxBytes), matcher, hostNetNS)
+	resolver := procinfo.NewResolver("/proc", "/sys/fs/cgroup", hashMaxBytes)
+	enrich := newEnricher(resolver, matcher, hostNetNS)
 
 	// The first exposure view (firewall and interfaces; each tool read is bounded) is read
 	// before the probes start, so the probe buffer is not held open for it. The watcher
@@ -219,7 +232,7 @@ func run(opts options, log *slog.Logger) error {
 		heartbeatLoop(ctx, opts.heartbeat, pr, pub)
 	}()
 
-	runErr := agent.Run(ctx, pr, baseline.Snapshot, loggingSink{pub, log}, agent.Options{
+	agentOpts := agent.Options{
 		Enrich:     enrich,
 		CloseGrace: opts.closeGrace,
 		Recheck:    opts.recheck,
@@ -227,7 +240,13 @@ func run(opts options, log *slog.Logger) error {
 		Settle:     recheckSettle,
 		Judge:      initialView,
 		Judges:     judges,
-	})
+	}
+	var proxyConns *probes.ProxyConns
+	if opts.proxyMap == "auto" {
+		proxyConns = startProxyMapping(ctx, opts, hostNetNS, resolver, &agentOpts, log)
+	}
+
+	runErr := agent.Run(ctx, pr, baseline.Snapshot, loggingSink{pub, log}, agentOpts)
 	stop() // end the heartbeat loop even if Run returned on its own
 	beats.Wait()
 
@@ -237,6 +256,11 @@ func run(opts options, log *slog.Logger) error {
 	}
 	if err := pr.Close(); err != nil {
 		log.Warn("closing probes", "error", err.Error())
+	}
+	if proxyConns != nil {
+		if err := proxyConns.Close(); err != nil {
+			log.Warn("closing proxy connection probes", "error", err.Error())
+		}
 	}
 	if err := pub.Close(); err != nil {
 		log.Warn("closing publisher", "error", err.Error())
@@ -295,6 +319,15 @@ func heartbeatLoop(ctx context.Context, every time.Duration, pr *probes.Probes, 
 type loggingSink struct {
 	*publish.Publisher
 	log *slog.Logger
+}
+
+// ProxyRoutes logs each route set as it is queued.
+func (s loggingSink) ProxyRoutes(sets []model.ProxyRoutes) {
+	for _, r := range sets {
+		s.log.Info("proxy routes queued", "proxy", r.Proxy.ID, "trigger", r.Trigger,
+			"routes", len(r.Routes), "removed", r.Removed)
+	}
+	s.Publisher.ProxyRoutes(sets)
 }
 
 func (s loggingSink) Snapshot(listeners []state.Listener, proxies []model.ProxyRoutes) {

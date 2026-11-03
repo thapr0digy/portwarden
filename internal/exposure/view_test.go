@@ -304,9 +304,10 @@ func TestJudgeContainerNotProvablyLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := NewView("start", hostNS, fw, nil, vmIfs(), ctrAddrs)
-	// An empty kube-proxy nftables table maps nothing (M9: the mode is simulated).
+	// An empty kube-proxy nftables table maps nothing (M9: the mode is simulated), but a
+	// pod is still not provably local.
 	checkJudge(t, v, []state.Listener{lst(ctrNS, "tcp", "0.0.0.0", 8080, ctrProc)}, map[string]want{
-		"4026532426/tcp/0.0.0.0:8080": {model.ExposureLocal, []string{"netns: no host port mapping"}},
+		"4026532426/tcp/0.0.0.0:8080": {model.ExposureBound, []string{"fw:undetermined netns mapping (kube-proxy nftables: pod addresses may be routable in the cluster)"}},
 	})
 
 	// kube-proxy nftables with a LoadBalancer IP (not the host's) in service-ips: a
@@ -327,7 +328,7 @@ func TestJudgeContainerNotProvablyLocal(t *testing.T) {
 	v = NewView("start", hostNS, fw, nil, vmIfs(), ctrAddrs)
 	checkJudge(t, v, []state.Listener{lst(ctrNS, "tcp", "0.0.0.0", 8080, ctrProc)}, map[string]want{
 		"4026532426/tcp/0.0.0.0:8080": {model.ExposureBound, []string{
-			"nat: dnat target 172.17.0.2:8080 (path not judged)", "fw:undetermined netns mapping (kube-proxy LoadBalancer/external IPs)"}},
+			"nat: dnat target 172.17.0.2:8080 (path not judged)", "fw:undetermined netns mapping (kube-proxy LoadBalancer/external IPs, kube-proxy nftables: pod addresses may be routable in the cluster)"}},
 	})
 
 	// A DNAT keyed on an address that is not the host's (a LoadBalancer or elastic IP),

@@ -3,6 +3,7 @@ package exposure
 import (
 	"errors"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/thapr0digy/portwarden/internal/netif"
 	"github.com/thapr0digy/portwarden/internal/state"
 )
+
+const kubePodsNote = "fw:undetermined netns mapping (kube-proxy nftables: pod addresses may be routable in the cluster)"
 
 // kubePodAddrs maps the kube fixture's pods (by holder pid) to their addresses.
 func kubePodAddrs(pid uint32) ([]netip.Addr, error) {
@@ -34,7 +37,14 @@ func kubePodAddrs(pid uint32) ([]netip.Addr, error) {
 // 8088 -> 10.42.0.12:80 and 192.168.5.15:5353/udp -> 10.42.0.12:53.
 func kubeNftView(t *testing.T, edit func(string) string) *View {
 	t.Helper()
-	data := string(readFixture(t, "kube-proxy-nftables.json"))
+	return kubeNftFixtureView(t, "kube-proxy-nftables.json", edit)
+}
+
+// kubeNftFixtureView builds a view from one of the kube-proxy nftables fixtures
+// (testdata/gen/kube-proxy-nftables.py writes all three).
+func kubeNftFixtureView(t *testing.T, fixture string, edit func(string) string) *View {
+	t.Helper()
+	data := string(readFixture(t, fixture))
 	if edit != nil {
 		data = edit(data)
 	}
@@ -79,12 +89,14 @@ func TestJudgeKubernetesNftables(t *testing.T) {
 		// ClusterIP only: its endpoint is a DNAT target no packet to the host reaches,
 		// judged as in iptables mode.
 		"4026532603/tcp/0.0.0.0:6379": {model.ExposureBound, []string{
-			"nat: dnat target 10.42.0.20:6379 (path not judged)"}},
+			"nat: dnat target 10.42.0.20:6379 (path not judged)", kubePodsNote}},
 		// An external IP that is the node's own address, Local traffic policy.
 		"4026532604/tcp/0.0.0.0:8443": {model.ExposureHostFirewallOpen, []string{
 			"nat: dnat tcp/8443 -> 10.42.0.21:8443", "bind:192.168.5.15 (eth0)",
 			"nft: accept tcp/8443 from 0/0 (eth0, policy ip kube-proxy filter-forward)"}},
-		"4026532605/tcp/0.0.0.0:9100": {model.ExposureLocal, []string{"netns: no host port mapping"}},
+		// No host port maps it, but with kube-proxy present a pod is never called local
+		// (its CIDR may be routed to the node): bound, as before M9.
+		"4026532605/tcp/0.0.0.0:9100": {model.ExposureBound, []string{kubePodsNote}},
 		"4026531840/tcp/0.0.0.0:22": {model.ExposureHostFirewallOpen, []string{
 			"bind:any", "nft: accept tcp/22 from 0/0 (eth0, policy ip kube-proxy filter-input)"}},
 	}
@@ -102,4 +114,68 @@ func TestJudgeKubernetesNftables(t *testing.T) {
 		return strings.Replace(data, nodePortIPs, fibLocal, 1)
 	}
 	checkJudge(t, kubeNftView(t, fib), ls[:1], map[string]want{"4026532600/tcp/0.0.0.0:8080": webOpen("10.42.0.9")})
+}
+
+// kubeListeners are the fixtures' pods (one per netns) and a host listener.
+func kubeListeners() []state.Listener {
+	return []state.Listener{
+		lst(4026532600, "tcp", "0.0.0.0", 8080, model.Process{PID: 4300}),
+		lst(4026532601, "tcp", "0.0.0.0", 8080, model.Process{PID: 4310}),
+		lst(4026532602, "tcp", "0.0.0.0", 80, model.Process{PID: 4301}),
+		lst(4026532603, "tcp", "0.0.0.0", 6379, model.Process{PID: 4302}),
+		lst(4026532604, "tcp", "0.0.0.0", 8443, model.Process{PID: 4303}),
+		lst(4026532605, "tcp", "0.0.0.0", 9100, model.Process{PID: 4304}),
+	}
+}
+
+// The Kubernetes 1.34 layout (filter-prerouting-pre-dnat / filter-output-pre-dnat at
+// dstnat-10, the other filter chains at filter priority, no filter-output-post-dnat)
+// with sessionAffinity ClientIP on web: a fresh outside source is in no affinity set,
+// so numgen still picks either endpoint. Same results as 1.31.
+func TestJudgeKubernetesNftables134WithAffinity(t *testing.T) {
+	webOpen := func(pod, other string) want {
+		return want{model.ExposureHostFirewallOpen, []string{
+			"nat: dnat tcp/30080 -> " + pod + ":8080", "bind:192.168.5.15 (eth0)",
+			"nat: dnat tcp/30080 -> " + other + ":8080",
+			"nft: accept tcp/30080 from 0/0 (eth0, policy ip kube-proxy filter-forward)"}}
+	}
+	checkJudge(t, kubeNftFixtureView(t, "kube-proxy-nftables-1.34.json", nil), kubeListeners(), map[string]want{
+		"4026532600/tcp/0.0.0.0:8080": webOpen("10.42.0.9", "10.42.0.10"),
+		"4026532601/tcp/0.0.0.0:8080": webOpen("10.42.0.10", "10.42.0.9"),
+		"4026532602/tcp/0.0.0.0:80": {model.ExposureHostFirewallOpen, []string{
+			"nat: dnat tcp/8088 -> 10.42.0.12:80", "bind:192.168.5.15 (eth0)",
+			"nft: accept tcp/8088 from 0/0 (eth0, policy ip kube-proxy filter-forward)"}},
+		"4026532603/tcp/0.0.0.0:6379": {model.ExposureBound, []string{
+			"nat: dnat target 10.42.0.20:6379 (path not judged)", kubePodsNote}},
+		"4026532604/tcp/0.0.0.0:8443": {model.ExposureHostFirewallOpen, []string{
+			"nat: dnat tcp/8443 -> 10.42.0.21:8443", "bind:192.168.5.15 (eth0)",
+			"nft: accept tcp/8443 from 0/0 (eth0, policy ip kube-proxy filter-forward)"}},
+		"4026532605/tcp/0.0.0.0:9100": {model.ExposureBound, []string{kubePodsNote}},
+	})
+}
+
+// kube-proxy's master branch DNATs a service with several endpoints in one rule,
+// `dnat ip addr . port to numgen random mod 2 map { … }`, which the model does not read:
+// web's pods are never local (nor raised); single-endpoint services keep their plain
+// dnat and are still simulated.
+func TestJudgeKubernetesNftablesMasterDNATMap(t *testing.T) {
+	v := kubeNftFixtureView(t, "kube-proxy-nftables-master.json", nil)
+	got := v.Judge(kubeListeners())
+	for _, l := range kubeListeners()[:2] {
+		e := got[l.Key]
+		if e.Level != model.ExposureBound || !slices.ContainsFunc(e.Evidence, func(ev string) bool {
+			return strings.HasPrefix(ev, "fw:undetermined netns mapping (") && strings.Contains(ev, "unreadable NAT rule (dnat target)")
+		}) {
+			t.Errorf("web pod %s: %v %q", l.Key, e.Level, e.Evidence)
+		}
+	}
+	for _, l := range kubeListeners() {
+		if got[l.Key].Level == model.ExposureLocal {
+			t.Errorf("%s judged local: %q", l.Key, got[l.Key].Evidence)
+		}
+	}
+	api := kubeListeners()[4]
+	if e := got[api.Key]; e.Level != model.ExposureHostFirewallOpen || e.Evidence[0] != "nat: dnat tcp/8443 -> 10.42.0.21:8443" {
+		t.Errorf("api (single endpoint, plain dnat): %v %q", e.Level, e.Evidence)
+	}
 }

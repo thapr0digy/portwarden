@@ -579,7 +579,10 @@ func (v *View) judgeNetns(l state.Listener, maps []Mapping) model.Exposure {
 	return model.Exposure{Level: model.ExposureLocal, Evidence: []string{"netns: no host port mapping"}}
 }
 
-const evTooManyNATPaths = "too many NAT paths"
+const (
+	evTooManyNATPaths = "too many NAT paths"
+	evKubeNftPods     = "kube-proxy nftables: pod addresses may be routable in the cluster"
+)
 
 // undecidedByTruncation turns a mapped container's closed verdict into an undetermined
 // one when mapping discovery was cut short: another mapping it did not find may let
@@ -629,6 +632,11 @@ func (v *View) scanNAT() (targets []natTarget, opaque []string) {
 			natTable[c.Origin+" "+c.Family.String()+" "+c.Table] = true
 		}
 		switch {
+		case c.Origin == "nft" && c.Table == "kube-proxy":
+			// Simulated (M9), but a pod no host port maps is not provably local: pod
+			// CIDRs are often routed to the node inside the cluster or beyond it, and an
+			// unknown is never lowered.
+			opaque = append(opaque, evKubeNftPods)
 		case strings.HasPrefix(c.Name, "CILIUM_") || c.Table == "cilium":
 			opaque = append(opaque, "Cilium")
 		case c.Name == "DOCKER-INGRESS":

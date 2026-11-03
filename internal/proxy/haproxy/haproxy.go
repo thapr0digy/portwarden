@@ -352,7 +352,6 @@ func normBind(a string) string {
 
 func source(l line) string { return l.file + ":" + strconv.Itoa(l.num) }
 
-
 func joinNote(a, b string) string {
 	if a == "" {
 		return b

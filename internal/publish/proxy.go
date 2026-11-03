@@ -43,7 +43,7 @@ func (p *Publisher) enqueueProxyRoutesLocked(r model.ProxyRoutes) {
 	}
 	build := func(n int) *asmv1.ProxyRoutes {
 		ev := &asmv1.ProxyRoutes{
-			EventId: id, HostId: p.hostID, RunId: p.runID, Seq: seq,
+			EventId: id, HostId: p.hostID, RunId: p.runID, BootId: p.bootID, RunNumber: p.runNumber, Seq: seq,
 			ObservedAt: timestamppb.New(at), Proxy: proxyToProto(r.Proxy),
 			Routes: routesToProto(r.Routes[:n]), Trigger: r.Trigger, Removed: r.Removed,
 			Host: p.hostProtoLocked(),

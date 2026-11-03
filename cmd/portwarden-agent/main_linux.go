@@ -192,11 +192,18 @@ func run(opts options, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("start probes: %w", err)
 	}
+	runNumber, err := publish.NextRunNumber(opts.spoolDir)
+	if err != nil {
+		// Ordering then falls back to run ids; never block the agent on it.
+		slog.Warn("run counter unavailable; consumers order runs by run id", "err", err)
+		runNumber = 0
+	}
 	pub, err := publish.New(ctx, publish.Config{
 		URL: opts.natsURL, CredsFile: opts.natsCreds, NkeyFile: opts.natsNkey,
 		CAFile: opts.tlsCA, CertFile: opts.tlsCert, KeyFile: opts.tlsKey,
 		HostID:   host,
 		SpoolDir: opts.spoolDir, SpoolMax: opts.spoolMax,
+		BootID: publish.ReadBootID(publish.BootIDPath), RunNumber: runNumber,
 		LocalAddr: hostInfo.SetIngestLocal,
 	})
 	if err != nil {

@@ -64,6 +64,11 @@ message ListenerEvent {
   HostInfo host = 12;
   // The proxy routes that end at this listener (it is their backend), at publish time.
   repeated ProxyRef behind_proxy = 13;
+  // Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
+  // its spool directory (0 when it has none). Consumers order runs of one host by
+  // (boot_id, run_number) instead of the run_id's wall-clock time.
+  string boot_id = 14;
+  uint64 run_number = 15;
 }
 
 message ListenerState {
@@ -83,6 +88,11 @@ message Snapshot {
   HostInfo host = 7;
   // Every known proxy with its full route set.
   repeated ProxyState proxies = 8;
+  // Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
+  // its spool directory (0 when it has none). Consumers order runs of one host by
+  // (boot_id, run_number) instead of the run_id's wall-clock time.
+  string boot_id = 9;
+  uint64 run_number = 10;
 }
 
 message Heartbeat {
@@ -94,6 +104,11 @@ message Heartbeat {
   uint64 ringbuf_drops = 6;
   uint64 queue_drops = 7;
   uint64 dropped_foreign_netns = 8 [deprecated = true];
+  // Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
+  // its spool directory (0 when it has none). Consumers order runs of one host by
+  // (boot_id, run_number) instead of the run_id's wall-clock time.
+  string boot_id = 9;
+  uint64 run_number = 10;
 }
 
 // ExposureLevel is the design's exposure level plus one (0 is unset): it only rises as
@@ -163,13 +178,19 @@ message ExposureEvent {
   string trigger = 10;
   HostInfo host = 11;
   // Who published it: "" for the host's agent; "cloud" for the backend's cloud look-up
-  // (level 3). Events with an origin are not part of the host's sequence: their run_id is
-  // the publishing service's and seq is 0, so gap trackers skip them.
+  // (level 3, on pwb.cloud.<host>.exposure). Informational only: consumers take the
+  // origin from the subject, and drop an asm.* event whose origin is set. Backend events
+  // are not part of the host's sequence: their run_id is the service's and seq is 0.
   string origin = 12;
+  // Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
+  // its spool directory (0 when it has none). Consumers order runs of one host by
+  // (boot_id, run_number) instead of the run_id's wall-clock time.
+  string boot_id = 13;
+  uint64 run_number = 14;
 }
 
 // ExposureConfirmation is published by the outside checker (portwarden-verifier) on
-// asm.<host>.exposure.confirmed after it probed a listener from outside the server.
+// pwb.verifier.<host>.exposure after it probed a listener from outside the server.
 message ExposureConfirmation {
   string event_id = 1;
   string host_id = 2;
@@ -209,6 +230,11 @@ message HostEvent {
   google.protobuf.Timestamp observed_at = 5;
   HostInfo host = 6;
   HostInfo previous = 7;
+  // Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
+  // its spool directory (0 when it has none). Consumers order runs of one host by
+  // (boot_id, run_number) instead of the run_id's wall-clock time.
+  string boot_id = 8;
+  uint64 run_number = 9;
 }
 
 // Proxy is a reverse proxy instance (nginx, Apache, HAProxy, or an observed-only kind).
@@ -311,6 +337,11 @@ message ProxyRoutes {
   // max_payload): routes holds the first ones in order, total_routes how many there are.
   bool truncated = 11;
   uint32 total_routes = 12;
+  // Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
+  // its spool directory (0 when it has none). Consumers order runs of one host by
+  // (boot_id, run_number) instead of the run_id's wall-clock time.
+  string boot_id = 13;
+  uint64 run_number = 14;
 }
 
 // ProxyRef names a proxy route that ends at a listener (on the backend's events).
@@ -324,4 +355,25 @@ message ProxyRef {
   string path = 6;
   bool config = 7;
   bool seen = 8;
+}
+
+// ProbeRequest is published by the inventory on pwb.probe.<host>.request: probe this
+// listener on these candidate addresses. The candidates come from the inventory's stored
+// state (the listener's bind address and the host block it holds), never from the event
+// that triggered the request; the verifier still filters them by its allowlist (and,
+// for private addresses, by its own per-host list).
+message ProbeRequest {
+  string event_id = 1;
+  string host_id = 2;
+  google.protobuf.Timestamp requested_at = 3;
+  Listener listener = 4;
+  // The listener's effective level (proto numbering).
+  ExposureLevel level = 5;
+  // Candidate addresses (at most 4) and ports (at most 4; a mapped container listener's
+  // host ports).
+  repeated string addresses = 6;
+  repeated uint32 ports = 7;
+  string proto = 8;
+  // exposure (a level change), cloud (a cloud verdict) or reprobe (periodic).
+  string reason = 9;
 }

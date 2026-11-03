@@ -57,8 +57,12 @@ type Config struct {
 	// CredsFile for servers configured with nkey users.
 	NkeyFile string
 	HostID   string
-	SpoolDir string
-	SpoolMax int64
+	// BootID and RunNumber order this run among the host's runs (see
+	// NextRunNumber); stamped on every message.
+	BootID    string
+	RunNumber uint64
+	SpoolDir  string
+	SpoolMax  int64
 	// LocalAddr, when set, is called with the local address of every TCP connection
 	// made to NATS (the agent's own view of its outbound address). It must not block.
 	LocalAddr func(netip.Addr)
@@ -66,11 +70,13 @@ type Config struct {
 
 // Publisher implements agent.Sink on top of a JetStream stream.
 type Publisher struct {
-	hostID string
-	runID  string
-	nc     *nats.Conn
-	js     jetstream.JetStream
-	q      *spool.Spool
+	hostID    string
+	runID     string
+	bootID    string
+	runNumber uint64
+	nc        *nats.Conn
+	js        jetstream.JetStream
+	q         *spool.Spool
 
 	mu       sync.Mutex // orders seq assignment with q.Push
 	seq      uint64
@@ -135,10 +141,11 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 		current: make(map[model.ListenerKey]state.Listener),
 		proxies: make(map[string]model.ProxyRoutes),
 		runID:   ulid.Make().String(),
-		q:       q,
-		wake:    make(chan struct{}, 1),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
+		bootID:  cfg.BootID, runNumber: cfg.RunNumber,
+		q:    q,
+		wake: make(chan struct{}, 1),
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
 	}
 
 	opts := []nats.Option{
@@ -305,9 +312,9 @@ func (p *Publisher) ExposureChanges(changes []state.ExposureChange) {
 			at = time.Now()
 		}
 		ev := &asmv1.ExposureEvent{
-			EventId:    id,
-			HostId:     p.hostID,
-			RunId:      p.runID,
+			EventId: id,
+			HostId:  p.hostID,
+			RunId:   p.runID, BootId: p.bootID, RunNumber: p.runNumber,
 			Seq:        seq,
 			ObservedAt: timestamppb.New(at),
 			Listener:   listenerToProto(c.Key),
@@ -338,9 +345,9 @@ func (p *Publisher) SetHost(h model.HostInfo) {
 	}
 	id, seq := p.nextIDLocked()
 	p.enqueueLocked("host.changed", id, seq, &asmv1.HostEvent{
-		EventId:    id,
-		HostId:     p.hostID,
-		RunId:      p.runID,
+		EventId: id,
+		HostId:  p.hostID,
+		RunId:   p.runID, BootId: p.bootID, RunNumber: p.runNumber,
 		Seq:        seq,
 		ObservedAt: timestamppb.Now(),
 		Host:       hostToProto(p.host),
@@ -362,9 +369,9 @@ func (p *Publisher) Heartbeat(ringbufDrops uint64) {
 	defer p.mu.Unlock()
 	id, seq := p.nextIDLocked()
 	p.enqueueLocked("heartbeat", id, seq, &asmv1.Heartbeat{
-		EventId:      id,
-		HostId:       p.hostID,
-		RunId:        p.runID,
+		EventId: id,
+		HostId:  p.hostID,
+		RunId:   p.runID, BootId: p.bootID, RunNumber: p.runNumber,
 		Seq:          seq,
 		At:           timestamppb.Now(),
 		RingbufDrops: ringbufDrops,
@@ -415,9 +422,9 @@ func (p *Publisher) enqueueChange(c state.Change) {
 		at = time.Now()
 	}
 	p.enqueueLocked(suffix, id, seq, &asmv1.ListenerEvent{
-		EventId:           id,
-		HostId:            p.hostID,
-		RunId:             p.runID,
+		EventId: id,
+		HostId:  p.hostID,
+		RunId:   p.runID, BootId: p.bootID, RunNumber: p.runNumber,
 		Seq:               seq,
 		ObservedAt:        timestamppb.New(at),
 		Kind:              kind,
@@ -449,9 +456,9 @@ func (p *Publisher) enqueueSnapshot(listeners []state.Listener, proxies []model.
 		proxyStates = append(proxyStates, proxyStateToProto(r))
 	}
 	p.enqueueLocked("snapshot", id, seq, &asmv1.Snapshot{
-		EventId:   id,
-		HostId:    p.hostID,
-		RunId:     p.runID,
+		EventId: id,
+		HostId:  p.hostID,
+		RunId:   p.runID, BootId: p.bootID, RunNumber: p.runNumber,
 		Seq:       seq,
 		TakenAt:   timestamppb.Now(),
 		Listeners: states,
@@ -780,7 +787,7 @@ func (p *Publisher) ensureStream(ctx context.Context) error {
 	}
 	_, err = p.js.CreateStream(ctx, jetstream.StreamConfig{
 		Name:       streamName,
-		Subjects:   []string{"asm.>"},
+		Subjects:   []string{"asm.>", "pwb.>"},
 		Storage:    jetstream.FileStorage,
 		MaxAge:     streamMaxAge,
 		Duplicates: dedupeWindow,

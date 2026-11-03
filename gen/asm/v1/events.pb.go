@@ -454,7 +454,12 @@ type ListenerEvent struct {
 	// The host's public-IP candidates and cloud identity at publish time.
 	Host *HostInfo `protobuf:"bytes,12,opt,name=host,proto3" json:"host,omitempty"`
 	// The proxy routes that end at this listener (it is their backend), at publish time.
-	BehindProxy   []*ProxyRef `protobuf:"bytes,13,rep,name=behind_proxy,json=behindProxy,proto3" json:"behind_proxy,omitempty"`
+	BehindProxy []*ProxyRef `protobuf:"bytes,13,rep,name=behind_proxy,json=behindProxy,proto3" json:"behind_proxy,omitempty"`
+	// Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
+	// its spool directory (0 when it has none). Consumers order runs of one host by
+	// (boot_id, run_number) instead of the run_id's wall-clock time.
+	BootId        string `protobuf:"bytes,14,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	RunNumber     uint64 `protobuf:"varint,15,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -580,6 +585,20 @@ func (x *ListenerEvent) GetBehindProxy() []*ProxyRef {
 	return nil
 }
 
+func (x *ListenerEvent) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *ListenerEvent) GetRunNumber() uint64 {
+	if x != nil {
+		return x.RunNumber
+	}
+	return 0
+}
+
 type ListenerState struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Listener      *Listener              `protobuf:"bytes,1,opt,name=listener,proto3" json:"listener,omitempty"`
@@ -658,7 +677,12 @@ type Snapshot struct {
 	Listeners []*ListenerState       `protobuf:"bytes,6,rep,name=listeners,proto3" json:"listeners,omitempty"`
 	Host      *HostInfo              `protobuf:"bytes,7,opt,name=host,proto3" json:"host,omitempty"`
 	// Every known proxy with its full route set.
-	Proxies       []*ProxyState `protobuf:"bytes,8,rep,name=proxies,proto3" json:"proxies,omitempty"`
+	Proxies []*ProxyState `protobuf:"bytes,8,rep,name=proxies,proto3" json:"proxies,omitempty"`
+	// Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
+	// its spool directory (0 when it has none). Consumers order runs of one host by
+	// (boot_id, run_number) instead of the run_id's wall-clock time.
+	BootId        string `protobuf:"bytes,9,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	RunNumber     uint64 `protobuf:"varint,10,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -749,6 +773,20 @@ func (x *Snapshot) GetProxies() []*ProxyState {
 	return nil
 }
 
+func (x *Snapshot) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *Snapshot) GetRunNumber() uint64 {
+	if x != nil {
+		return x.RunNumber
+	}
+	return 0
+}
+
 type Heartbeat struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	EventId      string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
@@ -760,8 +798,13 @@ type Heartbeat struct {
 	QueueDrops   uint64                 `protobuf:"varint,7,opt,name=queue_drops,json=queueDrops,proto3" json:"queue_drops,omitempty"`
 	// Deprecated: Marked as deprecated in asm/v1/events.proto.
 	DroppedForeignNetns uint64 `protobuf:"varint,8,opt,name=dropped_foreign_netns,json=droppedForeignNetns,proto3" json:"dropped_foreign_netns,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
+	// its spool directory (0 when it has none). Consumers order runs of one host by
+	// (boot_id, run_number) instead of the run_id's wall-clock time.
+	BootId        string `protobuf:"bytes,9,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	RunNumber     uint64 `protobuf:"varint,10,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -847,6 +890,20 @@ func (x *Heartbeat) GetQueueDrops() uint64 {
 func (x *Heartbeat) GetDroppedForeignNetns() uint64 {
 	if x != nil {
 		return x.DroppedForeignNetns
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *Heartbeat) GetRunNumber() uint64 {
+	if x != nil {
+		return x.RunNumber
 	}
 	return 0
 }
@@ -1078,9 +1135,15 @@ type ExposureEvent struct {
 	Trigger string    `protobuf:"bytes,10,opt,name=trigger,proto3" json:"trigger,omitempty"`
 	Host    *HostInfo `protobuf:"bytes,11,opt,name=host,proto3" json:"host,omitempty"`
 	// Who published it: "" for the host's agent; "cloud" for the backend's cloud look-up
-	// (level 3). Events with an origin are not part of the host's sequence: their run_id is
-	// the publishing service's and seq is 0, so gap trackers skip them.
-	Origin        string `protobuf:"bytes,12,opt,name=origin,proto3" json:"origin,omitempty"`
+	// (level 3, on pwb.cloud.<host>.exposure). Informational only: consumers take the
+	// origin from the subject, and drop an asm.* event whose origin is set. Backend events
+	// are not part of the host's sequence: their run_id is the service's and seq is 0.
+	Origin string `protobuf:"bytes,12,opt,name=origin,proto3" json:"origin,omitempty"`
+	// Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
+	// its spool directory (0 when it has none). Consumers order runs of one host by
+	// (boot_id, run_number) instead of the run_id's wall-clock time.
+	BootId        string `protobuf:"bytes,13,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	RunNumber     uint64 `protobuf:"varint,14,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1199,8 +1262,22 @@ func (x *ExposureEvent) GetOrigin() string {
 	return ""
 }
 
+func (x *ExposureEvent) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *ExposureEvent) GetRunNumber() uint64 {
+	if x != nil {
+		return x.RunNumber
+	}
+	return 0
+}
+
 // ExposureConfirmation is published by the outside checker (portwarden-verifier) on
-// asm.<host>.exposure.confirmed after it probed a listener from outside the server.
+// pwb.verifier.<host>.exposure after it probed a listener from outside the server.
 type ExposureConfirmation struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	EventId string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
@@ -1371,14 +1448,19 @@ func (x *ExposureConfirmation) GetOrigin() string {
 // HostEvent is published on asm.<host>.host.changed when the public-IP candidates or the
 // cloud identity change.
 type HostEvent struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
-	HostId        string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
-	RunId         string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	Seq           uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
-	ObservedAt    *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
-	Host          *HostInfo              `protobuf:"bytes,6,opt,name=host,proto3" json:"host,omitempty"`
-	Previous      *HostInfo              `protobuf:"bytes,7,opt,name=previous,proto3" json:"previous,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	EventId    string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	HostId     string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	RunId      string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	Seq        uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
+	ObservedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	Host       *HostInfo              `protobuf:"bytes,6,opt,name=host,proto3" json:"host,omitempty"`
+	Previous   *HostInfo              `protobuf:"bytes,7,opt,name=previous,proto3" json:"previous,omitempty"`
+	// Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
+	// its spool directory (0 when it has none). Consumers order runs of one host by
+	// (boot_id, run_number) instead of the run_id's wall-clock time.
+	BootId        string `protobuf:"bytes,8,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	RunNumber     uint64 `protobuf:"varint,9,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1460,6 +1542,20 @@ func (x *HostEvent) GetPrevious() *HostInfo {
 		return x.Previous
 	}
 	return nil
+}
+
+func (x *HostEvent) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *HostEvent) GetRunNumber() uint64 {
+	if x != nil {
+		return x.RunNumber
+	}
+	return 0
 }
 
 // Proxy is a reverse proxy instance (nginx, Apache, HAProxy, or an observed-only kind).
@@ -1945,8 +2041,13 @@ type ProxyRoutes struct {
 	Host    *HostInfo `protobuf:"bytes,10,opt,name=host,proto3" json:"host,omitempty"`
 	// The route set was cut to stay under the size limits (500 routes, half the server's
 	// max_payload): routes holds the first ones in order, total_routes how many there are.
-	Truncated     bool   `protobuf:"varint,11,opt,name=truncated,proto3" json:"truncated,omitempty"`
-	TotalRoutes   uint32 `protobuf:"varint,12,opt,name=total_routes,json=totalRoutes,proto3" json:"total_routes,omitempty"`
+	Truncated   bool   `protobuf:"varint,11,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	TotalRoutes uint32 `protobuf:"varint,12,opt,name=total_routes,json=totalRoutes,proto3" json:"total_routes,omitempty"`
+	// Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
+	// its spool directory (0 when it has none). Consumers order runs of one host by
+	// (boot_id, run_number) instead of the run_id's wall-clock time.
+	BootId        string `protobuf:"bytes,13,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	RunNumber     uint64 `protobuf:"varint,14,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2065,6 +2166,20 @@ func (x *ProxyRoutes) GetTotalRoutes() uint32 {
 	return 0
 }
 
+func (x *ProxyRoutes) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *ProxyRoutes) GetRunNumber() uint64 {
+	if x != nil {
+		return x.RunNumber
+	}
+	return 0
+}
+
 // ProxyRef names a proxy route that ends at a listener (on the backend's events).
 type ProxyRef struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
@@ -2167,6 +2282,123 @@ func (x *ProxyRef) GetSeen() bool {
 	return false
 }
 
+// ProbeRequest is published by the inventory on pwb.probe.<host>.request: probe this
+// listener on these candidate addresses. The candidates come from the inventory's stored
+// state (the listener's bind address and the host block it holds), never from the event
+// that triggered the request; the verifier still filters them by its allowlist (and,
+// for private addresses, by its own per-host list).
+type ProbeRequest struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	EventId     string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	HostId      string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	RequestedAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=requested_at,json=requestedAt,proto3" json:"requested_at,omitempty"`
+	Listener    *Listener              `protobuf:"bytes,4,opt,name=listener,proto3" json:"listener,omitempty"`
+	// The listener's effective level (proto numbering).
+	Level ExposureLevel `protobuf:"varint,5,opt,name=level,proto3,enum=asm.v1.ExposureLevel" json:"level,omitempty"`
+	// Candidate addresses (at most 4) and ports (at most 4; a mapped container listener's
+	// host ports).
+	Addresses []string `protobuf:"bytes,6,rep,name=addresses,proto3" json:"addresses,omitempty"`
+	Ports     []uint32 `protobuf:"varint,7,rep,packed,name=ports,proto3" json:"ports,omitempty"`
+	Proto     string   `protobuf:"bytes,8,opt,name=proto,proto3" json:"proto,omitempty"`
+	// exposure (a level change), cloud (a cloud verdict) or reprobe (periodic).
+	Reason        string `protobuf:"bytes,9,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProbeRequest) Reset() {
+	*x = ProbeRequest{}
+	mi := &file_asm_v1_events_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProbeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProbeRequest) ProtoMessage() {}
+
+func (x *ProbeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProbeRequest.ProtoReflect.Descriptor instead.
+func (*ProbeRequest) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *ProbeRequest) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *ProbeRequest) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *ProbeRequest) GetRequestedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RequestedAt
+	}
+	return nil
+}
+
+func (x *ProbeRequest) GetListener() *Listener {
+	if x != nil {
+		return x.Listener
+	}
+	return nil
+}
+
+func (x *ProbeRequest) GetLevel() ExposureLevel {
+	if x != nil {
+		return x.Level
+	}
+	return ExposureLevel_EXPOSURE_LEVEL_UNSPECIFIED
+}
+
+func (x *ProbeRequest) GetAddresses() []string {
+	if x != nil {
+		return x.Addresses
+	}
+	return nil
+}
+
+func (x *ProbeRequest) GetPorts() []uint32 {
+	if x != nil {
+		return x.Ports
+	}
+	return nil
+}
+
+func (x *ProbeRequest) GetProto() string {
+	if x != nil {
+		return x.Proto
+	}
+	return ""
+}
+
+func (x *ProbeRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 var File_asm_v1_events_proto protoreflect.FileDescriptor
 
 const file_asm_v1_events_proto_rawDesc = "" +
@@ -2193,7 +2425,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"socketUnit\x12/\n" +
 	"\tcontainer\x18\t \x01(\v2\x11.asm.v1.ContainerR\tcontainer\x12\x1b\n" +
 	"\tcgroup_id\x18\n" +
-	" \x01(\x04R\bcgroupId\"\x99\x04\n" +
+	" \x01(\x04R\bcgroupId\"\xd1\x04\n" +
 	"\rListenerEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -2209,12 +2441,15 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	" \x03(\v2\x0f.asm.v1.ProcessR\x11previousProcesses\x12,\n" +
 	"\bexposure\x18\v \x01(\v2\x10.asm.v1.ExposureR\bexposure\x12$\n" +
 	"\x04host\x18\f \x01(\v2\x10.asm.v1.HostInfoR\x04host\x123\n" +
-	"\fbehind_proxy\x18\r \x03(\v2\x10.asm.v1.ProxyRefR\vbehindProxy\"\xcf\x01\n" +
+	"\fbehind_proxy\x18\r \x03(\v2\x10.asm.v1.ProxyRefR\vbehindProxy\x12\x17\n" +
+	"\aboot_id\x18\x0e \x01(\tR\x06bootId\x12\x1d\n" +
+	"\n" +
+	"run_number\x18\x0f \x01(\x04R\trunNumber\"\xcf\x01\n" +
 	"\rListenerState\x12,\n" +
 	"\blistener\x18\x01 \x01(\v2\x10.asm.v1.ListenerR\blistener\x12-\n" +
 	"\tprocesses\x18\x02 \x03(\v2\x0f.asm.v1.ProcessR\tprocesses\x12,\n" +
 	"\bexposure\x18\x03 \x01(\v2\x10.asm.v1.ExposureR\bexposure\x123\n" +
-	"\fbehind_proxy\x18\x04 \x03(\v2\x10.asm.v1.ProxyRefR\vbehindProxy\"\xa7\x02\n" +
+	"\fbehind_proxy\x18\x04 \x03(\v2\x10.asm.v1.ProxyRefR\vbehindProxy\"\xdf\x02\n" +
 	"\bSnapshot\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -2223,7 +2458,11 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\btaken_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\atakenAt\x123\n" +
 	"\tlisteners\x18\x06 \x03(\v2\x15.asm.v1.ListenerStateR\tlisteners\x12$\n" +
 	"\x04host\x18\a \x01(\v2\x10.asm.v1.HostInfoR\x04host\x12,\n" +
-	"\aproxies\x18\b \x03(\v2\x12.asm.v1.ProxyStateR\aproxies\"\x92\x02\n" +
+	"\aproxies\x18\b \x03(\v2\x12.asm.v1.ProxyStateR\aproxies\x12\x17\n" +
+	"\aboot_id\x18\t \x01(\tR\x06bootId\x12\x1d\n" +
+	"\n" +
+	"run_number\x18\n" +
+	" \x01(\x04R\trunNumber\"\xca\x02\n" +
 	"\tHeartbeat\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -2233,7 +2472,11 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\rringbuf_drops\x18\x06 \x01(\x04R\fringbufDrops\x12\x1f\n" +
 	"\vqueue_drops\x18\a \x01(\x04R\n" +
 	"queueDrops\x126\n" +
-	"\x15dropped_foreign_netns\x18\b \x01(\x04B\x02\x18\x01R\x13droppedForeignNetns\"S\n" +
+	"\x15dropped_foreign_netns\x18\b \x01(\x04B\x02\x18\x01R\x13droppedForeignNetns\x12\x17\n" +
+	"\aboot_id\x18\t \x01(\tR\x06bootId\x12\x1d\n" +
+	"\n" +
+	"run_number\x18\n" +
+	" \x01(\x04R\trunNumber\"S\n" +
 	"\bExposure\x12+\n" +
 	"\x05level\x18\x01 \x01(\x0e2\x15.asm.v1.ExposureLevelR\x05level\x12\x1a\n" +
 	"\bevidence\x18\x02 \x03(\tR\bevidence\"T\n" +
@@ -2251,7 +2494,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\n" +
 	"conditions\x18\x04 \x03(\tR\n" +
 	"conditions\x12\x16\n" +
-	"\x06region\x18\x05 \x01(\tR\x06region\"\xba\x03\n" +
+	"\x06region\x18\x05 \x01(\tR\x06region\"\xf2\x03\n" +
 	"\rExposureEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -2266,7 +2509,10 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\atrigger\x18\n" +
 	" \x01(\tR\atrigger\x12$\n" +
 	"\x04host\x18\v \x01(\v2\x10.asm.v1.HostInfoR\x04host\x12\x16\n" +
-	"\x06origin\x18\f \x01(\tR\x06origin\"\xcb\x03\n" +
+	"\x06origin\x18\f \x01(\tR\x06origin\x12\x17\n" +
+	"\aboot_id\x18\r \x01(\tR\x06bootId\x12\x1d\n" +
+	"\n" +
+	"run_number\x18\x0e \x01(\x04R\trunNumber\"\xcb\x03\n" +
 	"\x14ExposureConfirmation\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -2284,7 +2530,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x06rtt_ms\x18\f \x01(\rR\x05rttMs\x12\x18\n" +
 	"\achecker\x18\r \x01(\tR\achecker\x12,\n" +
 	"\bexposure\x18\x0e \x01(\v2\x10.asm.v1.ExposureR\bexposure\x12\x16\n" +
-	"\x06origin\x18\x0f \x01(\tR\x06origin\"\xf9\x01\n" +
+	"\x06origin\x18\x0f \x01(\tR\x06origin\"\xb1\x02\n" +
 	"\tHostEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -2293,7 +2539,10 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\vobserved_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"observedAt\x12$\n" +
 	"\x04host\x18\x06 \x01(\v2\x10.asm.v1.HostInfoR\x04host\x12,\n" +
-	"\bprevious\x18\a \x01(\v2\x10.asm.v1.HostInfoR\bprevious\"\x89\x02\n" +
+	"\bprevious\x18\a \x01(\v2\x10.asm.v1.HostInfoR\bprevious\x12\x17\n" +
+	"\aboot_id\x18\b \x01(\tR\x06bootId\x12\x1d\n" +
+	"\n" +
+	"run_number\x18\t \x01(\x04R\trunNumber\"\x89\x02\n" +
 	"\x05Proxy\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12-\n" +
@@ -2339,7 +2588,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\vroute_count\x18\x03 \x01(\rR\n" +
 	"routeCount\x12#\n" +
 	"\rroutes_digest\x18\x04 \x01(\tR\froutesDigest\x12\x1c\n" +
-	"\ttruncated\x18\x05 \x01(\bR\ttruncated\"\x93\x03\n" +
+	"\ttruncated\x18\x05 \x01(\bR\ttruncated\"\xcb\x03\n" +
 	"\vProxyRoutes\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -2354,7 +2603,10 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x04host\x18\n" +
 	" \x01(\v2\x10.asm.v1.HostInfoR\x04host\x12\x1c\n" +
 	"\ttruncated\x18\v \x01(\bR\ttruncated\x12!\n" +
-	"\ftotal_routes\x18\f \x01(\rR\vtotalRoutes\"\xf3\x01\n" +
+	"\ftotal_routes\x18\f \x01(\rR\vtotalRoutes\x12\x17\n" +
+	"\aboot_id\x18\r \x01(\tR\x06bootId\x12\x1d\n" +
+	"\n" +
+	"run_number\x18\x0e \x01(\x04R\trunNumber\"\xf3\x01\n" +
 	"\bProxyRef\x12\x19\n" +
 	"\bproxy_id\x18\x01 \x01(\tR\aproxyId\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12%\n" +
@@ -2363,7 +2615,17 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\fserver_names\x18\x05 \x03(\tR\vserverNames\x12\x12\n" +
 	"\x04path\x18\x06 \x01(\tR\x04path\x12\x16\n" +
 	"\x06config\x18\a \x01(\bR\x06config\x12\x12\n" +
-	"\x04seen\x18\b \x01(\bR\x04seen*G\n" +
+	"\x04seen\x18\b \x01(\bR\x04seen\"\xbe\x02\n" +
+	"\fProbeRequest\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
+	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12=\n" +
+	"\frequested_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\vrequestedAt\x12,\n" +
+	"\blistener\x18\x04 \x01(\v2\x10.asm.v1.ListenerR\blistener\x12+\n" +
+	"\x05level\x18\x05 \x01(\x0e2\x15.asm.v1.ExposureLevelR\x05level\x12\x1c\n" +
+	"\taddresses\x18\x06 \x03(\tR\taddresses\x12\x14\n" +
+	"\x05ports\x18\a \x03(\rR\x05ports\x12\x14\n" +
+	"\x05proto\x18\b \x01(\tR\x05proto\x12\x16\n" +
+	"\x06reason\x18\t \x01(\tR\x06reason*G\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
@@ -2397,7 +2659,7 @@ func file_asm_v1_events_proto_rawDescGZIP() []byte {
 }
 
 var file_asm_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_asm_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_asm_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_asm_v1_events_proto_goTypes = []any{
 	(Kind)(0),                     // 0: asm.v1.Kind
 	(Source)(0),                   // 1: asm.v1.Source
@@ -2421,11 +2683,12 @@ var file_asm_v1_events_proto_goTypes = []any{
 	(*ProxyState)(nil),            // 19: asm.v1.ProxyState
 	(*ProxyRoutes)(nil),           // 20: asm.v1.ProxyRoutes
 	(*ProxyRef)(nil),              // 21: asm.v1.ProxyRef
-	(*timestamppb.Timestamp)(nil), // 22: google.protobuf.Timestamp
+	(*ProbeRequest)(nil),          // 22: asm.v1.ProbeRequest
+	(*timestamppb.Timestamp)(nil), // 23: google.protobuf.Timestamp
 }
 var file_asm_v1_events_proto_depIdxs = []int32{
 	4,  // 0: asm.v1.Process.container:type_name -> asm.v1.Container
-	22, // 1: asm.v1.ListenerEvent.observed_at:type_name -> google.protobuf.Timestamp
+	23, // 1: asm.v1.ListenerEvent.observed_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: asm.v1.ListenerEvent.kind:type_name -> asm.v1.Kind
 	1,  // 3: asm.v1.ListenerEvent.source:type_name -> asm.v1.Source
 	3,  // 4: asm.v1.ListenerEvent.listener:type_name -> asm.v1.Listener
@@ -2438,45 +2701,48 @@ var file_asm_v1_events_proto_depIdxs = []int32{
 	5,  // 11: asm.v1.ListenerState.processes:type_name -> asm.v1.Process
 	10, // 12: asm.v1.ListenerState.exposure:type_name -> asm.v1.Exposure
 	21, // 13: asm.v1.ListenerState.behind_proxy:type_name -> asm.v1.ProxyRef
-	22, // 14: asm.v1.Snapshot.taken_at:type_name -> google.protobuf.Timestamp
+	23, // 14: asm.v1.Snapshot.taken_at:type_name -> google.protobuf.Timestamp
 	7,  // 15: asm.v1.Snapshot.listeners:type_name -> asm.v1.ListenerState
 	12, // 16: asm.v1.Snapshot.host:type_name -> asm.v1.HostInfo
 	19, // 17: asm.v1.Snapshot.proxies:type_name -> asm.v1.ProxyState
-	22, // 18: asm.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
+	23, // 18: asm.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
 	2,  // 19: asm.v1.Exposure.level:type_name -> asm.v1.ExposureLevel
 	11, // 20: asm.v1.HostInfo.public_ips:type_name -> asm.v1.PublicIP
-	22, // 21: asm.v1.ExposureEvent.observed_at:type_name -> google.protobuf.Timestamp
+	23, // 21: asm.v1.ExposureEvent.observed_at:type_name -> google.protobuf.Timestamp
 	3,  // 22: asm.v1.ExposureEvent.listener:type_name -> asm.v1.Listener
 	5,  // 23: asm.v1.ExposureEvent.processes:type_name -> asm.v1.Process
 	10, // 24: asm.v1.ExposureEvent.exposure:type_name -> asm.v1.Exposure
 	10, // 25: asm.v1.ExposureEvent.previous:type_name -> asm.v1.Exposure
 	12, // 26: asm.v1.ExposureEvent.host:type_name -> asm.v1.HostInfo
-	22, // 27: asm.v1.ExposureConfirmation.observed_at:type_name -> google.protobuf.Timestamp
+	23, // 27: asm.v1.ExposureConfirmation.observed_at:type_name -> google.protobuf.Timestamp
 	3,  // 28: asm.v1.ExposureConfirmation.listener:type_name -> asm.v1.Listener
 	10, // 29: asm.v1.ExposureConfirmation.exposure:type_name -> asm.v1.Exposure
-	22, // 30: asm.v1.HostEvent.observed_at:type_name -> google.protobuf.Timestamp
+	23, // 30: asm.v1.HostEvent.observed_at:type_name -> google.protobuf.Timestamp
 	12, // 31: asm.v1.HostEvent.host:type_name -> asm.v1.HostInfo
 	12, // 32: asm.v1.HostEvent.previous:type_name -> asm.v1.HostInfo
 	5,  // 33: asm.v1.Proxy.processes:type_name -> asm.v1.Process
 	3,  // 34: asm.v1.Proxy.listeners:type_name -> asm.v1.Listener
 	3,  // 35: asm.v1.ProxyBackend.listener:type_name -> asm.v1.Listener
 	5,  // 36: asm.v1.ProxyBackend.processes:type_name -> asm.v1.Process
-	22, // 37: asm.v1.ProxyBackend.last_seen:type_name -> google.protobuf.Timestamp
+	23, // 37: asm.v1.ProxyBackend.last_seen:type_name -> google.protobuf.Timestamp
 	3,  // 38: asm.v1.ProxyRoute.frontends:type_name -> asm.v1.Listener
 	17, // 39: asm.v1.ProxyRoute.backends:type_name -> asm.v1.ProxyBackend
 	16, // 40: asm.v1.ProxyState.proxy:type_name -> asm.v1.Proxy
 	18, // 41: asm.v1.ProxyState.routes:type_name -> asm.v1.ProxyRoute
-	22, // 42: asm.v1.ProxyRoutes.observed_at:type_name -> google.protobuf.Timestamp
+	23, // 42: asm.v1.ProxyRoutes.observed_at:type_name -> google.protobuf.Timestamp
 	16, // 43: asm.v1.ProxyRoutes.proxy:type_name -> asm.v1.Proxy
 	18, // 44: asm.v1.ProxyRoutes.routes:type_name -> asm.v1.ProxyRoute
 	12, // 45: asm.v1.ProxyRoutes.host:type_name -> asm.v1.HostInfo
 	5,  // 46: asm.v1.ProxyRef.proxy:type_name -> asm.v1.Process
 	3,  // 47: asm.v1.ProxyRef.frontends:type_name -> asm.v1.Listener
-	48, // [48:48] is the sub-list for method output_type
-	48, // [48:48] is the sub-list for method input_type
-	48, // [48:48] is the sub-list for extension type_name
-	48, // [48:48] is the sub-list for extension extendee
-	0,  // [0:48] is the sub-list for field type_name
+	23, // 48: asm.v1.ProbeRequest.requested_at:type_name -> google.protobuf.Timestamp
+	3,  // 49: asm.v1.ProbeRequest.listener:type_name -> asm.v1.Listener
+	2,  // 50: asm.v1.ProbeRequest.level:type_name -> asm.v1.ExposureLevel
+	51, // [51:51] is the sub-list for method output_type
+	51, // [51:51] is the sub-list for method input_type
+	51, // [51:51] is the sub-list for extension type_name
+	51, // [51:51] is the sub-list for extension extendee
+	0,  // [0:51] is the sub-list for field type_name
 }
 
 func init() { file_asm_v1_events_proto_init() }
@@ -2490,7 +2756,7 @@ func file_asm_v1_events_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_asm_v1_events_proto_rawDesc), len(file_asm_v1_events_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   19,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

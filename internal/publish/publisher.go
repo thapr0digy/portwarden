@@ -53,9 +53,12 @@ var reconnectWait = time.Second
 // where SpoolMax counts each message as 1 KiB. Zero SpoolMax means 64 MiB.
 type Config struct {
 	URL, CredsFile, CAFile, CertFile, KeyFile string
-	HostID                                    string
-	SpoolDir                                  string
-	SpoolMax                                  int64
+	// NkeyFile is an nkey user seed file (portwarden-natsauth mint), an alternative to
+	// CredsFile for servers configured with nkey users.
+	NkeyFile string
+	HostID   string
+	SpoolDir string
+	SpoolMax int64
 	// LocalAddr, when set, is called with the local address of every TCP connection
 	// made to NATS (the agent's own view of its outbound address). It must not block.
 	LocalAddr func(netip.Addr)
@@ -111,7 +114,10 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	if cfg.SpoolMax == 0 {
 		cfg.SpoolMax = defaultSpoolMax
 	}
-	for _, f := range []string{cfg.CredsFile, cfg.CAFile, cfg.CertFile, cfg.KeyFile} {
+	if cfg.CredsFile != "" && cfg.NkeyFile != "" {
+		return nil, errors.New("publish: CredsFile and NkeyFile are exclusive")
+	}
+	for _, f := range []string{cfg.CredsFile, cfg.NkeyFile, cfg.CAFile, cfg.CertFile, cfg.KeyFile} {
 		if err := readable(f); err != nil {
 			return nil, err
 		}
@@ -170,6 +176,14 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	}
 	if cfg.CredsFile != "" {
 		opts = append(opts, nats.UserCredentials(cfg.CredsFile))
+	}
+	if cfg.NkeyFile != "" {
+		nk, err := nats.NkeyOptionFromSeed(cfg.NkeyFile)
+		if err != nil {
+			_ = q.Close()
+			return nil, fmt.Errorf("publish: nkey: %w", err)
+		}
+		opts = append(opts, nk)
 	}
 	if cfg.CAFile != "" {
 		opts = append(opts, nats.RootCAs(cfg.CAFile))

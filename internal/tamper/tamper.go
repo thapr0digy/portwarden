@@ -37,21 +37,30 @@ const (
 	KindFileChanged = "file_changed"
 	// KindCounterReset: a kernel counter the agent reads went down (its map was written).
 	KindCounterReset = "counter_reset"
-	// KindEventsDropped: the ring buffer dropped events since the last pass.
+	// KindEventsDropped: the ring buffer dropped events since the last pass;
+	// informational unless the drop rate reaches the agent's --tamper-drop-rate.
 	KindEventsDropped = "events_dropped"
+	// KindUpgraded (informational): the executable or a unit file was replaced by the
+	// agent's own package upgrade (the prerm marker is fresh and dpkg's md5sums for the
+	// version being installed list exactly this content).
+	KindUpgraded = "upgraded"
 )
 
-// Flag is one tamper signal. A flag is identified by Kind and Subject; Detail may change
-// from pass to pass without making it a new flag.
+// Flag is one tamper signal. A flag is identified by Kind, Subject and Fingerprint (what
+// was observed: a new hash, a tracer's pid); Detail may change from pass to pass without
+// making it a new flag, a new fingerprint does (ruling R-c).
 type Flag struct {
-	Kind    string
-	Subject string
-	Detail  string
+	Kind        string
+	Subject     string
+	Detail      string
+	Fingerprint string
+	// Info flags are reported, never paged.
+	Info bool
 	// Since is when the monitor first saw it.
 	Since time.Time
 }
 
-func (f Flag) key() string { return f.Kind + "\x00" + f.Subject }
+func (f Flag) key() string { return f.Kind + "\x00" + f.Subject + "\x00" + f.Fingerprint }
 
 // Check is one self-check.
 type Check interface {
@@ -135,8 +144,8 @@ func (m *Monitor) Pass(now time.Time) Transition {
 	}
 	for k, since := range m.since {
 		if _, ok := current[k]; !ok {
-			kind, subject, _ := strings.Cut(k, "\x00")
-			tr.Cleared = append(tr.Cleared, Flag{Kind: kind, Subject: subject, Since: since})
+			parts := strings.SplitN(k, "\x00", 3)
+			tr.Cleared = append(tr.Cleared, Flag{Kind: parts[0], Subject: parts[1], Fingerprint: parts[2], Since: since})
 			delete(m.since, k)
 		}
 	}

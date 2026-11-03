@@ -86,3 +86,18 @@ func TestParseFlagsTamper(t *testing.T) {
 		}
 	}
 }
+
+func TestParseFlagsM6FixWave(t *testing.T) {
+	o, err := parseFlags(nil)
+	if err != nil || o.tamperDropRate != 1000 || o.natsNkeyDir != "" {
+		t.Fatalf("defaults %+v %v", o, err)
+	}
+	if o, err := parseFlags([]string{"--nats-nkey-dir", "/etc/portwarden/nats", "--tamper-drop-rate", "0"}); err != nil || o.natsNkeyDir == "" || o.tamperDropRate != 0 {
+		t.Fatalf("parsed %+v %v", o, err)
+	}
+	for _, args := range [][]string{{"--nats-nkey-dir", "/x", "--nats-nkey", "/y"}, {"--tamper-drop-rate", "-1"}} {
+		if _, err := parseFlags(args); err == nil {
+			t.Fatalf("%v must be rejected", args)
+		}
+	}
+}

@@ -928,7 +928,13 @@ type TamperFlag struct {
 	// e.g. "link 12 now runs program 99 (tag 0a1b...), loaded 41 (tag 9f8e...)".
 	Detail string `protobuf:"bytes,3,opt,name=detail,proto3" json:"detail,omitempty"`
 	// When the agent first saw it (this run).
-	Since         *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=since,proto3" json:"since,omitempty"`
+	Since *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=since,proto3" json:"since,omitempty"`
+	// What was observed (a file's new hash, a tracer's pid, a link's program id): a new
+	// fingerprint for the same kind and subject is a new flag (M6 fix wave).
+	Fingerprint string `protobuf:"bytes,5,opt,name=fingerprint,proto3" json:"fingerprint,omitempty"`
+	// Informational: reported, never paged (an upgrade by the package, drops below the
+	// agent's --tamper-drop-rate).
+	Info          bool `protobuf:"varint,6,opt,name=info,proto3" json:"info,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -989,6 +995,20 @@ func (x *TamperFlag) GetSince() *timestamppb.Timestamp {
 		return x.Since
 	}
 	return nil
+}
+
+func (x *TamperFlag) GetFingerprint() string {
+	if x != nil {
+		return x.Fingerprint
+	}
+	return ""
+}
+
+func (x *TamperFlag) GetInfo() bool {
+	if x != nil {
+		return x.Info
+	}
+	return false
 }
 
 // TamperStatus is the result of the agent's last tamper pass.
@@ -2767,13 +2787,15 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\n" +
 	"run_number\x18\n" +
 	" \x01(\x04R\trunNumber\x12,\n" +
-	"\x06tamper\x18\v \x01(\v2\x14.asm.v1.TamperStatusR\x06tamper\"\x84\x01\n" +
+	"\x06tamper\x18\v \x01(\v2\x14.asm.v1.TamperStatusR\x06tamper\"\xba\x01\n" +
 	"\n" +
 	"TamperFlag\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x18\n" +
 	"\asubject\x18\x02 \x01(\tR\asubject\x12\x16\n" +
 	"\x06detail\x18\x03 \x01(\tR\x06detail\x120\n" +
-	"\x05since\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x05since\"\xdd\x02\n" +
+	"\x05since\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x05since\x12 \n" +
+	"\vfingerprint\x18\x05 \x01(\tR\vfingerprint\x12\x12\n" +
+	"\x04info\x18\x06 \x01(\bR\x04info\"\xdd\x02\n" +
 	"\fTamperStatus\x12(\n" +
 	"\x05flags\x18\x01 \x03(\v2\x12.asm.v1.TamperFlagR\x05flags\x129\n" +
 	"\n" +

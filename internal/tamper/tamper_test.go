@@ -159,24 +159,125 @@ func TestFileSetUnit(t *testing.T) {
 
 func TestCounter(t *testing.T) {
 	v := uint64(0)
+	now := t0
 	c := NewCounter("ringbuf_drops", func() (uint64, error) { return v, nil })
+	c.now = func() time.Time { return now }
+	c.PageRate = 100
 	if flags, _ := c.Run(); len(flags) != 0 {
 		t.Fatalf("zero: %v", flags)
 	}
-	v = 5
-	if flags, _ := c.Run(); len(flags) != 1 || flags[0].Kind != KindEventsDropped {
-		t.Fatalf("drops: %v", flags)
+	now, v = now.Add(time.Minute), 5
+	if flags, _ := c.Run(); len(flags) != 1 || flags[0].Kind != KindEventsDropped || !flags[0].Info {
+		t.Fatalf("a few drops are informational: %+v", flags)
 	}
+	now, v = now.Add(30*time.Second), 105 // 200 per minute
+	if flags, _ := c.Run(); len(flags) != 1 || flags[0].Info {
+		t.Fatalf("drops at or above the page rate page: %+v", flags)
+	}
+	now = now.Add(time.Minute)
 	if flags, _ := c.Run(); len(flags) != 0 {
 		t.Fatalf("no new drops: %v", flags)
 	}
 	v = 2 // someone wrote the counters map
-	if flags, _ := c.Run(); len(flags) != 1 || flags[0].Kind != KindCounterReset {
-		t.Fatalf("reset: %v", flags)
+	flags, _ := c.Run()
+	if len(flags) != 1 || flags[0].Kind != KindCounterReset || flags[0].Info || flags[0].Fingerprint != "105>2" {
+		t.Fatalf("reset: %+v", flags)
 	}
-	// Stays flagged while below the peak it reached.
-	if flags, _ := c.Run(); len(flags) != 1 || flags[0].Kind != KindCounterReset {
-		t.Fatalf("still reset: %v", flags)
+	// Raised for that pass only; the new value is the floor, so a second reset raises again.
+	if flags, _ := c.Run(); len(flags) != 0 {
+		t.Fatalf("after the reset: %v", flags)
+	}
+	v = 0
+	if flags, _ := c.Run(); len(flags) != 1 || flags[0].Fingerprint != "2>0" {
+		t.Fatalf("second reset: %+v", flags)
+	}
+}
+
+// A second, different change to a flagged file is a new flag (a new page), not hidden by
+// the first (ruling R-c).
+func TestNewFingerprintIsNewFlag(t *testing.T) {
+	dir := t.TempDir()
+	unit := filepath.Join(dir, "x.service")
+	write(t, unit, "a")
+	s, err := NewFileSet("unit", KindUnitChanged, StaticFiles(unit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewMonitor(s)
+	m.Pass(t0)
+	write(t, unit, "b")
+	if tr := m.Pass(t0.Add(time.Second)); len(tr.Raised) != 1 {
+		t.Fatalf("first edit: %+v", tr)
+	}
+	time.Sleep(10 * time.Millisecond)
+	write(t, unit, "c")
+	tr := m.Pass(t0.Add(2 * time.Second))
+	if len(tr.Raised) != 1 || len(tr.Cleared) != 1 || tr.Raised[0].Fingerprint == tr.Cleared[0].Fingerprint {
+		t.Fatalf("second edit must raise a new flag and clear the old: %+v", tr)
+	}
+}
+
+type fakePkgs struct {
+	version   string
+	upgrading bool
+	ships     map[string]string // path -> md5
+}
+
+func (f fakePkgs) Upgrading() (string, bool) { return f.version, f.upgrading }
+func (f fakePkgs) Ships(version, path, sum string) bool {
+	return version == f.version && f.ships[path] == sum
+}
+
+func TestUpgradeIsInfo(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "portwarden-agent")
+	write(t, exe, "v1")
+	base, _ := HashFile(exe)
+	c := NewSelfExe(exe, base)
+	pk := fakePkgs{version: "1.1.0", upgrading: true, ships: map[string]string{}}
+	c.Packages = pk
+	write(t, exe+".new", "v2")
+	if err := os.Rename(exe+".new", exe); err != nil {
+		t.Fatal(err)
+	}
+	// Mid-upgrade, before dpkg lists the new file: unknown, not tamper.
+	if _, err := c.Run(); err == nil {
+		t.Fatal("an unlisted change during an upgrade must be unknown")
+	}
+	sum, _ := md5File(exe)
+	pk.ships[exe] = sum
+	flags, err := c.Run()
+	if err != nil || len(flags) != 1 || flags[0].Kind != KindUpgraded || !flags[0].Info {
+		t.Fatalf("upgraded: %+v %v", flags, err)
+	}
+	// The same content with no upgrade in progress is tamper.
+	c.Packages = fakePkgs{}
+	if flags, _ := c.Run(); len(flags) != 1 || flags[0].Kind != KindBinaryReplaced || flags[0].Info {
+		t.Fatalf("no marker: %+v", flags)
+	}
+	// Content the package does not ship, during an upgrade, is never "upgraded".
+	pk.ships[exe] = "00"
+	c.Packages = pk
+	if _, err := c.Run(); err == nil {
+		t.Fatal("foreign content during an upgrade must not pass as upgraded")
+	}
+}
+
+func TestLazyRetriesUntilReady(t *testing.T) {
+	ready := false
+	l := &Lazy{CheckName: "unit", Init: func() (Check, error) {
+		if !ready {
+			return nil, errors.New("system bus not up")
+		}
+		return &fakeCheck{name: "unit"}, nil
+	}}
+	m := NewMonitor(l)
+	if st := m.Pass(t0).Status; len(st.Unknown) != 1 || !strings.Contains(st.Unknown[0], "not started yet") || st.Checks[0] != "unit" {
+		t.Fatalf("before the bus: %+v", st)
+	}
+	ready = true
+	if st := m.Pass(t0.Add(time.Second)).Status; len(st.Unknown) != 0 {
+		t.Fatalf("after: %+v", st)
 	}
 }
 

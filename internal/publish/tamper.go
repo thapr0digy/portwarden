@@ -67,7 +67,7 @@ func tamperStatusToProto(st tamper.Status) *asmv1.TamperStatus {
 func tamperFlagsToProto(flags []tamper.Flag) []*asmv1.TamperFlag {
 	out := make([]*asmv1.TamperFlag, 0, len(flags))
 	for _, f := range flags {
-		pf := &asmv1.TamperFlag{Kind: f.Kind, Subject: f.Subject, Detail: f.Detail}
+		pf := &asmv1.TamperFlag{Kind: f.Kind, Subject: f.Subject, Detail: f.Detail, Fingerprint: f.Fingerprint, Info: f.Info}
 		if !f.Since.IsZero() {
 			pf.Since = timestamppb.New(f.Since)
 		}

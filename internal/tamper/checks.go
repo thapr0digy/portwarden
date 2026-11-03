@@ -2,6 +2,7 @@ package tamper
 
 import (
 	"bufio"
+	"crypto/md5" //nolint:gosec // dpkg's md5sums are MD5; this only matches them
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // MaxHashBytes bounds how much of a watched file is hashed; a larger file is unknown.
@@ -51,39 +53,102 @@ type watchedFile struct {
 	path     string
 	baseline string
 	sig      string // "" until the first look, and after the file went missing
-	detail   string // the verdict for sig: "" when the content matches the baseline
+	got      string // the hash for sig
 }
 
-// look returns a non-empty detail when the file no longer matches its baseline, and
-// whether it is missing.
-func (w *watchedFile) look() (detail string, missing bool, err error) {
+// fileState is what one look saw.
+type fileState struct {
+	missing, changed bool
+	got              string // sha256 on disk (when present)
+}
+
+func (st fileState) detail(baseline string) string {
+	if st.missing {
+		return "removed"
+	}
+	return fmt.Sprintf("sha256 %s on disk, %s at start", short(st.got), short(baseline))
+}
+
+// fingerprint identifies what was seen: the new content's hash, or "removed". A new
+// fingerprint for the same file is a new flag (a second edit pages again).
+func (st fileState) fingerprint() string {
+	if st.missing {
+		return "removed"
+	}
+	return short(st.got)
+}
+
+func (w *watchedFile) look() (fileState, error) {
 	fi, err := os.Stat(w.path)
 	if errors.Is(err, fs.ErrNotExist) {
 		w.sig = ""
-		return "removed", true, nil
+		return fileState{missing: true, changed: true}, nil
 	}
 	if err != nil {
-		return "", false, err
+		return fileState{}, err
 	}
-	sig := signature(fi)
-	if sig == w.sig {
-		return w.detail, false, nil
+	if sig := signature(fi); sig != w.sig {
+		got, err := HashFile(w.path)
+		if err != nil {
+			return fileState{}, err
+		}
+		w.sig, w.got = sig, got
 	}
-	got, err := HashFile(w.path)
+	return fileState{changed: w.got != w.baseline, got: w.got}, nil
+}
+
+// Packages tells a package upgrade of the agent apart from tampering (ruling R-b).
+type Packages interface {
+	// Upgrading reports whether the agent's package is being upgraded (the marker its
+	// prerm writes, recent enough), and the version being installed.
+	Upgrading() (version string, ok bool)
+	// Ships reports whether the installed package, at that version, ships the file at
+	// path with this MD5 (dpkg's md5sums).
+	Ships(version, path, md5 string) bool
+}
+
+// judgeUpgrade decides a changed file while an upgrade may be running: upgraded (an
+// informational flag) when the package being installed ships exactly this content,
+// unknown while the upgrade runs and the package database does not list it yet, and
+// replaced (ok=false) otherwise.
+func judgeUpgrade(pkgs Packages, path string, st fileState) (flag *Flag, err error, decided bool) {
+	if pkgs == nil || st.missing {
+		return nil, nil, false
+	}
+	version, upgrading := pkgs.Upgrading()
+	if !upgrading {
+		return nil, nil, false
+	}
+	sum, err := md5File(path)
 	if err != nil {
-		return "", false, err
+		return nil, err, true
 	}
-	w.sig, w.detail = sig, ""
-	if got != w.baseline {
-		w.detail = fmt.Sprintf("sha256 %s on disk, %s at start", short(got), short(w.baseline))
+	if pkgs.Ships(version, path, sum) {
+		return &Flag{Kind: KindUpgraded, Subject: path, Info: true, Fingerprint: short(st.got),
+			Detail: "replaced by the package upgrade to " + version}, nil, true
 	}
-	return w.detail, false, nil
+	return nil, fmt.Errorf("%s changed during the upgrade to %s and is not (yet) what that package ships", path, version), true
+}
+
+func md5File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := md5.New()
+	if _, err := io.Copy(h, io.LimitReader(f, MaxHashBytes)); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // SelfExe checks the agent's executable: the file at path must hash like the running
 // image (baseline, the hash of /proc/self/exe at start).
 type SelfExe struct {
 	f watchedFile
+	// Packages, when set, turns a change that the package upgrade made into "upgraded".
+	Packages Packages
 }
 
 // NewSelfExe watches path against baseline.
@@ -96,16 +161,23 @@ func (*SelfExe) Name() string { return "self_exe" }
 
 // Run implements Check.
 func (s *SelfExe) Run() ([]Flag, error) {
-	detail, missing, err := s.f.look()
-	switch {
-	case err != nil:
+	st, err := s.f.look()
+	if err != nil {
 		return nil, err
-	case missing:
-		return []Flag{{Kind: KindBinaryMissing, Subject: s.f.path, Detail: "the executable was removed"}}, nil
-	case detail != "":
-		return []Flag{{Kind: KindBinaryReplaced, Subject: s.f.path, Detail: detail}}, nil
 	}
-	return nil, nil
+	if !st.changed {
+		return nil, nil
+	}
+	if f, err, decided := judgeUpgrade(s.Packages, s.f.path, st); decided {
+		if err != nil {
+			return nil, err
+		}
+		return []Flag{*f}, nil
+	}
+	if st.missing {
+		return []Flag{{Kind: KindBinaryMissing, Subject: s.f.path, Detail: "the executable was removed", Fingerprint: "removed"}}, nil
+	}
+	return []Flag{{Kind: KindBinaryReplaced, Subject: s.f.path, Detail: st.detail(s.f.baseline), Fingerprint: st.fingerprint()}}, nil
 }
 
 // FileSet checks a set of files that may itself change: a systemd unit's fragment and
@@ -115,6 +187,8 @@ type FileSet struct {
 	list       func() ([]string, error)
 	files      map[string]*watchedFile
 	baseline   []string
+	// Packages, when set, turns a change that the package upgrade made into "upgraded".
+	Packages Packages
 }
 
 // NewFileSet records the files list returns now and their hashes. Each later Run flags
@@ -159,23 +233,36 @@ func (s *FileSet) Run() ([]Flag, error) {
 	for _, p := range paths {
 		listed[p] = true
 		if _, ok := s.files[p]; !ok {
-			flags = append(flags, Flag{Kind: s.kind, Subject: p, Detail: "added since start"})
+			fp := "added"
+			if h, err := HashFile(p); err == nil {
+				fp = short(h)
+			}
+			flags = append(flags, Flag{Kind: s.kind, Subject: p, Detail: "added since start", Fingerprint: fp})
 		}
 	}
 	var errs []error
 	for _, p := range s.baseline {
 		w := s.files[p]
-		detail, _, err := w.look()
+		st, err := w.look()
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		if detail == "" && !listed[p] {
-			detail = "no longer part of it"
+		if !st.changed {
+			if !listed[p] {
+				flags = append(flags, Flag{Kind: s.kind, Subject: p, Detail: "no longer part of it", Fingerprint: "unlisted"})
+			}
+			continue
 		}
-		if detail != "" {
-			flags = append(flags, Flag{Kind: s.kind, Subject: p, Detail: detail})
+		if f, err, decided := judgeUpgrade(s.Packages, p, st); decided {
+			if err != nil {
+				errs = append(errs, err)
+			} else {
+				flags = append(flags, *f)
+			}
+			continue
 		}
+		flags = append(flags, Flag{Kind: s.kind, Subject: p, Detail: st.detail(w.baseline), Fingerprint: st.fingerprint()})
 	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
@@ -183,20 +270,53 @@ func (s *FileSet) Run() ([]Flag, error) {
 	return flags, nil
 }
 
+// Lazy is a check whose baseline cannot be taken yet (the system bus is not up early in
+// boot): every pass retries init until it succeeds, and reports unknown until then, so
+// the check is never dropped for the run (ruling R-d).
+type Lazy struct {
+	CheckName string
+	Init      func() (Check, error)
+	// OnReady, when set, is called once with the initialised check.
+	OnReady func(Check)
+	c       Check
+}
+
+// Name implements Check.
+func (l *Lazy) Name() string { return l.CheckName }
+
+// Run implements Check.
+func (l *Lazy) Run() ([]Flag, error) {
+	if l.c == nil {
+		c, err := l.Init()
+		if err != nil {
+			return nil, fmt.Errorf("not started yet: %w", err)
+		}
+		l.c = c
+		if l.OnReady != nil {
+			l.OnReady(c)
+		}
+	}
+	return l.c.Run()
+}
+
 // Counter checks that a kernel counter only rises: a decrease means its map was written
-// (counter_reset); a rise since the last pass is reported as events_dropped.
+// (counter_reset, raised for the pass that saw it; the new value is the floor from then
+// on, so a later reset raises again); a rise since the last pass is events_dropped,
+// informational unless it reaches PageRate per minute.
 type Counter struct {
 	name string
 	read func() (uint64, error)
+	now  func() time.Time
 	last uint64
+	at   time.Time
 	seen bool
-	// Peak is the highest value read, the floor a reset is judged against.
-	peak uint64
+	// PageRate: drops per minute at or above which events_dropped pages (0: never).
+	PageRate float64
 }
 
 // NewCounter watches the counter read returns, named name (e.g. "ringbuf_drops").
 func NewCounter(name string, read func() (uint64, error)) *Counter {
-	return &Counter{name: name, read: read}
+	return &Counter{name: name, read: read, now: time.Now}
 }
 
 // Name implements Check.
@@ -208,20 +328,28 @@ func (c *Counter) Run() ([]Flag, error) {
 	if err != nil {
 		return nil, err
 	}
+	now := c.now()
 	var flags []Flag
 	switch {
 	case !c.seen:
 		if v > 0 {
-			flags = append(flags, Flag{Kind: KindEventsDropped, Subject: c.name, Detail: fmt.Sprintf("%d dropped", v)})
+			flags = append(flags, Flag{Kind: KindEventsDropped, Subject: c.name, Detail: fmt.Sprintf("%d dropped before the first pass", v),
+				Info: true, Fingerprint: strconv.FormatUint(v, 10)})
 		}
-	case v < c.peak:
+	case v < c.last:
 		flags = append(flags, Flag{Kind: KindCounterReset, Subject: c.name,
-			Detail: fmt.Sprintf("went down from %d to %d", c.peak, v)})
+			Detail: fmt.Sprintf("went down from %d to %d", c.last, v), Fingerprint: fmt.Sprintf("%d>%d", c.last, v)})
 	case v > c.last:
-		flags = append(flags, Flag{Kind: KindEventsDropped, Subject: c.name, Detail: fmt.Sprintf("+%d (total %d)", v-c.last, v)})
+		n := v - c.last
+		f := Flag{Kind: KindEventsDropped, Subject: c.name, Detail: fmt.Sprintf("+%d (total %d)", n, v), Info: true,
+			Fingerprint: strconv.FormatUint(v, 10)}
+		if mins := now.Sub(c.at).Minutes(); c.PageRate > 0 && mins > 0 && float64(n)/mins >= c.PageRate {
+			f.Info = false
+			f.Detail += fmt.Sprintf(", %.0f per minute (page rate %.0f)", float64(n)/mins, c.PageRate)
+		}
+		flags = append(flags, f)
 	}
-	c.last, c.seen = v, true
-	c.peak = max(c.peak, v)
+	c.last, c.at, c.seen = v, now, true
 	return flags, nil
 }
 
@@ -273,10 +401,12 @@ func (a *Attachments) Run() ([]Flag, error) {
 		switch {
 		case !l.Attached:
 			flags = append(flags, Flag{Kind: KindProbeDetached, Subject: l.subject(),
-				Detail: fmt.Sprintf("link %d (program %d, tag %s) is detached", l.LinkID, l.WantProg, l.WantTag)})
+				Detail:      fmt.Sprintf("link %d (program %d, tag %s) is detached", l.LinkID, l.WantProg, l.WantTag),
+				Fingerprint: strconv.FormatUint(uint64(l.LinkID), 10)})
 		case l.Prog != l.WantProg:
 			flags = append(flags, Flag{Kind: KindProgramReplaced, Subject: l.subject(),
-				Detail: fmt.Sprintf("link %d runs program %d, loaded %d (tag %s)", l.LinkID, l.Prog, l.WantProg, l.WantTag)})
+				Detail:      fmt.Sprintf("link %d runs program %d, loaded %d (tag %s)", l.LinkID, l.Prog, l.WantProg, l.WantTag),
+				Fingerprint: strconv.FormatUint(uint64(l.Prog), 10)})
 		}
 	}
 	return flags, nil
@@ -319,13 +449,14 @@ func (t *Tracer) Run() ([]Flag, error) {
 	if len(tracers) == 0 {
 		return nil, nil
 	}
-	var parts []string
+	var parts, pids []string
 	for _, pid := range slices.Sorted(maps.Keys(tracers)) {
+		pids = append(pids, strconv.Itoa(pid))
 		tids := tracers[pid]
 		slices.Sort(tids)
 		parts = append(parts, fmt.Sprintf("pid %d%s traces thread(s) %s", pid, commOf(t.TaskDir, pid), strings.Join(tids, ",")))
 	}
-	return []Flag{{Kind: KindPtraced, Subject: "self", Detail: strings.Join(parts, "; ")}}, nil
+	return []Flag{{Kind: KindPtraced, Subject: "self", Detail: strings.Join(parts, "; "), Fingerprint: strings.Join(pids, ",")}}, nil
 }
 
 // commOf names the tracer, read from /proc/<pid>/comm next to the task dir's /proc.

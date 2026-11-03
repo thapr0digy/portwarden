@@ -90,3 +90,67 @@ func TestNewRejectsUnreadableNkey(t *testing.T) {
 		t.Fatal("want error for both creds and nkey")
 	}
 }
+
+// A host user minted for another host id (a shared Kubernetes Secret, a copied seed) is
+// refused every publish: OnDenied reports it, so the agent can stop instead of dropping
+// its messages silently.
+func TestDeniedPublishIsReported(t *testing.T) {
+	dir := t.TempDir()
+	users := filepath.Join(dir, "users")
+	if _, _, err := natsauth.Mint(users, natsauth.RoleAdmin, ""); err != nil {
+		t.Fatal(err)
+	}
+	_, seed, err := natsauth.Mint(users, natsauth.RoleHost, "someotherhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := natsauth.Load(users)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := natsauth.Render(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := fmt.Sprintf("listen: \"127.0.0.1:-1\"\njetstream { store_dir: %q }\n%s", filepath.Join(dir, "js"), block)
+	if err := os.WriteFile(filepath.Join(dir, "s.conf"), []byte(conf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := server.ProcessConfigFile(filepath.Join(dir, "s.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.NoLog, opts.NoSigs = true, true
+	s := startServerWith(t, opts)
+	defer stop(s)
+	adminOpt, err := nats.NkeyOptionFromSeed(filepath.Join(users, "admin.nk"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := nats.Connect(s.ClientURL(), adminOpt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	ajs, _ := jetstream.New(admin)
+	if _, err := ajs.CreateStream(context.Background(), jetstream.StreamConfig{Name: streamName, Subjects: []string{"asm.>"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	denied := make(chan string, 4)
+	p, err := New(context.Background(), Config{URL: s.ClientURL(), HostID: testHost, NkeyFile: seed,
+		OnDenied: func(subject string) { denied <- subject }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	p.Heartbeat(0)
+	select {
+	case subj := <-denied:
+		if subj != "asm."+testHost+".heartbeat" {
+			t.Fatalf("denied %q", subj)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("a denied publish was not reported")
+	}
+}

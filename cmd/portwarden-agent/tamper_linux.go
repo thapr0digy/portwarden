@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"maps"
 	"time"
@@ -16,35 +15,46 @@ import (
 
 // newTamperMonitor builds the agent's self-checks (design §9): its links, ptrace, its
 // executable, its systemd unit files, extra files, and the ring buffer's drop counter.
-// A check whose baseline cannot be read at start (no systemd unit, say) is left out
-// with a log line. extra (--tamper-files) may be nil.
-func newTamperMonitor(extra *tamper.FileSet, pr *probes.Probes, proxyConns *probes.ProxyConns, log *slog.Logger) *tamper.Monitor {
+// A check whose baseline cannot be taken yet is retried every pass (reported unknown
+// meanwhile), never dropped. extra (--tamper-files) may be nil.
+func newTamperMonitor(extra *tamper.FileSet, dropRate float64, pr *probes.Probes, proxyConns *probes.ProxyConns, log *slog.Logger) *tamper.Monitor {
 	checks := []tamper.Check{tamper.NewAttachments("probes", pr.Attachments)}
 	if proxyConns != nil {
 		checks = append(checks, tamper.NewAttachments("proxy_probes", proxyConns.Attachments))
 	}
 	checks = append(checks, tamper.SelfTracer())
-	if exe, err := tamper.SelfExeCheck(); err != nil {
-		log.Warn("tamper: executable check off", "err", err.Error())
-	} else {
-		checks = append(checks, exe)
-	}
-	if unit, list, err := tamper.UnitFiles(); err != nil {
-		level := slog.LevelWarn
-		if errors.Is(err, tamper.ErrNoUnit) {
-			level = slog.LevelInfo
+	// The package upgrade replaces the executable and unit file; dpkg's records tell
+	// that apart from tampering (ruling R-b).
+	pkgs := tamper.NewDpkg("portwarden-agent")
+	checks = append(checks, &tamper.Lazy{CheckName: "self_exe", Init: func() (tamper.Check, error) {
+		exe, err := tamper.SelfExeCheck()
+		if err != nil {
+			return nil, err
 		}
-		log.Log(context.Background(), level, "tamper: unit file check off", "err", err.Error())
-	} else if set, err := tamper.NewFileSet("unit", tamper.KindUnitChanged, list); err != nil {
-		log.Warn("tamper: unit file check off", "unit", unit, "err", err.Error())
-	} else {
+		exe.Packages = pkgs
+		return exe, nil
+	}})
+	// Early in boot the system bus is not up yet: the unit check retries every pass and
+	// reports unknown until it can take its baseline (ruling R-d).
+	checks = append(checks, &tamper.Lazy{CheckName: "unit", Init: func() (tamper.Check, error) {
+		unit, list, err := tamper.UnitFiles()
+		if err != nil {
+			return nil, err
+		}
+		set, err := tamper.NewFileSet("unit", tamper.KindUnitChanged, list)
+		if err != nil {
+			return nil, err
+		}
+		set.Packages = pkgs
 		log.Info("tamper: watching unit files", "unit", unit, "files", set.Files())
-		checks = append(checks, set)
-	}
+		return set, nil
+	}})
 	if extra != nil {
 		checks = append(checks, extra)
 	}
-	checks = append(checks, tamper.NewCounter("ringbuf_drops", func() (uint64, error) { return pr.Counters(), nil }))
+	drops := tamper.NewCounter("ringbuf_drops", func() (uint64, error) { return pr.Counters(), nil })
+	drops.PageRate = dropRate
+	checks = append(checks, drops)
 
 	mon := tamper.NewMonitor(checks...)
 	mon.Stats = func(st *tamper.Status) {

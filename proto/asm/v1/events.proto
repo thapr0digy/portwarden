@@ -124,6 +124,12 @@ message TamperFlag {
   string detail = 3;
   // When the agent first saw it (this run).
   google.protobuf.Timestamp since = 4;
+  // What was observed (a file's new hash, a tracer's pid, a link's program id): a new
+  // fingerprint for the same kind and subject is a new flag (M6 fix wave).
+  string fingerprint = 5;
+  // Informational: reported, never paged (an upgrade by the package, drops below the
+  // agent's --tamper-drop-rate).
+  bool info = 6;
 }
 
 // TamperStatus is the result of the agent's last tamper pass.

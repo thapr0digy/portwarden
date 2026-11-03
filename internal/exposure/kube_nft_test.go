@@ -27,7 +27,8 @@ func kubePodAddrs(pid uint32) ([]netip.Addr, error) {
 }
 
 // kube-proxy-nftables.json is written by hand from kube-proxy's nftables layout
-// (Kubernetes 1.31+, pkg/proxy/nftables/proxier.go), not taken from a live cluster: the
+// (Kubernetes release-1.31 pkg/proxy/nftables/proxier.go; testdata/gen/kube-proxy-nftables.py
+// writes it and the 1.34 and master variants), not taken from a live cluster: the
 // ip and ip6 kube-proxy tables with their base chains, services, the service-ips,
 // service-nodeports and nodeport-ips lookups, the endpoint, firewall and ClusterIP
 // checks and the masquerade chains; services web (NodePort 30080, two endpoints chosen

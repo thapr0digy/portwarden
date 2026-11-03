@@ -14,6 +14,7 @@ import (
 
 	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
+	"github.com/thapr0digy/portwarden/internal/model"
 )
 
 // Caps on one probe request.
@@ -110,7 +111,7 @@ func (r *ProbeRequester) now() time.Time {
 var dnatRe = regexp.MustCompile(`^nat: dnat (tcp|udp)/(\d+) -> `)
 
 // agentEvidenceV6Only is the agent's evidence for a v6-only [::] listener.
-const agentEvidenceV6Only = "bind:any (IPv6 only)"
+const agentEvidenceV6Only = model.EvidenceV6Only
 
 // BuildProbeRequest turns stored state into a request: the bind address when it is a
 // specific non-loopback one, else the host's stored inbound candidates of the bind's

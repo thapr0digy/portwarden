@@ -440,9 +440,10 @@ func natStmt(kind string, body json.RawMessage) firewall.Expr {
 		n.Kind = firewall.NATRedirect
 	}
 	var s struct {
-		Addr  json.RawMessage `json:"addr"`
-		Port  json.RawMessage `json:"port"`
-		Flags json.RawMessage `json:"flags"`
+		Addr   json.RawMessage `json:"addr"`
+		Port   json.RawMessage `json:"port"`
+		Flags  json.RawMessage `json:"flags"`
+		Offset json.RawMessage `json:"offset"`
 	}
 	if len(body) > 0 && string(body) != "null" {
 		if err := json.Unmarshal(body, &s); err != nil {
@@ -460,6 +461,11 @@ func natStmt(kind string, body json.RawMessage) firewall.Expr {
 		if hi != lo {
 			n.AddrHi = hi
 		}
+	}
+	if len(s.Offset) > 0 {
+		// A port offset (`dnat to a:p-q/base`) shifts every port by its own amount.
+		n.Unknown = kind + " port offset"
+		return n
 	}
 	if len(s.Port) > 0 {
 		lo, hi, ok := natRange(s.Port, port)

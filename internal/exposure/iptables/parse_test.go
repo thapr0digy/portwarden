@@ -237,6 +237,7 @@ func TestNATDestination(t *testing.T) {
 		"10.0.0.1:0":                  "",
 		":80":                         "",
 		"[fd00::2]x":                  "",
+		"10.0.0.1:8000-8999/1000":     "", // a port offset (iptables 1.8.6+) is not modelled: unknown
 	} {
 		d, err := natDestination(in)
 		got := ""
@@ -263,6 +264,8 @@ func TestNATTargetRanges(t *testing.T) {
 		{"-j REDIRECT --to-ports 9000-9100", firewall.NAT{Kind: firewall.NATRedirect, Port: 9000, PortHi: 9100}},
 		{"-j REDIRECT --to-ports 9000", firewall.NAT{Kind: firewall.NATRedirect, Port: 9000}},
 		{"-j REDIRECT --to-ports 9100-9000", firewall.NAT{Kind: firewall.NATRedirect, Unknown: "REDIRECT --to-ports 9100-9000"}},
+		// A port offset (`port-port/base`) maps each port to another by an offset: not modelled.
+		{"-j DNAT --to-destination 10.0.0.5:8000-8999/1000", firewall.NAT{Kind: firewall.NATDnat, Unknown: "DNAT --to-destination 10.0.0.5:8000-8999/1000"}},
 	} {
 		dump := "*nat\n:PREROUTING ACCEPT [0:0]\n-A PREROUTING -p tcp " + c.args + "\nCOMMIT\n"
 		rs, err := Parse([]byte(dump), firewall.FamilyIP)

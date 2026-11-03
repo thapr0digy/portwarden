@@ -45,7 +45,9 @@ int udp_sockets(struct bpf_iter__udp *ctx)
 	rec.family = sk->__sk_common.skc_family;
 	rec.port = sk->__sk_common.skc_num;
 	if (rec.family == AF_INET6) {
-		rec.v6only = BPF_CORE_READ_BITFIELD(&sk->__sk_common, skc_ipv6only) ? 2 : 1;
+		// 0 (not read) on a kernel without the field.
+		if (bpf_core_field_exists(sk->__sk_common.skc_ipv6only))
+			rec.v6only = BPF_CORE_READ_BITFIELD(&sk->__sk_common, skc_ipv6only) ? 2 : 1;
 		for (i = 0; i < 16; i++)
 			rec.addr[i] = sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr8[i];
 	} else {

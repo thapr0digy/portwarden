@@ -581,6 +581,10 @@ func (e *evaluator) applyNAT(s state, n NAT) []state {
 	if lo == hi || n.Random {
 		return []state{setAny(s)}
 	}
+	// The kernel (nf_nat_core get_unique_tuple) keeps the packet's port when it is in
+	// the range and the resulting tuple is unused; it picks another port of the range
+	// only for a tuple already in use. The first packet of a new connection from an
+	// arbitrary outside source makes a tuple nothing else uses, so its port is kept.
 	var out []state
 	for _, piece := range splitPorts(s, portCuts([]PortRange{{lo, hi}})) {
 		if piece.pkt.dport >= lo && piece.pkt.dportHi <= hi {

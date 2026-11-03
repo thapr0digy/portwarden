@@ -54,6 +54,9 @@ static __always_inline __u8 v6only_of(struct sock *sk)
 {
 	if (sk->__sk_common.skc_family != AF_INET6)
 		return 0;
+	// A kernel without the field (CO-RE relocation would fail): not read.
+	if (!bpf_core_field_exists(sk->__sk_common.skc_ipv6only))
+		return 0;
 	return BPF_CORE_READ_BITFIELD(&sk->__sk_common, skc_ipv6only) ? 2 : 1;
 }
 

@@ -1,3 +1,10 @@
+#!/usr/bin/env python3
+# Writes the kube-proxy nftables fixtures in `nft -j list ruleset` form, by hand from
+# kube-proxy's source (pkg/proxy/nftables/proxier.go: release-1.31, release-1.34, master)
+# and the CNI portmap plugin's portmap_nftables.go. Not taken from a live cluster.
+#   python3 testdata/gen/kube-proxy-nftables.py 1.31   > testdata/kube-proxy-nftables.json
+#   python3 testdata/gen/kube-proxy-nftables.py 1.34   > testdata/kube-proxy-nftables-1.34.json
+#   python3 testdata/gen/kube-proxy-nftables.py master > testdata/kube-proxy-nftables-master.json
 import json,sys
 V=sys.argv[1] if len(sys.argv)>1 else "1.31"
 out=[]

@@ -334,12 +334,15 @@ func (v *View) external(v4, v6 bool) []candidate {
 
 // Evidence for a [::] listener's IPV6_V6ONLY flag.
 const (
-	evV6Only        = "bind:any (IPv6 only)"
+	evV6Only        = model.EvidenceV6Only
 	evV6OnlyUnknown = "bind:v6only unknown (IPv4 judged too)"
 )
 
 // judgeHostPort judges a host port bound to addr that is not a socket's own key (the
-// host side of a mapping): a [::] one is judged for IPv4 too.
+// host side of a mapping): a [::] one is judged for IPv4 too. The mapping's own host
+// listener (docker-proxy's [::] socket) is judged separately with its real flag; this
+// path asks what a packet to the mapped host port meets, which is the same whatever
+// that socket's flag is, so it is left dual-stack on purpose.
 func (v *View) judgeHostPort(proto string, addr netip.Addr, port uint16) model.Exposure {
 	return v.judgeListener(proto, addr, port, model.V6OnlyOff)
 }

@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
+	"github.com/thapr0digy/portwarden/internal/model"
 )
 
 func TestBuildProbeRequest(t *testing.T) {
@@ -24,7 +25,7 @@ func TestBuildProbeRequest(t *testing.T) {
 	if r := BuildProbeRequest("h", in, "x", time.Now()); !slices.Contains(r.GetAddresses(), "2001:db8::1") {
 		t.Fatalf(":: must include IPv6: %v", r.GetAddresses())
 	}
-	in.AgentEvidence = []string{"bind:any (IPv6 only)", "nft: accept tcp/443 from 0/0 (eth0, inet f in)"}
+	in.AgentEvidence = []string{model.EvidenceV6Only, "nft: accept tcp/443 from 0/0 (eth0, inet f in)"}
 	if r := BuildProbeRequest("h", in, "x", time.Now()); !slices.Equal(r.GetAddresses(), []string{"2001:db8::1"}) {
 		t.Fatalf("a v6-only :: listener is probed over IPv6 only: %v", r.GetAddresses())
 	}

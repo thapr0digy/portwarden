@@ -96,3 +96,12 @@ func TestJudgeV6OnlyContainerListener(t *testing.T) {
 		t.Fatalf("unknown: judged as dual-stack, noted: %v %q", got.Level, got.Evidence)
 	}
 }
+
+// The inventory reads the v6-only evidence by this constant (probe requests).
+func TestV6OnlyEvidenceIsTheSharedConstant(t *testing.T) {
+	v := NewView("start", hostNS, nil, nil, vmIfs(), nil)
+	l := withV6Only(lst(hostNS, "tcp", "::", 9443), model.V6OnlyOn)
+	if e := v.judgeListener(l.Key.Proto, l.Key.Addr, l.Key.Port, l.V6Only); e.Evidence[0] != model.EvidenceV6Only || evV6Only != model.EvidenceV6Only {
+		t.Fatalf("%q", e.Evidence)
+	}
+}

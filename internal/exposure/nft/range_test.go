@@ -30,6 +30,8 @@ func TestNATStatementRanges(t *testing.T) {
 		{"dnat", `{"addr":{"range":["10.0.0.1","fd00::1"]}}`, firewall.NAT{Kind: firewall.NATDnat, Unknown: "dnat target"}},
 		{"dnat", `{"addr":"10.0.0.1","port":{"range":[90,80]}}`, firewall.NAT{Kind: firewall.NATDnat, Addr: ip("10.0.0.1"), Unknown: "dnat port"}},
 		{"dnat", `{"addr":{"map":{"key":{"meta":{"key":"l4proto"}},"data":"@m"}}}`, firewall.NAT{Kind: firewall.NATDnat, Unknown: "dnat target"}},
+		// A port offset is not modelled: whatever form carries it, the port is unknown.
+		{"dnat", `{"addr":"10.0.0.5","port":{"range":[8000,8999]},"offset":1000}`, firewall.NAT{Kind: firewall.NATDnat, Addr: ip("10.0.0.5"), Unknown: "dnat port offset"}},
 	} {
 		got := natStmt(c.kind, json.RawMessage(c.body))
 		if got != firewall.Expr(c.want) {

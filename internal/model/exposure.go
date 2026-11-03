@@ -38,11 +38,14 @@ func (l ExposureLevel) String() string {
 type Exposure struct {
 	Level    ExposureLevel
 	Evidence []string
+	// Degraded: judged while the firewall or interfaces could not be fully read. The
+	// agent then keeps a listener's last known level and adds this evidence instead.
+	Degraded bool
 }
 
 // Equal compares level and evidence.
 func (e Exposure) Equal(f Exposure) bool {
-	return e.Level == f.Level && slices.Equal(e.Evidence, f.Evidence)
+	return e.Level == f.Level && slices.Equal(e.Evidence, f.Evidence) && e.Degraded == f.Degraded
 }
 
 // Public-IP candidate sources and directions (design §5).
@@ -67,15 +70,20 @@ type HostInfo struct {
 	PublicIPs  []PublicIP
 	Cloud      string
 	InstanceID string
+	// Conditions are host-level problems that weaken the agent's judgements, e.g.
+	// "fw:unreadable iptables-save: Permission denied".
+	Conditions []string
 }
 
-// Equal compares every field, candidates in order.
+// Equal compares every field, candidates and conditions in order.
 func (h HostInfo) Equal(g HostInfo) bool {
-	return h.Cloud == g.Cloud && h.InstanceID == g.InstanceID && slices.Equal(h.PublicIPs, g.PublicIPs)
+	return h.Cloud == g.Cloud && h.InstanceID == g.InstanceID && slices.Equal(h.PublicIPs, g.PublicIPs) &&
+		slices.Equal(h.Conditions, g.Conditions)
 }
 
 // Clone returns a copy that shares no slice with h.
 func (h HostInfo) Clone() HostInfo {
 	h.PublicIPs = slices.Clone(h.PublicIPs)
+	h.Conditions = slices.Clone(h.Conditions)
 	return h
 }

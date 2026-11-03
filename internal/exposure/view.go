@@ -45,8 +45,17 @@ type View struct {
 
 	// natMaps are the host-port-to-elsewhere DNATs found by simulating packets.
 	natMaps []Mapping
-	results map[packetKey]firewall.Result
-	nsCache map[uint32][]netip.Addr
+	// natTargets are every DNAT target in a NAT table, whatever leads to it.
+	natTargets []netip.AddrPort
+	// opaque names NAT mechanisms the simulation cannot follow (kube-proxy nftables or
+	// IPVS mode, Cilium, Swarm ingress, LoadBalancer IPs, DNATs without a port match):
+	// with any of them, an unmapped container listener is undetermined, not local.
+	opaque []string
+	// unreadable lists what could not be read ("fw:unreadable …"); judgements are then
+	// Degraded.
+	unreadable []string
+	results    map[packetKey]firewall.Result
+	nsCache    map[uint32][]netip.Addr
 }
 
 type packetKey struct {
@@ -108,8 +117,31 @@ func (v *View) init() {
 	}
 	if v.fw != nil {
 		v.natMaps = v.findNATMappings()
+		v.natTargets, v.opaque = v.scanNAT()
+		for _, p := range v.fw.Partial {
+			v.unreadable = append(v.unreadable, "fw:unreadable "+p)
+		}
+	} else {
+		v.unreadable = append(v.unreadable, "fw:unreadable firewall ("+errText(v.fwErr)+")")
 	}
+	if v.ifErr != nil {
+		v.unreadable = append(v.unreadable, "fw:unreadable interfaces ("+v.ifErr.Error()+")")
+	}
+	for _, i := range v.ifs {
+		switch {
+		case i.Name == "kube-ipvs0":
+			v.opaque = append(v.opaque, "kube-proxy IPVS mode")
+		case strings.HasPrefix(i.Name, "cilium_"):
+			v.opaque = append(v.opaque, "Cilium")
+		}
+	}
+	slices.Sort(v.opaque)
+	v.opaque = slices.Compact(v.opaque)
 }
+
+// Conditions lists what this view could not read, for the host block; empty when the
+// firewall and the interfaces were read in full.
+func (v *View) Conditions() []string { return slices.Clone(v.unreadable) }
 
 // Trigger says why the view was built: start, firewall, interfaces or recheck.
 func (v *View) Trigger() string { return v.trigger }
@@ -134,9 +166,27 @@ func (v *View) Judge(ls []state.Listener) map[model.ListenerKey]model.Exposure {
 		} else {
 			e = v.judgeNetns(l, maps)
 		}
+		if len(v.unreadable) > 0 && !(e.Level == model.ExposureLocal && slices.Contains(e.Evidence, "bind:loopback")) {
+			e = v.degraded(e)
+		}
 		e.Evidence = dedupeKeepOrder(e.Evidence)
 		out[l.Key] = e
 	}
+	return out
+}
+
+// degraded is a judgement made without a full reading: level 1 undetermined, keeping
+// only the bind evidence. The agent keeps a listener's last known level instead when it
+// has one.
+func (v *View) degraded(e model.Exposure) model.Exposure {
+	out := model.Exposure{Level: model.ExposureBound, Degraded: true}
+	for _, ev := range e.Evidence {
+		if strings.HasPrefix(ev, "bind:") {
+			out.Evidence = append(out.Evidence, ev)
+		}
+	}
+	out.Evidence = append(out.Evidence, v.unreadable...)
+	out.Evidence = append(out.Evidence, "fw:undetermined read incomplete")
 	return out
 }
 
@@ -236,11 +286,11 @@ func (v *View) judgeFirewall(proto string, port uint16, ev []string, cands []can
 		if r.Decision() == firewall.Open {
 			e.Level = model.ExposureHostFirewallOpen
 			e.Evidence = append(e.Evidence, natEvidence(proto, port, r)...)
-			e.Evidence = append(e.Evidence, describe(proto, port, c, r))
+			e.Evidence = append(e.Evidence, describe(proto, port, c, r)...)
 			return e
 		}
 		if first == nil {
-			first = append(natEvidence(proto, port, r), describe(proto, port, c, r))
+			first = append(natEvidence(proto, port, r), describe(proto, port, c, r)...)
 		}
 	}
 	e.Evidence = append(e.Evidence, first...)
@@ -281,8 +331,10 @@ func natEvidence(proto string, port uint16, r firewall.Result) []string {
 }
 
 // describe renders the verdict for one candidate, e.g.
-// "nft: accept tcp/8443 from 0/0 (eth0, inet filter input)".
-func describe(proto string, port uint16, c candidate, r firewall.Result) string {
+// "nft: accept tcp/8443 from 0/0 (eth0, inet filter input)"; a drop of a port allowed
+// only from listed sources adds "restricted by source (<chain>)", an undecided one reads
+// "fw:undetermined <reasons> (…)".
+func describe(proto string, port uint16, c candidate, r firewall.Result) []string {
 	origin, where := "firewall", "no filter rules"
 	pick := func(accept bool) {
 		for _, o := range r.Outcomes {
@@ -297,13 +349,24 @@ func describe(proto string, port uint16, c candidate, r firewall.Result) string 
 			}
 		}
 	}
+	notes := r.Notes()
 	switch r.Decision() {
 	case firewall.Open:
 		pick(true)
-		return fmt.Sprintf("%s: accept %s/%d from 0/0 (%s, %s)", origin, proto, port, c.iface, where)
+		line := fmt.Sprintf("%s: accept %s/%d from 0/0 (%s, %s)", origin, proto, port, c.iface, where)
+		if slices.Contains(notes, "rate-limited") {
+			line += ", rate-limited"
+		}
+		return []string{line}
 	case firewall.Closed:
 		pick(false)
-		return fmt.Sprintf("%s: drop %s/%d from 0/0 (%s, %s)", origin, proto, port, c.iface, where)
+		out := []string{fmt.Sprintf("%s: drop %s/%d from 0/0 (%s, %s)", origin, proto, port, c.iface, where)}
+		for _, n := range notes {
+			if chain, ok := strings.CutPrefix(n, "source-restricted:"); ok {
+				out = append(out, "restricted by source ("+chain+")")
+			}
+		}
+		return out
 	}
 	for _, o := range r.Outcomes {
 		if o.Origin != "" {
@@ -311,29 +374,38 @@ func describe(proto string, port uint16, c candidate, r firewall.Result) string 
 			break
 		}
 	}
-	return fmt.Sprintf("%s: undetermined %s/%d from 0/0 (%s: %s)", origin, proto, port, c.iface, strings.Join(r.MaybeReasons(), ", "))
+	return []string{fmt.Sprintf("fw:undetermined %s (%s: %s/%d from 0/0, %s)", strings.Join(r.MaybeReasons(), ", "), origin, proto, port, c.iface)}
 }
 
-// judgeNetns judges a listener outside the host netns: internal unless a mapping
-// points the host at it, in which case it takes the mapped host port's exposure.
+// judgeNetns judges a listener outside the host netns. A mapping that points the host
+// at it gives it the mapped host port's exposure. Without one it is local only when
+// that is certain: its addresses were read, no DNAT targets it, and the ruleset holds
+// no NAT mechanism the simulation cannot follow; otherwise it is bound, undetermined.
 func (v *View) judgeNetns(l state.Listener, maps []Mapping) model.Exposure {
 	k := l.Key
 	if k.Addr.IsLoopback() {
 		return model.Exposure{Level: model.ExposureLocal, Evidence: []string{"bind:loopback"}}
 	}
 	addrs := []netip.Addr{k.Addr}
+	var addrErr error
 	if k.Addr.IsUnspecified() {
+		all, err := v.netnsAddrs(k.NetNS, l.Procs)
+		addrErr = err
 		addrs = nil
-		for _, a := range v.netnsAddrs(k.NetNS, l.Procs) {
+		for _, a := range all {
 			if a.Is4() || k.Addr.Is6() {
 				addrs = append(addrs, a)
 			}
 		}
 	}
+	targets := func(t netip.AddrPort) bool {
+		// Addresses unknown: any target on the listener's port may be it.
+		return t.Port() == k.Port && (addrErr != nil || slices.Contains(addrs, t.Addr()))
+	}
 	var best model.Exposure
 	found := false
 	for _, m := range maps {
-		if m.Proto != k.Proto || m.Target.Port() != k.Port || !slices.Contains(addrs, m.Target.Addr()) {
+		if m.Proto != k.Proto || !targets(m.Target) {
 			continue
 		}
 		e := v.judgeHostPort(m.Proto, m.Host.Addr(), m.Host.Port())
@@ -342,7 +414,14 @@ func (v *View) judgeNetns(l state.Listener, maps []Mapping) model.Exposure {
 			best, found = e, true
 		}
 	}
+	unreadable := ""
+	if addrErr != nil {
+		unreadable = "netns: addresses unreadable (" + addrErr.Error() + ")"
+	}
 	if found {
+		if unreadable != "" {
+			best.Evidence = append(best.Evidence, unreadable)
+		}
 		return best
 	}
 	for _, a := range addrs {
@@ -351,28 +430,118 @@ func (v *View) judgeNetns(l state.Listener, maps []Mapping) model.Exposure {
 				"netns: public address " + a.String(), "firewall: not judged (other netns)"}}
 		}
 	}
+	var why []string
+	if unreadable != "" {
+		why = append(why, unreadable)
+	}
+	for _, t := range v.natTargets {
+		if (t.Port() == 0 || t.Port() == k.Port) && (addrErr != nil || slices.Contains(addrs, t.Addr())) {
+			why = append(why, "nat: dnat target "+t.String()+" (path not judged)")
+		}
+	}
+	if len(v.opaque) > 0 {
+		why = append(why, "fw:undetermined netns mapping ("+strings.Join(v.opaque, ", ")+")")
+	}
+	if len(why) > 0 {
+		return model.Exposure{Level: model.ExposureBound, Evidence: why}
+	}
 	return model.Exposure{Level: model.ExposureLocal, Evidence: []string{"netns: no host port mapping"}}
 }
 
-// netnsAddrs returns the addresses of a netns, read through the first holder's /proc
-// entry and cached for the view's life.
-func (v *View) netnsAddrs(netns uint32, procs []model.Process) []netip.Addr {
+// netnsAddrs returns the addresses of a netns, read through one of its holders' /proc
+// entries and cached for the view's life.
+func (v *View) netnsAddrs(netns uint32, procs []model.Process) ([]netip.Addr, error) {
 	if a, ok := v.nsCache[netns]; ok {
-		return a
+		return a, nil
 	}
 	if v.nsAddrs == nil {
-		return nil
+		return nil, fmt.Errorf("no reader")
 	}
+	err := fmt.Errorf("no holder process")
 	for _, p := range procs {
 		if p.PID == 0 {
 			continue
 		}
-		if a, err := v.nsAddrs(p.PID); err == nil {
+		a, e := v.nsAddrs(p.PID)
+		if e == nil {
 			v.nsCache[netns] = a
-			return a
+			return a, nil
+		}
+		err = e
+	}
+	return nil, err
+}
+
+// scanNAT lists every DNAT target in the NAT tables and the NAT mechanisms the packet
+// simulation cannot follow.
+func (v *View) scanNAT() (targets []netip.AddrPort, opaque []string) {
+	natTable := map[string]bool{}
+	for _, c := range v.fw.Rules.Chains {
+		if c.Type == firewall.TypeNAT {
+			natTable[c.Origin+" "+c.Family.String()+" "+c.Table] = true
+		}
+		switch {
+		case c.Origin == "nft" && c.Table == "kube-proxy":
+			opaque = append(opaque, "kube-proxy nftables mode")
+		case strings.HasPrefix(c.Name, "CILIUM_") || c.Table == "cilium":
+			opaque = append(opaque, "Cilium")
+		case c.Name == "DOCKER-INGRESS":
+			opaque = append(opaque, "Docker Swarm ingress")
 		}
 	}
-	return nil
+	for _, c := range v.fw.Rules.Chains {
+		if !natTable[c.Origin+" "+c.Family.String()+" "+c.Table] {
+			continue
+		}
+		for _, r := range c.Rules {
+			hasDPort, hasForeignDAddr := false, false
+			for _, x := range r.Exprs {
+				switch x := x.(type) {
+				case firewall.Match:
+					if x.Field == firewall.FieldDPort && x.Op == firewall.OpEq {
+						hasDPort = true
+					}
+					if x.Field == firewall.FieldDAddr && x.Op == firewall.OpEq && !v.anyLocal(x.Pfx) {
+						hasForeignDAddr = true
+					}
+				case firewall.VMap:
+					if x.Unknown != "" {
+						opaque = append(opaque, "unreadable NAT rule ("+x.Unknown+")")
+					}
+				case firewall.NAT:
+					switch {
+					case x.Unknown != "":
+						opaque = append(opaque, "unreadable NAT rule ("+x.Unknown+")")
+					case x.Kind == firewall.NATDnat:
+						targets = append(targets, netip.AddrPortFrom(x.Addr, x.Port))
+						if !hasDPort && (hasForeignDAddr || c.Hook != firewall.HookNone) {
+							opaque = append(opaque, "DNAT without a port match")
+						}
+					}
+				case firewall.Verdict:
+					if hasForeignDAddr && (strings.HasPrefix(x.Target, "KUBE-EXT-") || strings.HasPrefix(x.Target, "KUBE-FW-")) {
+						opaque = append(opaque, "kube-proxy LoadBalancer/external IPs")
+					}
+				}
+			}
+		}
+	}
+	slices.SortFunc(targets, netip.AddrPort.Compare)
+	return slices.Compact(targets), opaque
+}
+
+// anyLocal reports whether a prefix list covers one of the host's addresses.
+func (v *View) anyLocal(pfx []netip.Prefix) bool {
+	for _, p := range pfx {
+		for _, i := range v.ifs {
+			for _, a := range i.Prefixes {
+				if p.Contains(a.Addr()) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // dockerProxyMappings reads the port mappings of host-netns listeners held by

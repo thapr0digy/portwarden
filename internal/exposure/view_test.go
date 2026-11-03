@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"net/netip"
 	"slices"
 	"strings"
@@ -208,8 +209,8 @@ func TestJudgeKubernetes(t *testing.T) {
 func TestJudgeWithoutFirewallOrInterfaces(t *testing.T) {
 	v := NewView("start", hostNS, nil, errors.New("nft: Operation not permitted"), vmIfs(), nil)
 	checkJudge(t, v, []state.Listener{lst(hostNS, "tcp", "0.0.0.0", 22), lst(ctrNS, "tcp", "0.0.0.0", 80, ctrProc)}, map[string]want{
-		"4026531840/tcp/0.0.0.0:22": {model.ExposureBound, []string{"bind:any", "firewall: unreadable (nft: Operation not permitted)"}},
-		"4026532426/tcp/0.0.0.0:80": {model.ExposureLocal, []string{"netns: no host port mapping"}},
+		"4026531840/tcp/0.0.0.0:22": {model.ExposureBound, []string{"bind:any", "fw:unreadable firewall (nft: Operation not permitted)", "fw:undetermined read incomplete"}},
+		"4026532426/tcp/0.0.0.0:80": {model.ExposureBound, []string{"fw:unreadable firewall (nft: Operation not permitted)", "fw:undetermined read incomplete"}},
 	})
 	fw := mergeFixtures(t, "", "ufw-docker.v4.txt", "ufw-docker.v6.txt")
 	v = NewView("start", hostNS, fw, nil, []netif.Interface{{Name: "lo", Up: true, Loopback: true}}, nil)
@@ -231,7 +232,7 @@ func TestJudgeNoFilterAndUndetermined(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkJudge(t, NewView("start", hostNS, fw, nil, vmIfs(), nil), []state.Listener{lst(hostNS, "tcp", "0.0.0.0", 7000)}, map[string]want{
-		"4026531840/tcp/0.0.0.0:7000": {model.ExposureBound, []string{"bind:any", "nft: undetermined tcp/7000 from 0/0 (eth0: quota)"}},
+		"4026531840/tcp/0.0.0.0:7000": {model.ExposureBound, []string{"bind:any", "fw:undetermined quota (nft: tcp/7000 from 0/0, eth0)"}},
 	})
 	checkJudge(t, NewView("start", hostNS, empty, nil, vmIfs(), nil), []state.Listener{lst(hostNS, "udp", "0.0.0.0", 5353)}, map[string]want{
 		"4026531840/udp/0.0.0.0:5353": {model.ExposureHostFirewallOpen, []string{"bind:any", "firewall: accept udp/5353 from 0/0 (eth0, no filter rules)"}},
@@ -267,4 +268,93 @@ func TestNetnsAddrFiles(t *testing.T) {
 	if err != nil || len(v6) != 1 || v6[0] != netip.MustParseAddr("2600:1f18::15") {
 		t.Fatalf("if_inet6: %v %v", v6, err)
 	}
+}
+
+func TestJudgePartialReadIsDegraded(t *testing.T) {
+	fw, err := Merge(MergeInput{NFT: []byte(`{"nftables":[]}`), IPT4Err: errors.New("iptables-save: Permission denied"), IPT6Err: fmt.Errorf("ip6tables-save: %w", ErrToolMissing)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := NewView("start", hostNS, fw, nil, vmIfs(), ctrAddrs)
+	got := v.Judge([]state.Listener{lst(hostNS, "tcp", "0.0.0.0", 22), lst(hostNS, "tcp", "127.0.0.1", 25)})
+	e := got[lst(hostNS, "tcp", "0.0.0.0", 22).Key]
+	if e.Level != model.ExposureBound || !e.Degraded || !slices.Equal(e.Evidence, []string{"bind:any", "fw:unreadable iptables-save: Permission denied", "fw:undetermined read incomplete"}) {
+		t.Fatalf("partial read: %+v", e)
+	}
+	if lo := got[lst(hostNS, "tcp", "127.0.0.1", 25).Key]; lo.Level != model.ExposureLocal || lo.Degraded {
+		t.Fatalf("loopback needs no firewall: %+v", lo)
+	}
+	if c := v.Conditions(); !slices.Equal(c, []string{"fw:unreadable iptables-save: Permission denied"}) {
+		t.Fatalf("conditions %v", c)
+	}
+	full := NewView("start", hostNS, mergeFixtures(t, "", "ufw-docker.v4.txt", "ufw-docker.v6.txt"), nil, vmIfs(), nil)
+	if c := full.Conditions(); len(c) != 0 {
+		t.Fatalf("full read conditions %v", c)
+	}
+}
+
+func TestJudgeContainerNotProvablyLocal(t *testing.T) {
+	kubeNft := `{"nftables":[{"table":{"family":"ip","name":"kube-proxy"}},
+	 {"chain":{"family":"ip","table":"kube-proxy","name":"nat-prerouting","type":"nat","hook":"prerouting","prio":-100,"policy":"accept"}},
+	 {"rule":{"family":"ip","table":"kube-proxy","chain":"nat-prerouting","expr":[{"jump":{"target":"services"}}]}},
+	 {"chain":{"family":"ip","table":"kube-proxy","name":"services"}}]}`
+	fw, err := Merge(MergeInput{NFT: []byte(kubeNft)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := NewView("start", hostNS, fw, nil, vmIfs(), ctrAddrs)
+	checkJudge(t, v, []state.Listener{lst(ctrNS, "tcp", "0.0.0.0", 8080, ctrProc)}, map[string]want{
+		"4026532426/tcp/0.0.0.0:8080": {model.ExposureBound, []string{"fw:undetermined netns mapping (kube-proxy nftables mode)"}},
+	})
+
+	// A DNAT keyed on an address that is not the host's (a LoadBalancer or elastic IP),
+	// with no port match: the simulation cannot reach it.
+	lb := "*nat\n:PREROUTING ACCEPT [0:0]\n-A PREROUTING -d 198.51.100.5/32 -j DNAT --to-destination 172.17.0.2\nCOMMIT\n"
+	fw, err = Merge(MergeInput{IPT4: []byte(lb)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v = NewView("start", hostNS, fw, nil, vmIfs(), ctrAddrs)
+	checkJudge(t, v, []state.Listener{lst(ctrNS, "tcp", "0.0.0.0", 8080, ctrProc)}, map[string]want{
+		"4026532426/tcp/0.0.0.0:8080": {model.ExposureBound, []string{
+			"nat: dnat target 172.17.0.2:0 (path not judged)", "fw:undetermined netns mapping (DNAT without a port match)"}},
+	})
+	nodeIPVS := NewView("start", hostNS, mergeFixtures(t, "", "ufw-docker.v4.txt", "ufw-docker.v6.txt"), nil,
+		vmIfs(netif.Interface{Name: "kube-ipvs0", Up: true}), ctrAddrs)
+	checkJudge(t, nodeIPVS, []state.Listener{lst(ctrNS, "tcp", "0.0.0.0", 8080, ctrProc)}, map[string]want{
+		"4026532426/tcp/0.0.0.0:8080": {model.ExposureBound, []string{"fw:undetermined netns mapping (kube-proxy IPVS mode)"}},
+	})
+}
+
+func TestJudgeContainerAddressesUnreadable(t *testing.T) {
+	fw := mergeFixtures(t, "ufw-docker-nft.json", "ufw-docker.v4.txt", "ufw-docker.v6.txt")
+	v := NewView("start", hostNS, fw, nil, vmIfs(), ctrAddrs)
+	gone := model.Process{PID: 9999}
+	checkJudge(t, v, []state.Listener{
+		lst(ctrNS, "tcp", "0.0.0.0", 80, gone),
+		lst(ctrNS+1, "tcp", "0.0.0.0", 8080, gone),
+		lst(ctrNS+2, "tcp", "0.0.0.0", 8081),
+	}, map[string]want{
+		"4026532426/tcp/0.0.0.0:80": {model.ExposureHostFirewallOpen, []string{
+			"nat: dnat tcp/18080 -> 172.17.0.2:80", "bind:192.168.5.15 (eth0)",
+			"iptables: accept tcp/18080 from 0/0 (eth0, ip filter DOCKER)", "netns: addresses unreadable (no such process)"}},
+		"4026532427/tcp/0.0.0.0:8080": {model.ExposureBound, []string{"netns: addresses unreadable (no such process)"}},
+		"4026532428/tcp/0.0.0.0:8081": {model.ExposureBound, []string{"netns: addresses unreadable (no holder process)"}},
+	})
+}
+
+func TestJudgeEvidenceWording(t *testing.T) {
+	fw := mergeFixtures(t, "ufw-docker-nft.json", "ufw-docker.v4.txt", "ufw-docker.v6.txt")
+	checkJudge(t, NewView("start", hostNS, fw, nil, vmIfs(), nil), []state.Listener{lst(hostNS, "tcp", "0.0.0.0", 5432)}, map[string]want{
+		"4026531840/tcp/0.0.0.0:5432": {model.ExposureBound, []string{
+			"bind:any", "iptables: drop tcp/5432 from 0/0 (eth0, policy ip filter INPUT)", "restricted by source (ip filter ufw-user-input)"}},
+	})
+	native, err := Merge(MergeInput{NFT: readFixture(t, "../nft/testdata/host-firewall.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkJudge(t, NewView("start", hostNS, native, nil, vmIfs(), nil), []state.Listener{lst(hostNS, "tcp", "0.0.0.0", 7000)}, map[string]want{
+		"4026531840/tcp/0.0.0.0:7000": {model.ExposureHostFirewallOpen, []string{
+			"bind:any", "nft: accept tcp/7000 from 0/0 (eth0, inet pwfx_filter input), rate-limited"}},
+	})
 }

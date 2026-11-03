@@ -57,6 +57,11 @@ func (v fsView) ReadFile(p string) ([]byte, error) {
 	defer v.f.mu.Unlock()
 	return v.f.m.ReadFile(p)
 }
+func (v fsView) ReadFileInfo(p string) ([]byte, rootfs.Info, error) {
+	v.f.mu.Lock()
+	defer v.f.mu.Unlock()
+	return v.f.m.ReadFileInfo(p)
+}
 func (v fsView) ReadDir(p string) ([]string, error) {
 	v.f.mu.Lock()
 	defer v.f.mu.Unlock()

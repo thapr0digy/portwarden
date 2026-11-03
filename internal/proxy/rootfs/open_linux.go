@@ -47,23 +47,28 @@ func (k *kernelFS) openat2(p string, flags uint64) (*os.File, error) {
 }
 
 func (k *kernelFS) ReadFile(p string) ([]byte, error) {
+	b, _, err := k.ReadFileInfo(p)
+	return b, err
+}
+
+func (k *kernelFS) ReadFileInfo(p string) ([]byte, Info, error) {
 	f, err := k.openat2(p, unix.O_RDONLY|unix.O_NOCTTY|unix.O_NONBLOCK)
 	if err != nil {
-		return nil, err
+		return nil, Info{}, err
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, Info{}, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, &fs.PathError{Op: "read", Path: p, Err: errors.New("not a regular file")}
+		return nil, Info{}, &fs.PathError{Op: "read", Path: p, Err: errors.New("not a regular file")}
 	}
 	b, err := readBounded(f)
 	if err != nil {
-		return nil, &fs.PathError{Op: "read", Path: p, Err: err}
+		return nil, Info{}, &fs.PathError{Op: "read", Path: p, Err: err}
 	}
-	return b, nil
+	return b, infoOf(fi), nil
 }
 
 func (k *kernelFS) ReadDir(p string) ([]string, error) {

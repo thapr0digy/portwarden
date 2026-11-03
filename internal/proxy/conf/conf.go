@@ -7,13 +7,24 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"time"
 )
 
-// Limits on one proxy's configuration: a config past them is cut off with a note.
+// Limits on one proxy's configuration. Every limit, when hit, cuts the load off with
+// one note; nothing grows past them, however hostile the config.
 const (
+	// MaxFiles bounds the files a load tries to read (failures count too).
 	MaxFiles      = 4096
 	MaxTotalBytes = 16 << 20
 	MaxDepth      = 32
+	// MaxOps bounds the filesystem operations of one load: every read, stat and
+	// directory entry looked at.
+	MaxOps = 20000
+	// MaxGlobMatches bounds the paths one include pattern expands to.
+	MaxGlobMatches = 4096
+	// MaxNotes and MaxWatch bound the notes kept and the paths watched for changes.
+	MaxNotes = 64
+	MaxWatch = 4096
 	// MaxExpansions bounds the targets one variable-built address expands to.
 	MaxExpansions = 64
 )
@@ -53,71 +64,147 @@ type Result struct {
 	// target that was missing.
 	Watch []string
 	Notes []string
+	// Untrusted lists why files read are not trustworthy: not owned by root, or
+	// writable by group or others.
+	Untrusted []string
+	// Newest is the latest modification time of the files read.
+	Newest time.Time
 }
 
-// Reader tracks the files of one load: limits, include depth, notes, watch list.
+type fileID struct{ dev, ino uint64 }
+
+// Reader tracks one load: its budget, include stack, notes, watch list and trust.
 type Reader struct {
-	files   []string
-	watch   []string
-	notes   []string
-	total   int
-	seenRd  map[string]bool
-	seenW   map[string]bool
-	limited bool
+	files     []string
+	watch     []string
+	notes     []string
+	untrusted []string
+	newest    time.Time
+	total     int
+	attempts  int
+	ops       int
+	seenRd    map[string]bool
+	seenW     map[string]bool
+	stack     map[fileID]bool
+	limited   bool
+	moreNotes int
+	watchCut  bool
 }
 
 // NewReader starts a load.
 func NewReader() *Reader {
-	return &Reader{seenRd: make(map[string]bool), seenW: make(map[string]bool)}
+	return &Reader{seenRd: make(map[string]bool), seenW: make(map[string]bool), stack: make(map[fileID]bool)}
 }
 
-// Note records a problem (deduplicated).
+// Note records a problem (deduplicated; past MaxNotes only counted).
 func (r *Reader) Note(format string, args ...any) {
 	n := fmt.Sprintf(format, args...)
-	if !slices.Contains(r.notes, n) {
-		r.notes = append(r.notes, n)
+	if slices.Contains(r.notes, n) {
+		return
 	}
+	if len(r.notes) >= MaxNotes {
+		r.moreNotes++
+		return
+	}
+	r.notes = append(r.notes, n)
 }
 
-// Watch adds a path to the watch list.
-func (r *Reader) Watch(p string) {
-	if !r.seenW[p] {
-		r.seenW[p] = true
-		r.watch = append(r.watch, p)
-	}
-}
-
-// Read reads a file through fsys within the limits; ok is false (with a note) when it
-// cannot be read or a limit is reached.
-func (r *Reader) Read(fsys FS, p string) ([]byte, bool) {
-	r.Watch(p)
-	if r.limited {
-		return nil, false
-	}
-	if len(r.files) >= MaxFiles {
+// cut stops the load with one note.
+func (r *Reader) cut(why string) {
+	if !r.limited {
 		r.limited = true
-		r.Note("config cut off: more than %d files", MaxFiles)
-		return nil, false
+		r.Note("config cut off: %s", why)
 	}
-	b, err := fsys.ReadFile(p)
+}
+
+// Op spends one filesystem operation; false once the budget (or another limit) is
+// spent.
+func (r *Reader) Op() bool {
+	if r.limited {
+		return false
+	}
+	if r.ops >= MaxOps {
+		r.cut(fmt.Sprintf("more than %d file operations", MaxOps))
+		return false
+	}
+	r.ops++
+	return true
+}
+
+// Watch adds a path to the watch list (bounded).
+func (r *Reader) Watch(p string) {
+	if r.seenW[p] {
+		return
+	}
+	if len(r.watch) >= MaxWatch {
+		if !r.watchCut {
+			r.watchCut = true
+			r.Note("watch list cut off at %d paths", MaxWatch)
+		}
+		return
+	}
+	r.seenW[p] = true
+	r.watch = append(r.watch, p)
+}
+
+// Read reads a file within the limits; ok is false (with a note) when it cannot be
+// read, a limit is reached, or it is already being included (a cycle).
+func (r *Reader) Read(fsys FS, p string) ([]byte, bool) {
+	b, ok, leave := r.Enter(fsys, p)
+	leave()
+	return b, ok
+}
+
+// Enter reads a file and puts it on the include stack until leave is called, so an
+// include of a file already being read is refused as a cycle (by device and inode).
+func (r *Reader) Enter(fsys FS, p string) (data []byte, ok bool, leave func()) {
+	noop := func() {}
+	r.Watch(p)
+	if !r.Op() {
+		return nil, false, noop
+	}
+	if r.attempts >= MaxFiles {
+		r.cut(fmt.Sprintf("more than %d files", MaxFiles))
+		return nil, false, noop
+	}
+	r.attempts++
+	b, in, err := fsys.ReadFileInfo(p)
 	if err != nil {
 		r.Note("unreadable %s", ErrText(err))
-		return nil, false
+		return nil, false, noop
+	}
+	id := fileID{in.Dev, in.Ino}
+	if r.stack[id] {
+		r.Note("include cycle at %s", p)
+		return nil, false, noop
 	}
 	if r.total+len(b) > MaxTotalBytes {
-		r.limited = true
-		r.Note("config cut off: more than %d bytes", MaxTotalBytes)
-		return nil, false
+		r.cut(fmt.Sprintf("more than %d bytes", MaxTotalBytes))
+		return nil, false, noop
 	}
 	r.total += len(b)
 	if !r.seenRd[p] {
 		r.seenRd[p] = true
 		r.files = append(r.files, p)
+		switch {
+		case in.Uid != 0:
+			r.untrusted = append(r.untrusted, fmt.Sprintf("%s owned by uid %d", p, in.Uid))
+		case in.Writable():
+			r.untrusted = append(r.untrusted, fmt.Sprintf("%s writable by group or others (%v)", p, in.Mode))
+		}
 	}
-	return b, true
+	if in.ModTime.After(r.newest) {
+		r.newest = in.ModTime
+	}
+	r.stack[id] = true
+	return b, true, func() { delete(r.stack, id) }
 }
 
-// Finish returns the files, watch list and notes of the load.
+// Finish returns the files, watch list, notes and trust findings of the load.
 func (r *Reader) Finish(routes []Route) Result {
-	return Result{Routes: routes, Files: r.files, Watch: r.watch, Notes: r.notes}
+	notes := slices.Clone(r.notes)
+	if r.moreNotes > 0 {
+		notes = append(notes, fmt.Sprintf("... and %d more notes", r.moreNotes))
+	}
+	return Result{Routes: routes, Files: r.files, Watch: r.watch, Notes: notes, Untrusted: r.untrusted, Newest: r.newest}
 }

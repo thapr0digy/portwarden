@@ -26,28 +26,37 @@ type walker struct{ root string }
 func (w walker) Close() error { return nil }
 
 func (w walker) ReadFile(p string) ([]byte, error) {
+	b, _, err := w.ReadFileInfo(p)
+	return b, err
+}
+
+func (w walker) ReadFileInfo(p string) ([]byte, Info, error) {
 	host, err := w.resolve(p)
 	if err != nil {
-		return nil, err
+		return nil, Info{}, err
 	}
 	fi, err := os.Stat(host)
 	if err != nil {
-		return nil, w.rename(err, p)
+		return nil, Info{}, w.rename(err, p)
 	}
 	if !fi.Mode().IsRegular() {
 		// Checked before opening: opening a FIFO would block.
-		return nil, &fs.PathError{Op: "read", Path: p, Err: errors.New("not a regular file")}
+		return nil, Info{}, &fs.PathError{Op: "read", Path: p, Err: errors.New("not a regular file")}
 	}
 	f, err := os.Open(host)
 	if err != nil {
-		return nil, w.rename(err, p)
+		return nil, Info{}, w.rename(err, p)
 	}
 	defer f.Close()
+	ofi, err := f.Stat()
+	if err != nil {
+		return nil, Info{}, w.rename(err, p)
+	}
 	b, err := readBounded(f)
 	if err != nil {
-		return nil, &fs.PathError{Op: "read", Path: p, Err: err}
+		return nil, Info{}, &fs.PathError{Op: "read", Path: p, Err: err}
 	}
-	return b, nil
+	return b, infoOf(ofi), nil
 }
 
 func (w walker) ReadDir(p string) ([]string, error) {

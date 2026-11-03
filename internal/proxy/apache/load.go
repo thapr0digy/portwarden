@@ -52,7 +52,8 @@ func (l *loader) file(p string, depth int) []*directive {
 		l.r.Note("include depth over %d at %s", conf.MaxDepth, p)
 		return nil
 	}
-	data, ok := l.r.Read(l.fsys, p)
+	data, ok, leave := l.r.Enter(l.fsys, p)
+	defer leave()
 	if !ok {
 		return nil
 	}
@@ -232,6 +233,9 @@ func (l *loader) include(d *directive, depth int) []*directive {
 	}
 	var out []*directive
 	for _, f := range files {
+		if !l.r.Op() {
+			break
+		}
 		if in, err := l.fsys.Stat(f); err == nil && in.Dir {
 			for _, g := range l.dirFiles(f) {
 				out = append(out, l.file(g, depth+1)...)
@@ -254,6 +258,9 @@ func (l *loader) dirFiles(dir string) []string {
 	}
 	var out []string
 	for _, n := range names {
+		if !l.r.Op() {
+			break
+		}
 		p := path.Join(dir, n)
 		if in, err := l.fsys.Stat(p); err == nil && in.Dir {
 			out = append(out, l.dirFiles(p)...)

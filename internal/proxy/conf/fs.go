@@ -14,6 +14,7 @@ import (
 // FS is the read access the loaders need (rootfs.FS without Close).
 type FS interface {
 	ReadFile(path string) ([]byte, error)
+	ReadFileInfo(path string) ([]byte, rootfs.Info, error)
 	ReadDir(path string) ([]string, error)
 	Stat(path string) (rootfs.Info, error)
 }
@@ -30,6 +31,24 @@ func (m MemFS) ReadFile(p string) ([]byte, error) {
 		return nil, &fs.PathError{Op: "read", Path: p, Err: errors.New("is a directory")}
 	}
 	return nil, &fs.PathError{Op: "open", Path: p, Err: fs.ErrNotExist}
+}
+
+// ReadFileInfo serves a recorded file as root-owned, mode 0644, with a stable identity
+// derived from its path (recorded dumps carry no inodes).
+func (m MemFS) ReadFileInfo(p string) ([]byte, rootfs.Info, error) {
+	b, err := m.ReadFile(p)
+	if err != nil {
+		return nil, rootfs.Info{}, err
+	}
+	return b, rootfs.Info{Size: int64(len(b)), ModTime: time.Unix(0, 0), Mode: 0o644, Ino: pathID(path.Clean(p))}, nil
+}
+
+func pathID(p string) uint64 {
+	var h uint64 = 14695981039346656037
+	for i := 0; i < len(p); i++ {
+		h = (h ^ uint64(p[i])) * 1099511628211
+	}
+	return h | 1
 }
 
 func (m MemFS) ReadDir(p string) ([]string, error) {
@@ -56,7 +75,7 @@ func (m MemFS) ReadDir(p string) ([]string, error) {
 
 func (m MemFS) Stat(p string) (rootfs.Info, error) {
 	if b, ok := m[path.Clean(p)]; ok {
-		return rootfs.Info{Size: int64(len(b)), ModTime: time.Unix(0, 0)}, nil
+		return rootfs.Info{Size: int64(len(b)), ModTime: time.Unix(0, 0), Mode: 0o644, Ino: pathID(path.Clean(p))}, nil
 	}
 	if m.isDir(p) {
 		return rootfs.Info{Dir: true}, nil

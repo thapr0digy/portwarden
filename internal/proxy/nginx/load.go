@@ -34,11 +34,15 @@ func (l *loader) file(p string, depth int) []*directive {
 		l.r.Note("include depth over %d at %s", conf.MaxDepth, p)
 		return nil
 	}
-	data, ok := l.r.Read(l.fsys, p)
+	data, ok, leave := l.r.Enter(l.fsys, p)
+	defer leave()
 	if !ok {
 		return nil
 	}
-	toks := lex(string(data))
+	toks, unterminated := lex(string(data))
+	if unterminated {
+		l.r.Note("unexpected end of file, expecting a closing quote in %s", p)
+	}
 	pos := 0
 	ds := l.block(p, toks, &pos, depth, false)
 	return ds

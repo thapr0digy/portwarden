@@ -12,7 +12,8 @@ func HasMeta(p string) bool { return strings.ContainsAny(p, "*?[") }
 // wildcard includes do): metacharacters in any component, results sorted per
 // directory, and a wildcard never matches a leading dot unless the pattern component
 // starts with one. Every directory listed is added to r's watch list, so a file
-// appearing there is noticed.
+// appearing there is noticed. Every stat and directory entry spends r's budget, and a
+// pattern yields at most MaxGlobMatches paths.
 func Glob(fsys FS, r *Reader, pattern string) []string {
 	parts := splitAbs(pattern)
 	paths := []string{"/"}
@@ -21,6 +22,9 @@ func Glob(fsys FS, r *Reader, pattern string) []string {
 		var next []string
 		for _, dir := range paths {
 			if !HasMeta(c) {
+				if !r.Op() {
+					return nil
+				}
 				p := path.Join(dir, c)
 				in, err := fsys.Stat(p)
 				switch {
@@ -37,6 +41,13 @@ func Glob(fsys FS, r *Reader, pattern string) []string {
 				continue
 			}
 			for _, n := range names {
+				if !r.Op() {
+					return nil
+				}
+				if len(next) >= MaxGlobMatches {
+					r.Note("include %s cut off at %d matches", pattern, MaxGlobMatches)
+					break
+				}
 				if strings.HasPrefix(n, ".") && !strings.HasPrefix(c, ".") {
 					continue
 				}

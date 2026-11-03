@@ -9,7 +9,7 @@ import (
 )
 
 func TestLexQuotesCommentsAndVariables(t *testing.T) {
-	toks := lex("a \"b;{c}#d\" 'e\\'f' ${host}x g\\;h # comment {\n}")
+	toks, _ := lex("a \"b;{c}#d\" 'e\\'f' ${host}x g\\;h # comment {\n}")
 	var words []string
 	for _, tk := range toks {
 		words = append(words, tk.text)
@@ -76,5 +76,13 @@ func TestParseDumpKeepsFileBoundaries(t *testing.T) {
 	}
 	if _, _, _, err := ParseDump([]byte("nothing")); err == nil {
 		t.Fatal("a dump without headers must fail")
+	}
+}
+
+func TestSelfIncludeIsACycleNotARunaway(t *testing.T) {
+	fsys := conf.MemFS{"/etc/nginx/nginx.conf": []byte("include /etc/nginx/nginx.conf;\nhttp { server { listen 81; } }\n")}
+	res := Load(fsys, "/etc/nginx/nginx.conf")
+	if len(res.Routes) != 1 || !strings.Contains(strings.Join(res.Notes, ","), "include cycle") {
+		t.Fatalf("routes=%d notes=%v", len(res.Routes), res.Notes)
 	}
 }

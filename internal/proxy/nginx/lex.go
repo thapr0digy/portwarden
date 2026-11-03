@@ -20,9 +20,9 @@ type token struct {
 // lex splits a config file as ngx_conf_read_token does: whitespace separates words; ';',
 // '{' and '}' end them; '#' at the start of a word comments to the end of the line;
 // single- and double-quoted strings may hold any of those; a backslash escapes the next
-// character; "${name}" is part of a word. Unterminated quotes end the file.
-func lex(src string) []token {
-	var out []token
+// character; "${name}" is part of a word. An unterminated quote ends the file
+// (unterminated is then true; nginx refuses such a file).
+func lex(src string) (out []token, unterminated bool) {
 	line := 1
 	i := 0
 	for i < len(src) {
@@ -65,6 +65,9 @@ func lex(src string) []token {
 				b.WriteByte(src[i])
 				i++
 			}
+			if i >= len(src) {
+				unterminated = true
+			}
 			i++ // closing quote
 			out = append(out, token{tokWord, b.String(), start})
 		default:
@@ -95,7 +98,7 @@ func lex(src string) []token {
 			out = append(out, token{tokWord, b.String(), start})
 		}
 	}
-	return out
+	return out, unterminated
 }
 
 // unescape is what nginx keeps of "\c": \" \' \\ \t \r \n are unescaped, any other

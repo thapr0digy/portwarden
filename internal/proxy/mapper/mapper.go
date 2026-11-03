@@ -26,6 +26,10 @@ import (
 	"github.com/thapr0digy/portwarden/internal/state"
 )
 
+// ObservedTTL is how long an observed destination is kept without a new connection: a
+// backend left behind by a config change stops showing as seen (or inferred) after it.
+const ObservedTTL = time.Hour
+
 // Conn is one counted destination (probes.ProxyConn).
 type Conn struct {
 	Proxy uint32
@@ -365,6 +369,14 @@ func (m *Mapper) readConns(now time.Time) bool {
 		sums[t][c.Addr] = s
 	}
 	changed := false
+	for _, t := range m.proxies {
+		for a, o := range t.observed {
+			if now.Sub(o.Last) > ObservedTTL {
+				delete(t.observed, a)
+				changed = true
+			}
+		}
+	}
 	for t, byAddr := range sums {
 		newDest := false
 		for a, s := range byAddr {

@@ -96,6 +96,9 @@ func Find(listeners []state.Listener, p Procs, selfMountNS uint64, enrich func(m
 			if kind == "" || proc.PID == 0 {
 				continue
 			}
+			if kind == KindApache && !isApache(proc, p) {
+				continue
+			}
 			m, ok := masters[proc.PID]
 			if !ok {
 				m = masterOf(proc.PID, proc.Exe, p)
@@ -170,6 +173,16 @@ func idPath(inst *Instance, master model.Process) string {
 		id += "@" + master.Container.ID
 	}
 	return id
+}
+
+// isApache tells Apache httpd from other programs called httpd (BusyBox's applet, for
+// one): an "httpd" binary must carry Apache's compiled-in HTTPD_ROOT setting. apache2
+// is Debian's name for Apache only.
+func isApache(proc model.Process, p Procs) bool {
+	if path.Base(proc.Exe) == "apache2" {
+		return true
+	}
+	return bytes.Contains(p.ExeBytes(proc.PID), []byte(` -D HTTPD_ROOT="`))
 }
 
 // masterOf climbs the parent chain while the parent runs the same executable.

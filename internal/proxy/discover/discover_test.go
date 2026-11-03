@@ -48,6 +48,7 @@ func TestFindGroupsUnderMasterAndLocatesConfig(t *testing.T) {
 		900: {ppid: 1, exe: "/usr/sbin/apache2", cmdline: []string{"/usr/sbin/apache2", "-k", "start", "-DSSL"}, env: map[string]string{"APACHE_LOG_DIR": "/var/log/apache2"}, mntns: 7,
 			bin: `xx -D HTTPD_ROOT="/etc/apache2"` + "\x00" + ` -D SERVER_CONFIG_FILE="apache2.conf"`},
 		901: {ppid: 900, exe: "/usr/sbin/apache2", mntns: 7},
+		960: {ppid: 1, exe: "/bin/httpd", cmdline: []string{"httpd", "-f", "-p", "80"}, mntns: 9, bin: "BusyBox v1.36"},
 		950: {ppid: 1, exe: "/usr/sbin/haproxy", cmdline: []string{"/usr/sbin/haproxy", "-Ws", "-f", "/etc/haproxy/haproxy.cfg", "-f", "/etc/haproxy/conf.d", "-p", "/run/haproxy.pid"}, mntns: 7},
 		951: {ppid: 950, exe: "/usr/sbin/haproxy", mntns: 7},
 		990: {ppid: 1, exe: "/usr/bin/python3", mntns: 7},
@@ -59,6 +60,7 @@ func TestFindGroupsUnderMasterAndLocatesConfig(t *testing.T) {
 		{Key: key(8080), Procs: []model.Process{{PID: 901, Exe: "/usr/sbin/apache2"}}},
 		{Key: key(8404), Procs: []model.Process{{PID: 951, Exe: "/usr/sbin/haproxy"}}},
 		{Key: key(8000), Procs: []model.Process{{PID: 990, Exe: "/usr/bin/python3"}}},
+		{Key: key(8001), Procs: []model.Process{{PID: 960, Exe: "/bin/httpd"}}}, // BusyBox, not Apache
 	}
 	enriched := false
 	got := Find(listeners, procs, 7, func(p model.Process) model.Process { enriched = true; p.Unit = "x.service"; return p })

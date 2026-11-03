@@ -160,7 +160,7 @@ func TestMapperReadsReloadsAndObserves(t *testing.T) {
 
 	// Observed connections, attributed by the counted tgid.
 	c.mu.Lock()
-	c.list = []Conn{{Proxy: 800, Addr: netip.MustParseAddrPort("127.0.0.1:8001"), Count: 3, Last: time.Unix(100, 0)},
+	c.list = []Conn{{Proxy: 800, Addr: netip.MustParseAddrPort("127.0.0.1:8001"), Count: 3, Last: time.Now()},
 		{Proxy: 999, Addr: netip.MustParseAddrPort("127.0.0.1:9"), Count: 1}}
 	c.mu.Unlock()
 	u = next("traffic", func(u proxy.Update) bool { return len(u.States) == 1 && len(u.States[0].Observed) == 1 })
@@ -169,7 +169,7 @@ func TestMapperReadsReloadsAndObserves(t *testing.T) {
 	}
 	// A count that drops (the kernel entry was evicted) keeps the total.
 	c.mu.Lock()
-	c.list = []Conn{{Proxy: 800, Addr: netip.MustParseAddrPort("127.0.0.1:8001"), Count: 2, Last: time.Unix(200, 0)}}
+	c.list = []Conn{{Proxy: 800, Addr: netip.MustParseAddrPort("127.0.0.1:8001"), Count: 2, Last: time.Now()}}
 	c.mu.Unlock()
 	u = next("count", func(u proxy.Update) bool { return len(u.States) == 1 && u.States[0].Observed[0].Count == 5 })
 

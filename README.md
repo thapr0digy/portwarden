@@ -204,7 +204,7 @@ Only the first process is shown (`(+N more)` for further holders), followed by i
 2026-11-03T03:46:09.086Z c1b583b4 seq=62 OPENED tcp 127.0.0.1:18082 pid=282125 /usr/bin/python3.12 unit=session-6.scope behind=nginx:280651:/[config]
 ```
 
-`PROXY` shows the proxy's kind and master, the trigger and the number of routes, then ` | <listen> [names=…] <path> <kind> -> <backend>, …` per route, each backend as its address, the listener's first holder when it is joined, its labels (`config`, `config,seen`, `inferred,seen`) and its note; `REMOVED` when the proxy is gone. A listener line ends with ` behind=<kind>:<proxy pid>:<path>[labels],…` when routes end at it. `SNAPSHOT` adds ` proxies=<n>`.
+`PROXY` shows the proxy's kind and master, the trigger and the number of routes (`routes=<n>/<total> (truncated)` for a cut set), then ` | <listen> [names=…] <path> <kind> -> <backend>, …` per route, each backend as its address, the listener's first holder when it is joined, its labels (`config`, `config,seen`, `inferred,seen`) and its note; `REMOVED` when the proxy is gone. A listener line ends with ` behind=<kind>:<proxy pid>:<path>[labels],…` when routes end at it. `SNAPSHOT` adds ` proxies=<n>`.
 
 `EXPOSURE` shows `<previous>-><level>` (`new` for a listener's first judgement), the trigger, `netns=` outside the host netns, and the evidence joined by `; `. `HOST` shows the host block after a change.
 

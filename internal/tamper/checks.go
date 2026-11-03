@@ -54,7 +54,14 @@ type watchedFile struct {
 	baseline string
 	sig      string // "" until the first look, and after the file went missing
 	got      string // the hash for sig
+	// racy: the file was modified within racyWindow of being hashed, so a write in the
+	// same timestamp tick could leave the signature unchanged; it is hashed again on the
+	// next look (git's "racily clean" rule).
+	racy bool
 }
+
+// racyWindow covers coarse file timestamps (one kernel tick) with a wide margin.
+const racyWindow = 2 * time.Second
 
 // fileState is what one look saw.
 type fileState struct {
@@ -87,12 +94,13 @@ func (w *watchedFile) look() (fileState, error) {
 	if err != nil {
 		return fileState{}, err
 	}
-	if sig := signature(fi); sig != w.sig {
+	if sig := signature(fi); sig != w.sig || w.racy {
 		got, err := HashFile(w.path)
 		if err != nil {
 			return fileState{}, err
 		}
 		w.sig, w.got = sig, got
+		w.racy = time.Since(fi.ModTime()) < racyWindow
 	}
 	return fileState{changed: w.got != w.baseline, got: w.got}, nil
 }

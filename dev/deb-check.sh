@@ -14,7 +14,11 @@ old=$(realpath "$1")
 new=$(realpath "$2")
 fail() { echo "deb-check: FAIL: $*" >&2; sudo journalctl -u portwarden-agent -o cat --no-pager | tail -n 20 >&2; exit 1; }
 log() { echo "deb-check: $*"; }
+# The journal is read into a variable before grep: under pipefail, `journalctl | grep -q`
+# fails when grep exits early and journalctl gets SIGPIPE.
 journal_since() { sudo journalctl -u portwarden-agent -o cat --no-pager --since "@$1"; }
+journal_has() { local j; j=$(sudo journalctl -u portwarden-agent -o cat --no-pager); grep -qE -- "$1" <<<"$j"; }
+since_has() { local j; j=$(journal_since "$1"); grep -qE -- "$2" <<<"$j"; }
 
 if dpkg -s portwarden-agent >/dev/null 2>&1; then
 	sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y -q portwarden-agent >/dev/null
@@ -25,9 +29,9 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$old" >/dev/null
 systemctl is-enabled --quiet portwarden-agent || fail "not enabled after install"
 for _ in $(seq 30); do systemctl is-active --quiet portwarden-agent && break; sleep 1; done
 systemctl is-active --quiet portwarden-agent || fail "not active after install"
-for _ in $(seq 30); do sudo journalctl -u portwarden-agent -o cat --no-pager | grep -q 'tamper: watching unit files' && break; sleep 1; done
-sudo journalctl -u portwarden-agent -o cat --no-pager | grep -q '"msg":"started"' || fail "no started line"
-sudo journalctl -u portwarden-agent -o cat --no-pager | grep -q 'tamper: watching unit files' || fail "unit check not on"
+for _ in $(seq 30); do journal_has 'tamper: watching unit files' && break; sleep 1; done
+journal_has '"msg":"started"' || fail "no started line"
+journal_has 'tamper: watching unit files' || fail "unit check not on"
 old_version=$(portwarden-agent --version)
 log "running: $old_version"
 
@@ -39,10 +43,10 @@ t0=$(date +%s)
 sudo dpkg --unpack "$new" >/dev/null
 [ -f /run/portwarden-agent/upgrading ] || fail "prerm wrote no upgrade marker"
 sleep 4
-journal_since "$t0" | grep -q '"kind":"upgraded"' || fail "the replaced binary was not reported as upgraded"
-! journal_since "$t0" | grep -qE '"kind":"(binary_replaced|unit_changed|binary_missing)"' ||
+since_has "$t0" '"kind":"upgraded"' || fail "the replaced binary was not reported as upgraded"
+! since_has "$t0" '"kind":"(binary_replaced|unit_changed|binary_missing)"' ||
 	fail "the package upgrade raised a paging tamper flag: $(journal_since "$t0" | grep tamper | head -3)"
-log "upgraded flags: $(journal_since "$t0" | grep -c '"kind":"upgraded"'), no binary_replaced or unit_changed"
+log "upgraded: $(journal_since "$t0" | grep '"kind":"upgraded"' | head -1 | cut -c1-200); no binary_replaced or unit_changed"
 
 log "upgrade, second half (dpkg --configure)"
 sudo DEBIAN_FRONTEND=noninteractive dpkg --configure portwarden-agent >/dev/null

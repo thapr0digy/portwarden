@@ -4,11 +4,13 @@
 #
 #   dev/vm-verify.sh [--legs "2404 2604 amd64"]
 #   dev/vm-verify.sh --list-files    # prints the files the copy would hold, and exits
+#   dev/vm-verify.sh --copy-only     # makes the copy, prints its path, keeps it, and exits
 #
 # The VMs mount only ~/projects/portwarden (VMVERIFY_ROOT overrides it), so the checkout's
 # files (git ls-files: tracked plus untracked-but-not-ignored, so uncommitted work is
 # tested; plus any generated BPF objects; no .git, no build output) are copied to a fresh
-# directory <root>/.vmverify/<short-sha>-XXXXXX, which the VMs see at the same path. The
+# directory <root>/.vmverify/<short-sha>-XXXXXX, which the VMs see at the same path, with
+# tar (symlinks kept as links; macOS's rsync fails on the testdata's dangling ones). The
 # copy's own dev/matrix.sh then runs with the copy as its repo: it holds the host-wide
 # VM lock (dev/vmlock.sh) for the run and waits until each VM runs no other tests. With
 # the amd64 leg, `make dist` runs in the copy first so the .deb lifecycle check runs; git
@@ -23,12 +25,14 @@ src=$PWD
 root=${VMVERIFY_ROOT:-$HOME/projects/portwarden}
 legs="2404 2604 amd64"
 list_only=false
+copy_only=false
 
-usage() { echo "usage: dev/vm-verify.sh [--legs \"2404 2604 amd64\"] | --list-files" >&2; }
+usage() { echo "usage: dev/vm-verify.sh [--legs \"2404 2604 amd64\"] | --list-files | --copy-only" >&2; }
 while [ $# -gt 0 ]; do
 	case $1 in
 	--legs) [ $# -ge 2 ] || { usage; exit 2; }; legs=$2; shift 2 ;;
 	--list-files) list_only=true; shift ;;
+	--copy-only) copy_only=true; shift ;;
 	-h | --help) usage; exit 0 ;;
 	*) usage; exit 2 ;;
 	esac
@@ -56,7 +60,9 @@ if $list_only; then
 	exit 0
 fi
 
-for tool in limactl git go make; do
+tools="git"
+$copy_only || tools="limactl git go make"
+for tool in $tools; do
 	command -v "$tool" >/dev/null || { echo "vm-verify: $tool not found" >&2; exit 1; }
 done
 [ -d "$root" ] || { echo "vm-verify: $root (the directory the VMs mount) does not exist" >&2; exit 1; }
@@ -84,8 +90,8 @@ save_logs() {
 cleanup() {
 	local status=$?
 	save_logs || { echo "vm-verify: could not copy the logs from $copy/.matrix" >&2; status=1; }
-	if [ "${VMVERIFY_KEEP:-0}" = 1 ]; then
-		echo "vm-verify: kept the copy at $copy" >&2
+	if [ "${VMVERIFY_KEEP:-0}" = 1 ] || { $copy_only && [ "$status" = 0 ]; }; then
+		$copy_only || echo "vm-verify: kept the copy at $copy" >&2
 	else
 		rm -rf "${copy:?}"
 	fi
@@ -96,12 +102,12 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "vm-verify: copying $src ($sha) to $copy"
-if command -v rsync >/dev/null; then
-	copy_list | rsync -a --from0 --files-from=- "$src/" "$copy/"
-else
-	copy_list | tar --null -T - -cf - | tar -C "$copy" -xf -
-fi
+copy_list | tar --null -T - -cf - | tar -C "$copy" -xpf -
 [ -f "$copy/go.mod" ] && [ -x "$copy/dev/matrix.sh" ] || { echo "vm-verify: the copy is incomplete" >&2; exit 1; }
+if $copy_only; then
+	echo "$copy"
+	exit 0
+fi
 
 export GIT_DIR=$git_dir
 mkdir -p "$copy/.matrix"

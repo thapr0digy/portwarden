@@ -352,7 +352,7 @@ CI (`.github/workflows/ci.yml`): a `unit` job (tests, vet with and without `inte
 
 The VMs mount only `~/projects/portwarden`, so `make itest`, `make e2e` and `make matrix` only test that checkout. `dev/vm-verify.sh` runs the matrix for any checkout (a Flowryn worktree, a verify checkout, another `git worktree`):
 
-1. It copies the checkout's files (`git ls-files --cached --others --exclude-standard`: tracked files and new files not ignored, so uncommitted work is tested; plus any generated BPF objects; no `.git`, no `.matrix/` or `dist/`) into a fresh `~/projects/portwarden/.vmverify/<short-sha>-XXXXXX/` (gitignored), with rsync, or tar without it. `VMVERIFY_ROOT` names another mounted directory.
+1. It copies the checkout's files (`git ls-files --cached --others --exclude-standard`: tracked files and new files not ignored, so uncommitted work is tested; plus any generated BPF objects; no `.git`, no `.matrix/` or `dist/`) into a fresh `~/projects/portwarden/.vmverify/<short-sha>-XXXXXX/` (gitignored), with tar (symlinks kept as links; `dev/vm-verify.sh --copy-only` makes a copy, prints its path and keeps it). `VMVERIFY_ROOT` names another mounted directory.
 2. With the `amd64` leg it runs `make dist` in the copy first (log: `.matrix/dist.log`), so the `.deb` lifecycle check runs; git there reads this checkout's history (`GIT_DIR`), so the version is this branch's.
 3. It runs the copy's own `dev/matrix.sh` (`MATRIX_LEGS` from `--legs`), so the copy is the repo under test, and prints the matrix's per-leg summary. It exits non-zero when any leg fails.
 4. On exit the logs and `summary.txt` go to this checkout's `.matrix/` and the copy is removed (`VMVERIFY_KEEP=1` keeps it for debugging).

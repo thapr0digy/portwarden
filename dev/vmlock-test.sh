@@ -209,6 +209,26 @@ test_copy_holds_the_generated_bpf_objects() {
 	grep -q '_bpfel\.o$' <<<"$list" || { echo "no BPF objects at all"; return 1; }
 }
 
+test_copy_reproduces_files_modes_and_dangling_symlinks_without_git() {
+	local c root copy
+	c=$(clone_with_scripts copy)
+	root=$scratch/root
+	mkdir -p "$root"
+	echo new >"$c/new-untracked.txt"
+	ln -s /nonexistent/target "$c/dangling-link"
+	copy=$(cd "$c" && VMVERIFY_ROOT=$root dev/vm-verify.sh --copy-only 2>/dev/null | tail -1)
+	case $copy in "$(cd "$root" && pwd -P)"/.vmverify/*-*) ;; *) echo "copy path: $copy"; return 1 ;; esac
+	[ -f "$copy/go.mod" ] && [ -f "$copy/new-untracked.txt" ] || { echo "files missing"; return 1; }
+	[ "$(readlink "$copy/dangling-link")" = /nonexistent/target ] || { echo "dangling symlink not kept"; return 1; }
+	[ -x "$copy/dev/matrix.sh" ] || { echo "matrix.sh lost its exec bit"; return 1; }
+	[ ! -e "$copy/.git" ] || { echo ".git copied"; return 1; }
+	[ -f "$root/.vmverify/.gitignore" ] || { echo "scratch dir not self-ignored"; return 1; }
+	local want got
+	want=$(cd "$c" && dev/vm-verify.sh --list-files | wc -l | tr -d ' ')
+	got=$(cd "$copy" && find . \( -type f -o -type l \) | wc -l | tr -d ' ')
+	[ "$want" = "$got" ] || { echo "copy holds $got files, list has $want"; return 1; }
+}
+
 test_vm_verify_rejects_unknown_legs() {
 	local rc=0
 	dev/vm-verify.sh --legs "2404 riscv" >/dev/null 2>&1 || rc=$?

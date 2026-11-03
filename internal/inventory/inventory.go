@@ -74,7 +74,8 @@ type Event struct {
 	Meta   Meta
 	Cursor *Cursor
 	// One of *asmv1.Snapshot, *asmv1.ListenerEvent, *asmv1.ExposureEvent,
-	// *asmv1.ExposureConfirmation, *asmv1.ProxyRoutes, *asmv1.HostEvent, *asmv1.Heartbeat.
+	// *asmv1.ExposureConfirmation, *asmv1.ProxyRoutes, *asmv1.HostEvent, *asmv1.Heartbeat,
+	// *asmv1.TamperEvent.
 	Msg proto.Message
 }
 
@@ -90,6 +91,16 @@ type Store interface {
 	SetSilent(ctx context.Context, host string, since time.Time) error
 	// LastHeartbeats returns every host's last heartbeat time, to seed liveness.
 	LastHeartbeats(ctx context.Context) (map[string]time.Time, error)
+	// Forget removes a host's rows (host, listeners, proxies, exposure history) and records
+	// mark, its pwb.inventory.<host>.forgotten announcement's place in the stream, in one
+	// transaction (a mark of the same stream with a higher sequence is kept). existed
+	// reports whether the host was stored.
+	Forget(ctx context.Context, host string, mark Mark) (existed bool, err error)
+	// ForgottenMark returns a host's forget mark (ok false: never forgotten).
+	ForgottenMark(ctx context.Context, host string) (mark Mark, ok bool, err error)
+	// PruneMarks drops the marks of another stream (one created at another time) and those
+	// past the stream's last sequence (a stream reset), at start.
+	PruneMarks(ctx context.Context, stream time.Time, lastSeq uint64) (int64, error)
 }
 
 // SnapshotSource fetches a host's latest snapshot from the stream (gap reload).
@@ -113,8 +124,18 @@ type Consumer struct {
 	// Exposed, when set, is called after an agent or cloud exposure change of a listener
 	// (the probe requester).
 	Exposed func(host, key string)
-	Now     func() time.Time
+	// Announce publishes a host's pwb.inventory.<host>.forgotten and returns its stream
+	// sequence (Forget needs it; without it Forget is refused).
+	Announce func(ctx context.Context, host string) (uint64, error)
+	Now      func() time.Time
 
+	// handle serialises Handle and Forget, so a message is never applied half before and
+	// half after a forget; Forget waits for it under its context.
+	handleOnce sync.Once
+	handle     chan struct{}
+	// stream is the ASM_EVENTS stream's identity (SetStream), stamped on forget marks.
+	streamMu sync.Mutex
+	stream   time.Time
 	// liveMu guards Liveness and Feed: Handle and CheckSilence run on different goroutines.
 	liveMu sync.Mutex
 }
@@ -122,12 +143,22 @@ type Consumer struct {
 // Handle processes one message. A permanent error (svc.IsPermanent) means the message
 // must be quarantined; any other error means retry.
 func (c *Consumer) Handle(ctx context.Context, subject string, data []byte, m Meta) error {
+	if err := c.lock(ctx); err != nil {
+		return err
+	}
+	defer c.unlock()
 	p, ok := bus.Parse(subject)
 	if !ok {
 		slog.Warn("inventory: skipping message on unexpected subject", "subject", subject)
 		return nil
 	}
 	m.Host, m.Kind, m.Origin = p.Host, p.Kind, p.Origin
+	if p.Origin == bus.OriginInventory {
+		if p.Kind == bus.KindForgotten {
+			return c.applyForgotten(ctx, p.Host, data, m.StreamSeq)
+		}
+		return nil
+	}
 	msg, err := decode(p, data)
 	if err != nil {
 		return svc.Permanent(err)
@@ -141,6 +172,9 @@ func (c *Consumer) Handle(ctx context.Context, subject string, data []byte, m Me
 		return svc.Permanent(fmt.Errorf("host_id %q differs from the subject's host", h))
 	}
 	if p.Origin != bus.OriginAgent {
+		if stale, err := c.staleVerdict(ctx, p.Host, m.StreamSeq); err != nil || stale {
+			return err
+		}
 		if err := c.Store.Apply(ctx, Event{Meta: m, Msg: msg}); err != nil {
 			return err
 		}
@@ -200,6 +234,12 @@ func (c *Consumer) handleAgent(ctx context.Context, m Meta, msg agentMsg) error 
 	cur, known, err := c.Store.Cursor(ctx, m.Host)
 	if err != nil {
 		return err
+	}
+	if !known {
+		// An unknown host may be a forgotten one whose leftovers are still in the stream.
+		if old, err := c.leftover(ctx, m.Host, m.StreamSeq); err != nil || old {
+			return err
+		}
 	}
 	switch runOrder(cur, known, run, msg.GetBootId(), msg.GetRunNumber()) {
 	case runSkip:
@@ -320,7 +360,7 @@ func (c *Consumer) changed(host, kind, origin string) {
 		return
 	}
 	switch kind {
-	case bus.KindHeartbeat, bus.KindProxyRoutes:
+	case bus.KindHeartbeat, bus.KindProxyRoutes, bus.KindTamper:
 		return
 	}
 	c.Changed(host)
@@ -421,6 +461,8 @@ func decode(p bus.Parsed, data []byte) (proto.Message, error) {
 			msg = &asmv1.Heartbeat{}
 		case bus.KindHostChanged:
 			msg = &asmv1.HostEvent{}
+		case bus.KindTamper:
+			msg = &asmv1.TamperEvent{}
 		case bus.KindExposureConfirmed:
 			return nil, errors.New("exposure.confirmed under asm.<host> is forged: verifier results are on pwb.verifier")
 		default:

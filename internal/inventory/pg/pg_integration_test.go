@@ -30,7 +30,7 @@ func open(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	if _, err := s.pool.Exec(ctx, "TRUNCATE hosts, listeners, exposure_history, proxies, quarantine"); err != nil {
+	if _, err := s.pool.Exec(ctx, "TRUNCATE hosts, listeners, exposure_history, proxies, quarantine, forgotten_hosts"); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -127,7 +127,7 @@ func TestStoreLifecycle(t *testing.T) {
 	if l := listener(t, s, 8080); l.Level != "confirmed" || l.ProbeResult != "confirmed" || l.ProbeAt == nil {
 		t.Fatalf("after probe: %+v", l)
 	}
-	hist, err := s.History(ctx, h1, snap.Listeners[1].Listener.Key, 0)
+	hist, err := s.History(ctx, inventory.HistoryQuery{Host: h1, Key: snap.Listeners[1].Listener.Key})
 	if err != nil || len(hist) != 3 { // snapshot, cloud (once), verifier
 		t.Fatalf("history %+v %v", hist, err)
 	}

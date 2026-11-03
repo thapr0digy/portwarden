@@ -1,14 +1,25 @@
-// Package api serves the inventory read-only over HTTP as JSON:
+// Package api serves the inventory over HTTP as JSON:
 //
-//	GET /healthz                                   (no auth) database reachable
-//	GET /v1/hosts                                  every host
-//	GET /v1/hosts/{id}                             one host
-//	GET /v1/listeners?host=&proto=&port=&addr=&min_level=&unit=&exe=&limit=
-//	GET /v1/exposure-history?host=&key=&limit=     one listener's level changes, newest first
-//	GET /v1/proxy-routes?host=&proxy=              proxies with their route sets
+//	GET    /healthz                                (no auth) database reachable
+//	GET    /v1/hosts?limit=&cursor=                hosts by id
+//	GET    /v1/hosts/{id}                          one host
+//	DELETE /v1/hosts/{id}?force=                   forget a decommissioned host (M8; admin token)
+//	GET    /v1/listeners?host=&proto=&port=&addr=&min_level=&unit=&exe=&limit=&cursor=
+//	GET    /v1/exposure-history?host=&key=&limit=&cursor=  one listener's level changes, newest first
+//	GET    /v1/proxy-routes?host=&proxy=           proxies with their route sets
+//
+// Lists are keyset-paged (M8): at most limit rows (default 1000, at most 10 000; /v1/hosts
+// without limit and cursor returns every host, as before); when
+// more follow, the response has "X-Next-Cursor: <cursor>" and "Link: <same query with
+// cursor=…>; rel="next"". The body stays a JSON array. A cursor is opaque and belongs to
+// its list (another list's, or a mangled one, is 400); keep the other parameters the same
+// from page to page.
 //
 // Every /v1 request needs "Authorization: Bearer <token>"; the token is compared in
-// constant time (over SHA-256 digests, so its length does not leak either).
+// constant time (over SHA-256 digests, so its length does not leak either). The read
+// token never forgets: DELETE needs the separate admin token (SetForget), and answers 403
+// "forget disabled" when none is configured. A host that is not silent is forgotten only
+// with force=1.
 package api
 
 import (
@@ -32,9 +43,31 @@ const MinTokenLength = 16
 
 // Server is the API.
 type Server struct {
-	r     inventory.Reader
-	token [sha256.Size]byte
+	r      inventory.Reader
+	token  [sha256.Size]byte
+	admin  *[sha256.Size]byte
+	forget func(ctx context.Context, host string) (inventory.ForgetResult, error)
 }
+
+// SetForget enables DELETE /v1/hosts/{id} for adminToken (at least 16 characters, not the
+// read token), running f (the consumer's Forget). Without it the call answers 403.
+func (s *Server) SetForget(adminToken string, f func(ctx context.Context, host string) (inventory.ForgetResult, error)) error {
+	adminToken = strings.TrimSpace(adminToken)
+	if len(adminToken) < MinTokenLength {
+		return errors.New("api: the admin token must be at least 16 characters")
+	}
+	sum := sha256.Sum256([]byte(adminToken))
+	if subtle.ConstantTimeCompare(sum[:], s.token[:]) == 1 {
+		return errors.New("api: the admin token must differ from the read token")
+	}
+	s.admin, s.forget = &sum, f
+	return nil
+}
+
+const (
+	defaultPage = 1000
+	maxPage     = 10000
+)
 
 // New returns a server that requires token on /v1.
 func New(r inventory.Reader, token string) (*Server, error) {
@@ -51,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.Handle("GET /v1/hosts", s.auth(s.hosts))
 	mux.Handle("GET /v1/hosts/{id}", s.auth(s.host))
+	mux.HandleFunc("DELETE /v1/hosts/{id}", s.forgetHost)
 	mux.Handle("GET /v1/listeners", s.auth(s.listeners))
 	mux.Handle("GET /v1/exposure-history", s.auth(s.history))
 	mux.Handle("GET /v1/proxy-routes", s.auth(s.proxies))
@@ -92,8 +126,104 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hosts(w http.ResponseWriter, r *http.Request) {
-	hs, err := s.r.Hosts(r.Context())
+	if q := r.URL.Query(); !q.Has("limit") && !q.Has("cursor") {
+		// Unpaged, as before M8: every host.
+		hs, err := s.r.Hosts(r.Context(), inventory.HostQuery{All: true})
+		reply(w, hs, err)
+		return
+	}
+	limit, err := pageLimit(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	q := inventory.HostQuery{Limit: limit + 1}
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		q.After = &inventory.HostCursor{}
+		if inventory.DecodeCursor(c, q.After) != nil {
+			writeError(w, http.StatusBadRequest, "cursor: invalid")
+			return
+		}
+	}
+	hs, err := s.r.Hosts(r.Context(), q)
+	if err == nil && len(hs) > limit {
+		hs = hs[:limit]
+		setNext(w, r, inventory.EncodeCursor(inventory.HostCursor{ID: hs[limit-1].ID}))
+	}
 	reply(w, hs, err)
+}
+
+// bearer returns the request's token digest.
+func bearer(r *http.Request) ([sha256.Size]byte, bool) {
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return sha256.Sum256([]byte(strings.TrimSpace(got))), ok
+}
+
+func (s *Server) forgetHost(w http.ResponseWriter, r *http.Request) {
+	sum, ok := bearer(r)
+	isRead := ok && subtle.ConstantTimeCompare(sum[:], s.token[:]) == 1
+	isAdmin := ok && s.admin != nil && subtle.ConstantTimeCompare(sum[:], s.admin[:]) == 1
+	switch {
+	case isAdmin:
+	case s.admin == nil && isRead:
+		writeError(w, http.StatusForbidden, "forget disabled (no admin token configured: api.admin_token_file)")
+		return
+	case isRead:
+		writeError(w, http.StatusForbidden, "the read token cannot forget hosts; use the admin token")
+		return
+	default:
+		w.Header().Set("WWW-Authenticate", `Bearer realm="portwarden-inventory"`)
+		writeError(w, http.StatusUnauthorized, "missing or wrong bearer token")
+		return
+	}
+	host := r.PathValue("id")
+	force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
+	slog.Info("api: forget requested", "token", "admin", "host", host, "force", force, "remote", r.RemoteAddr)
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	if !force {
+		h, known, err := s.r.Host(ctx, host)
+		if err != nil {
+			slog.Error("api: forget: host lookup failed", "host", host, "err", err)
+			writeError(w, http.StatusInternalServerError, "query failed")
+			return
+		}
+		if known && !h.Silent {
+			writeError(w, http.StatusConflict, "host is not silent: stop its agent and wait for silent_after, or force=1")
+			return
+		}
+	}
+	res, err := s.forget(ctx, host)
+	switch {
+	case errors.Is(err, inventory.ErrBadHost):
+		writeError(w, http.StatusBadRequest, "host id must be one plain subject token (and not reserved)")
+	case err != nil:
+		slog.Error("api: forget failed", "host", r.PathValue("id"), "err", err)
+		writeError(w, http.StatusServiceUnavailable, "forget failed; nothing or only part was done, run it again")
+	default:
+		slog.Info("api: host forgotten", "token", "admin", "host", host, "force", force, "existed", res.Existed, "stream_seq", res.StreamSeq)
+		writeJSON(w, http.StatusOK, res)
+	}
+}
+
+// pageLimit reads ?limit= (default 1000, 1 to 10 000).
+func pageLimit(r *http.Request) (int, error) {
+	n, err := intParam(r.URL.Query().Get("limit"), 1, maxPage)
+	if err != nil {
+		return 0, errors.New("limit: " + err.Error())
+	}
+	if n == 0 {
+		n = defaultPage
+	}
+	return n, nil
+}
+
+// setNext announces the next page: X-Next-Cursor, and a Link to the same query with it.
+func setNext(w http.ResponseWriter, r *http.Request, cursor string) {
+	q := r.URL.Query()
+	q.Set("cursor", cursor)
+	w.Header().Set("X-Next-Cursor", cursor)
+	w.Header().Set("Link", "<"+r.URL.Path+"?"+q.Encode()+`>; rel="next"`)
 }
 
 func (s *Server) host(w http.ResponseWriter, r *http.Request) {
@@ -121,11 +251,25 @@ func (s *Server) listeners(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "min_level: "+err.Error())
 		return
 	}
-	if f.Limit, err = intParam(q.Get("limit"), 1, 10000); err != nil {
-		writeError(w, http.StatusBadRequest, "limit: "+err.Error())
+	limit, err := pageLimit(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	f.Limit = limit + 1
+	if c := q.Get("cursor"); c != "" {
+		f.After = &inventory.ListenerCursor{}
+		if inventory.DecodeCursor(c, f.After) != nil {
+			writeError(w, http.StatusBadRequest, "cursor: invalid")
+			return
+		}
+	}
 	ls, err := s.r.Listeners(r.Context(), f)
+	if err == nil && len(ls) > limit {
+		ls = ls[:limit]
+		l := ls[limit-1]
+		setNext(w, r, inventory.EncodeCursor(inventory.ListenerCursor{Host: l.Host, Proto: l.Proto, Port: l.Port, Key: l.Key}))
+	}
 	reply(w, ls, err)
 }
 
@@ -136,12 +280,25 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "host and key are required")
 		return
 	}
-	limit, err := intParam(q.Get("limit"), 1, 10000)
+	limit, err := pageLimit(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "limit: "+err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	hs, err := s.r.History(r.Context(), host, key, limit)
+	hq := inventory.HistoryQuery{Host: host, Key: key, Limit: limit + 1}
+	if c := q.Get("cursor"); c != "" {
+		hq.After = &inventory.HistoryCursor{}
+		if inventory.DecodeCursor(c, hq.After) != nil {
+			writeError(w, http.StatusBadRequest, "cursor: invalid")
+			return
+		}
+	}
+	hs, err := s.r.History(r.Context(), hq)
+	if err == nil && len(hs) > limit {
+		hs = hs[:limit]
+		last := hs[limit-1]
+		setNext(w, r, inventory.EncodeCursor(inventory.HistoryCursor{At: last.At, ID: last.ID}))
+	}
 	reply(w, hs, err)
 }
 

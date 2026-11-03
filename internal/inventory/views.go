@@ -37,9 +37,14 @@ type HostView struct {
 	// value (first sight sets it), not when the rule changed.
 	FirewallFingerprint *string    `json:"firewall_fingerprint"`
 	FirewallChangedAt   *time.Time `json:"firewall_changed_at"`
-	Listeners           int        `json:"listeners"`
-	FirstSeen           time.Time  `json:"first_seen"`
-	UpdatedAt           time.Time  `json:"updated_at"`
+	// Tamper is the agent's latest tamper status (a TamperView: raised flags, the checks
+	// that ran, those that could not read their evidence), from its last tamper event or
+	// heartbeat; null until an agent sent one. TamperAt is that message's stream time.
+	Tamper    json.RawMessage `json:"tamper"`
+	TamperAt  *time.Time      `json:"tamper_at"`
+	Listeners int             `json:"listeners"`
+	FirstSeen time.Time       `json:"first_seen"`
+	UpdatedAt time.Time       `json:"updated_at"`
 }
 
 // ListenerView is a listener with its exposure from every source.
@@ -72,10 +77,28 @@ type ListenerFilter struct {
 	// MinLevel is a level number (1 local … 5 confirmed).
 	MinLevel int
 	Limit    int
+	// After starts the page after this listener (keyset paging); nil is the first page.
+	After *ListenerCursor
+}
+
+// HostQuery pages /v1/hosts; All returns every host (no limit, no cursor).
+type HostQuery struct {
+	Limit int
+	After *HostCursor
+	All   bool
+}
+
+// HistoryQuery selects one listener's exposure changes, newest first.
+type HistoryQuery struct {
+	Host, Key string
+	Limit     int
+	After     *HistoryCursor
 }
 
 // HistoryView is one exposure change of a listener.
 type HistoryView struct {
+	// ID is the row id, the tie-breaker of the history cursor.
+	ID            int64           `json:"-"`
 	At            time.Time       `json:"at"`
 	Origin        string          `json:"origin"`
 	Level         string          `json:"level"`
@@ -99,12 +122,14 @@ type ProxyView struct {
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
-// Reader is the read side the API serves.
+// Reader is the read side the API serves. List methods return at most Limit rows (the
+// store's default when 0) after the query's cursor, in their documented order; the API
+// asks for one row more than a page to know whether another follows.
 type Reader interface {
-	Hosts(ctx context.Context) ([]HostView, error)
+	Hosts(ctx context.Context, q HostQuery) ([]HostView, error)
 	Host(ctx context.Context, id string) (HostView, bool, error)
 	Listeners(ctx context.Context, f ListenerFilter) ([]ListenerView, error)
-	History(ctx context.Context, host, key string, limit int) ([]HistoryView, error)
+	History(ctx context.Context, q HistoryQuery) ([]HistoryView, error)
 	Proxies(ctx context.Context, host, proxyID string) ([]ProxyView, error)
 	Ping(ctx context.Context) error
 }

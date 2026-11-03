@@ -20,6 +20,9 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
 
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
 	"github.com/thapr0digy/portwarden/internal/backend/liveness"
@@ -45,13 +48,69 @@ type Config struct {
 	AllowInsecureListen bool   `json:"allow_insecure_listen"`
 	// TokenFile holds the API bearer token; PORTWARDEN_INVENTORY_TOKEN wins.
 	TokenFile string `json:"token_file"`
+	// API holds the admin token (M8: forgetting hosts); without one, forgetting is off.
+	API APIConfig `json:"api"`
 	// SilentAfter: a host without a heartbeat this long is silent (default 90s).
 	SilentAfter svc.Duration `json:"silent_after"`
 	Cloud       CloudConfig  `json:"cloud"`
 	// Reprobe: listeners at level bound or above whose last outside probe is older than
 	// this are requested again (default 24h).
-	Reprobe svc.Duration `json:"reprobe"`
+	Reprobe   svc.Duration    `json:"reprobe"`
+	Retention RetentionConfig `json:"retention"`
 }
+
+// APIConfig configures the API's admin side.
+type APIConfig struct {
+	// AdminTokenFile holds the token DELETE /v1/hosts/{id} needs (not the read token);
+	// PORTWARDEN_INVENTORY_ADMIN_TOKEN wins. Unset: forgetting hosts is disabled (403).
+	AdminTokenFile string `json:"admin_token_file"`
+}
+
+// RetentionConfig prunes old rows (M8). History and Quarantine are ages; unset or null
+// means the default (90 days, 30 days), "0s" keeps the table forever; a negative duration
+// is refused when the config is read. Interval (unset: 1h) must be at least a minute,
+// Batch (unset: 1000) 1 to 10 000.
+type RetentionConfig struct {
+	History    *svc.Duration `json:"history"`
+	Quarantine *svc.Duration `json:"quarantine"`
+	// Interval between passes (default 1h); Batch rows per DELETE (default 1000).
+	Interval svc.Duration `json:"interval"`
+	Batch    int          `json:"batch"`
+}
+
+func (r RetentionConfig) validate() error {
+	if r.Interval != 0 && time.Duration(r.Interval) < time.Minute {
+		return errors.New("retention.interval must be at least 1m")
+	}
+	if r.Batch < 0 || r.Batch > 10000 {
+		return errors.New("retention.batch must be 1 to 10000")
+	}
+	return nil
+}
+
+func (c Config) retention() inventory.Retention {
+	age := func(d *svc.Duration, def time.Duration) time.Duration {
+		if d == nil {
+			return def
+		}
+		return time.Duration(*d)
+	}
+	r := c.Retention
+	return inventory.Retention{History: age(r.History, inventory.DefaultHistoryRetention),
+		Quarantine: age(r.Quarantine, inventory.DefaultQuarantineRetention), Interval: time.Duration(r.Interval), Batch: r.Batch}.WithDefaults()
+}
+
+const defaultListen = "127.0.0.1:8740"
+
+// adminToken returns the admin token ("" when none is configured).
+func adminToken(cfg Config) (string, error) {
+	if os.Getenv(adminTokenEnv) == "" && cfg.API.AdminTokenFile == "" {
+		return "", nil
+	}
+	return svc.Secret(adminTokenEnv, cfg.API.AdminTokenFile)
+}
+
+const adminTokenEnv = "PORTWARDEN_INVENTORY_ADMIN_TOKEN"
 
 // CloudConfig turns on the level 3 look-up.
 type CloudConfig struct {
@@ -66,6 +125,13 @@ type CloudConfig struct {
 
 func main() {
 	version.HandleFlag()
+	if len(os.Args) > 1 && os.Args[1] == "forget-host" {
+		if err := forgetHost(os.Args[2:], os.Stdout, os.Getenv); err != nil {
+			fmt.Fprintln(os.Stderr, "portwarden-inventory forget-host:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	path := flag.String("config", "/etc/portwarden/inventory.json", "config file (JSON)")
 	flag.Parse()
@@ -81,7 +147,10 @@ func run(path string) error {
 		return err
 	}
 	if cfg.Listen == "" {
-		cfg.Listen = "127.0.0.1:8740"
+		cfg.Listen = defaultListen
+	}
+	if err := cfg.Retention.validate(); err != nil {
+		return err
 	}
 	if err := checkListen(cfg.Listen, cfg.AllowInsecureListen); err != nil {
 		return err
@@ -103,8 +172,29 @@ func run(path string) error {
 	}
 	defer store.Close()
 
+	silentAfter := cfg.SilentAfter.D(90 * time.Second)
+	cons := &inventory.Consumer{Store: store, Liveness: liveness.New(silentAfter), Feed: liveness.NewFeed(silentAfter, time.Now())}
+	// Connect retries in the background, so the API comes up even with NATS down.
+	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleInventory, "portwarden-inventory", cons.SetConnected))
+	if err != nil {
+		return err
+	}
+	defer nc.Close()
+	pub := bus.NewPublisher(js, "inventory")
+	cons.Announce = func(ctx context.Context, host string) (uint64, error) {
+		id := bus.NewEventID()
+		return pub.PublishSeq(ctx, bus.ForgottenSubject(host), id, &asmv1.HostForgotten{EventId: id, HostId: host, At: timestamppb.Now()})
+	}
+
 	apiSrv, err := api.New(store, token)
 	if err != nil {
+		return err
+	}
+	if admin, err := adminToken(cfg); err != nil {
+		return fmt.Errorf("api admin token: %w", err)
+	} else if admin == "" {
+		slog.Warn("forgetting hosts is disabled: no api.admin_token_file (DELETE /v1/hosts/{id} answers 403)")
+	} else if err := apiSrv.SetForget(admin, cons.Forget); err != nil {
 		return err
 	}
 	ln, err := net.Listen("tcp", cfg.Listen)
@@ -125,19 +215,22 @@ func run(path string) error {
 		defer cancel()
 		_ = httpSrv.Shutdown(sctx)
 	}()
-
-	silentAfter := cfg.SilentAfter.D(90 * time.Second)
-	cons := &inventory.Consumer{Store: store, Liveness: liveness.New(silentAfter), Feed: liveness.NewFeed(silentAfter, time.Now())}
-	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleInventory, "portwarden-inventory", cons.SetConnected))
-	if err != nil {
-		return err
-	}
-	defer nc.Close()
 	stream, err := svc.WaitStream(ctx, js)
 	if err != nil {
 		return err
 	}
 	cons.Snapshots = inventory.StreamSnapshots{Stream: stream}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("stream info: %w", err)
+	}
+	// Forget marks belong to one stream: a recreated stream starts its sequences over.
+	if n, err := store.PruneMarks(ctx, info.Created, info.State.LastSeq); err != nil {
+		return fmt.Errorf("forget marks: %w", err)
+	} else if n > 0 {
+		slog.Warn("dropped forget marks of another stream (or past its last sequence)", "marks", n, "stream_created", info.Created)
+	}
+	cons.SetStream(info.Created)
 	if err := cons.SeedLiveness(ctx); err != nil {
 		return err
 	}
@@ -147,11 +240,13 @@ func run(path string) error {
 	ctx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
 
-	pub := bus.NewPublisher(js, "inventory")
 	probes := inventory.NewProbeRequester(store, pub.Publish)
 	probes.Reprobe = cfg.Reprobe.D(24 * time.Hour)
 	cons.Exposed = probes.Notify
 	wg.Go(func() { probes.Run(ctx) })
+	ret := cfg.retention()
+	slog.Info("retention", "history", ret.History.String(), "quarantine", ret.Quarantine.String(), "interval", ret.Interval.String(), "batch", ret.Batch)
+	wg.Go(func() { ret.Run(ctx, store) })
 	if cfg.Cloud.AWS {
 		prov, err := cloudaws.New(ctx, cloudaws.Options{Endpoint: cfg.Cloud.Endpoint, Regions: cfg.Cloud.Regions})
 		if err != nil {
@@ -180,7 +275,8 @@ func run(path string) error {
 	})
 
 	c, err := bus.Durable(ctx, js, natsauth.ConsumerInventory, bus.DurableOptions{
-		Filters: []string{"asm.>", "pwb.cloud.*.exposure", "pwb.verifier.*.exposure"}})
+		// Its own announcements too: a forget whose database step failed heals here.
+		Filters: []string{"asm.>", "pwb.cloud.*.exposure", "pwb.verifier.*.exposure", "pwb.inventory.*.forgotten"}})
 	if err != nil {
 		return err
 	}

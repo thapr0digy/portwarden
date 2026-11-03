@@ -139,7 +139,8 @@ func TestPermissionMatrix(t *testing.T) {
 	// A host can never forge a backend verdict, even about itself, nor publish a kind the
 	// agent does not send.
 	for _, forged := range []string{"pwb.verifier." + hostA + ".exposure", "pwb.cloud." + hostA + ".exposure",
-		"asm." + hostA + ".exposure.confirmed", "asm." + hostA + ".anything"} {
+		"asm." + hostA + ".exposure.confirmed", "asm." + hostA + ".anything", "pwb.inventory." + hostB + ".forgotten",
+		"pwb.inventory." + hostA + ".forgotten"} {
 		if err := publish(a, forged); err == nil {
 			t.Errorf("host A published %s", forged)
 		}
@@ -165,6 +166,9 @@ func TestPermissionMatrix(t *testing.T) {
 	}{
 		{RoleInventory, "pwb.cloud." + hostA + ".exposure", "asm." + hostA + ".exposure.changed", ConsumerInventory},
 		{RoleInventory, "pwb.probe." + hostA + ".request", "pwb.verifier." + hostA + ".exposure", ConsumerInventory},
+		{RoleInventory, "pwb.inventory." + hostA + ".forgotten", "pwb.inventory." + hostA + ".other", ConsumerInventory},
+		{RoleVerifier, "", "pwb.inventory." + hostA + ".forgotten", ConsumerVerifier},
+		{RoleAlerter, "", "pwb.inventory." + hostA + ".forgotten", ConsumerAlerter},
 		{RoleVerifier, "pwb.verifier." + hostA + ".exposure", "asm." + hostA + ".exposure.confirmed", ConsumerVerifier},
 		{RoleVerifier, "", "pwb.cloud." + hostA + ".exposure", ConsumerVerifier},
 		{RoleAlerter, "", "asm." + hostA + ".exposure.changed", ConsumerAlerter},

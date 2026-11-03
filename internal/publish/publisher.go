@@ -29,6 +29,7 @@ import (
 
 	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
 	"github.com/thapr0digy/portwarden/internal/model"
+	"github.com/thapr0digy/portwarden/internal/redact"
 	"github.com/thapr0digy/portwarden/internal/spool"
 	"github.com/thapr0digy/portwarden/internal/state"
 )
@@ -942,7 +943,7 @@ func processesToProto(procs []model.Process) []*asmv1.Process {
 func processToProto(p model.Process) *asmv1.Process {
 	out := &asmv1.Process{
 		Pid: p.PID, Uid: p.UID, Comm: p.Comm, Exe: p.Exe,
-		Cmdline: p.Cmdline, Sha256: p.SHA256,
+		Cmdline: redact.Cmdline(p.Cmdline), Sha256: p.SHA256,
 		Unit: p.Unit, SocketUnit: p.SocketUnit, CgroupId: p.CgroupID,
 	}
 	if p.Container != (model.Container{}) {

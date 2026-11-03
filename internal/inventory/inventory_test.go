@@ -16,14 +16,44 @@ import (
 const host = "h1"
 
 type fakeStore struct {
-	cursors map[string]Cursor
-	applied []Event
-	silent  map[string]time.Time
-	last    map[string]time.Time
+	cursors   map[string]Cursor
+	applied   []Event
+	silent    map[string]time.Time
+	last      map[string]time.Time
+	forgotten map[string]Mark
+	forgets   int
 }
 
 func newFake() *fakeStore {
-	return &fakeStore{cursors: map[string]Cursor{}, silent: map[string]time.Time{}, last: map[string]time.Time{}}
+	return &fakeStore{cursors: map[string]Cursor{}, silent: map[string]time.Time{}, last: map[string]time.Time{},
+		forgotten: map[string]Mark{}}
+}
+
+func (f *fakeStore) Forget(_ context.Context, h string, m Mark) (bool, error) {
+	f.forgets++
+	_, existed := f.cursors[h]
+	delete(f.cursors, h)
+	delete(f.last, h)
+	if old, ok := f.forgotten[h]; !ok || !old.Stream.Equal(m.Stream) || m.Seq > old.Seq {
+		f.forgotten[h] = m
+	}
+	return existed, nil
+}
+
+func (f *fakeStore) ForgottenMark(_ context.Context, h string) (Mark, bool, error) {
+	m, ok := f.forgotten[h]
+	return m, ok, nil
+}
+
+func (f *fakeStore) PruneMarks(_ context.Context, stream time.Time, last uint64) (int64, error) {
+	var n int64
+	for h, m := range f.forgotten {
+		if !m.Stream.Equal(stream) || m.Seq > last {
+			delete(f.forgotten, h)
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (f *fakeStore) Cursor(_ context.Context, h string) (Cursor, bool, error) {

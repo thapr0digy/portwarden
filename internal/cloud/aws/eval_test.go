@@ -27,6 +27,11 @@ func instance(public bool) ec2types.Instance {
 	return inst
 }
 
+func withIPv6(inst ec2types.Instance) ec2types.Instance {
+	inst.Ipv6Address = awssdk.String("2001:db8::5")
+	return inst
+}
+
 func perm(proto string, from, to int32, cidrs ...string) ec2types.IpPermission {
 	p := ec2types.IpPermission{IpProtocol: awssdk.String(proto), FromPort: awssdk.Int32(from), ToPort: awssdk.Int32(to)}
 	for _, c := range cidrs {
@@ -55,10 +60,17 @@ func entry(n int32, proto string, from, to int32, cidr string, allow bool) ec2ty
 	return e
 }
 
+func v6entry(n int32, allow bool) ec2types.NetworkAclEntry {
+	e := entry(n, "-1", 0, 0, "", allow)
+	e.CidrBlock, e.Ipv6CidrBlock = nil, awssdk.String("::/0")
+	return e
+}
+
+// defaultNACL is AWS's default ACL: allow all, then the implicit denies, both families.
 func defaultNACL() map[string]ec2types.NetworkAcl {
 	return map[string]ec2types.NetworkAcl{"subnet-1": {NetworkAclId: awssdk.String("acl-1"), Entries: []ec2types.NetworkAclEntry{
-		entry(100, "-1", 0, 0, "0.0.0.0/0", true),
-		entry(32767, "-1", 0, 0, "0.0.0.0/0", false),
+		entry(100, "-1", 0, 0, "0.0.0.0/0", true), v6entry(101, true),
+		entry(32767, "-1", 0, 0, "0.0.0.0/0", false), v6entry(32768, false),
 	}}}
 }
 
@@ -77,7 +89,7 @@ func TestDirectPath(t *testing.T) {
 		{"sg allows 0/0", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
 			"sg-web": sg("sg-web", perm("tcp", 443, 443, "0.0.0.0/0"))}, NACLs: defaultNACL()},
 			port(443, 3), true, "cloud: sg-web (web) allows tcp/443 from 0.0.0.0/0"},
-		{"port range and ipv6", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
+		{"port range and ipv6", HostData{Instance: withIPv6(instance(false)), SecurityGroups: map[string]ec2types.SecurityGroup{
 			"sg-web": sg("sg-web", perm("6", 8000, 8100, "::/0"))}, NACLs: defaultNACL()},
 			port(8080, 3), true, "allows tcp/8080 from ::/0"},
 		{"all traffic -1", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
@@ -85,7 +97,7 @@ func TestDirectPath(t *testing.T) {
 			port(22, 3), true, "allows tcp/22"},
 		{"sg only from office", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
 			"sg-web": sg("sg-web", perm("tcp", 22, 22, "203.0.113.0/24"))}, NACLs: defaultNACL()},
-			port(22, 3), false, "no security group allows tcp/22 from 0/0"},
+			port(22, 3), false, "no security group allows tcp/22 from 0.0.0.0/0"},
 		{"udp rule does not open tcp", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
 			"sg-web": sg("sg-web", perm("udp", 53, 53, "0.0.0.0/0"))}, NACLs: defaultNACL()},
 			port(53, 3), false, "no security group"},
@@ -98,7 +110,7 @@ func TestDirectPath(t *testing.T) {
 				entry(200, "-1", 0, 0, "0.0.0.0/0", true),
 				entry(90, "6", 443, 443, "0.0.0.0/0", false),
 			}}}},
-			port(443, 3), false, "cloud: acl-2 rule 90 denies tcp/443 from 0.0.0.0/0"},
+			port(443, 3), false, "acl-2 rule 90 denies tcp/443 from 0.0.0.0/0"},
 		{"nacl narrower allow ignored, default deny", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
 			"sg-web": sg("sg-web", perm("tcp", 443, 443, "0.0.0.0/0"))},
 			NACLs: map[string]ec2types.NetworkAcl{"subnet-1": {NetworkAclId: awssdk.String("acl-3"), Entries: []ec2types.NetworkAclEntry{
@@ -177,5 +189,43 @@ func TestClassicELB(t *testing.T) {
 	v := Evaluate(d, []cloud.Port{port(8000, 2)})[0]
 	if !v.Open || !strings.Contains(strings.Join(v.Evidence, "\n"), "classic elb legacy (internet-facing) listener HTTP:80 -> i-0abc:8000") {
 		t.Fatalf("%+v", v)
+	}
+}
+
+// Each interface is judged with its own subnet's ACL: a private interface in a denying
+// subnet does not hide the public one.
+func TestPerInterface(t *testing.T) {
+	inst := ec2types.Instance{InstanceId: awssdk.String(instanceID), SubnetId: awssdk.String("subnet-a"),
+		NetworkInterfaces: []ec2types.InstanceNetworkInterface{
+			{NetworkInterfaceId: awssdk.String("eni-a"), SubnetId: awssdk.String("subnet-a"),
+				Association: &ec2types.InstanceNetworkInterfaceAssociation{PublicIp: awssdk.String("54.1.2.3")},
+				Groups:      []ec2types.GroupIdentifier{{GroupId: awssdk.String("sg-web")}}},
+			{NetworkInterfaceId: awssdk.String("eni-b"), SubnetId: awssdk.String("subnet-b"),
+				Groups: []ec2types.GroupIdentifier{{GroupId: awssdk.String("sg-web")}}},
+		}}
+	d := HostData{Instance: inst, SecurityGroups: map[string]ec2types.SecurityGroup{"sg-web": sg("sg-web", perm("tcp", 443, 443, "0.0.0.0/0"))},
+		NACLs: map[string]ec2types.NetworkAcl{
+			"subnet-a": {NetworkAclId: awssdk.String("acl-a"), Entries: []ec2types.NetworkAclEntry{entry(100, "-1", 0, 0, "0.0.0.0/0", true)}},
+			"subnet-b": {NetworkAclId: awssdk.String("acl-b"), Entries: []ec2types.NetworkAclEntry{entry(100, "-1", 0, 0, "0.0.0.0/0", false)}},
+		}}
+	if v := Evaluate(d, []cloud.Port{port(443, 3)})[0]; !v.Open {
+		t.Fatalf("public interface in an allowing subnet: %+v", v)
+	}
+}
+
+// An IPv6 deny with a lower rule number does not decide for IPv4 traffic.
+func TestNACLFamiliesSeparate(t *testing.T) {
+	v6deny := entry(90, "6", 22, 22, "", false)
+	v6deny.CidrBlock, v6deny.Ipv6CidrBlock = nil, awssdk.String("::/0")
+	d := HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{"sg-web": sg("sg-web", perm("tcp", 22, 22, "0.0.0.0/0"))},
+		NACLs: map[string]ec2types.NetworkAcl{"subnet-1": {NetworkAclId: awssdk.String("acl-1"), Entries: []ec2types.NetworkAclEntry{
+			v6deny, entry(100, "6", 22, 22, "0.0.0.0/0", true)}}}}
+	if v := Evaluate(d, []cloud.Port{port(22, 3)})[0]; !v.Open {
+		t.Fatalf("ipv4 path decided by an ipv6 rule: %+v", v)
+	}
+	// ::/0 in a security group does not open an IPv4-only instance.
+	d.SecurityGroups["sg-web"] = sg("sg-web", perm("tcp", 22, 22, "::/0"))
+	if v := Evaluate(d, []cloud.Port{port(22, 3)})[0]; v.Open {
+		t.Fatalf("::/0 opened an ipv4-only instance: %+v", v)
 	}
 }

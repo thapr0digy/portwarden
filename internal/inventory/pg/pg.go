@@ -113,13 +113,13 @@ func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 // Cursor returns a host's run and seq.
 func (s *Store) Cursor(ctx context.Context, host string) (inventory.Cursor, bool, error) {
 	var c inventory.Cursor
-	var last int64
-	err := s.pool.QueryRow(ctx, "SELECT run_id, last_seq, needs_resync FROM hosts WHERE host_id = $1", host).
-		Scan(&c.RunID, &last, &c.NeedsResync)
+	var last, num int64
+	err := s.pool.QueryRow(ctx, "SELECT run_id, last_seq, needs_resync, boot_id, run_number, retired_runs FROM hosts WHERE host_id = $1", clean(host)).
+		Scan(&c.RunID, &last, &c.NeedsResync, &c.BootID, &num, &c.Retired)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return inventory.Cursor{}, false, nil
 	}
-	c.LastSeq = uint64(last)
+	c.LastSeq, c.RunNumber = uint64(last), uint64(num)
 	return c, err == nil && c.RunID != "", err
 }
 
@@ -180,13 +180,29 @@ func ensureHost(ctx context.Context, tx pgx.Tx, host string) error {
 }
 
 func setCursor(ctx context.Context, tx pgx.Tx, host string, c inventory.Cursor) error {
-	_, err := tx.Exec(ctx, "UPDATE hosts SET run_id = $2, last_seq = $3, needs_resync = $4, updated_at = now() WHERE host_id = $1",
-		host, c.RunID, int64(c.LastSeq), c.NeedsResync)
+	retired := c.Retired
+	if retired == nil {
+		retired = []string{}
+	}
+	for i := range retired {
+		retired[i] = clean(retired[i])
+	}
+	_, err := tx.Exec(ctx, `UPDATE hosts SET run_id = $2, last_seq = $3, needs_resync = $4, boot_id = $5, run_number = $6,
+		retired_runs = $7, updated_at = now() WHERE host_id = $1`,
+		host, clean(c.RunID), int64(c.LastSeq), c.NeedsResync, clean(c.BootID), int64(c.RunNumber), retired)
 	return err
 }
 
-// Apply applies one event and its cursor in one transaction.
+// Apply applies one event and its cursor in one transaction. Every string in the message
+// is cleaned first (NUL bytes removed, invalid UTF-8 replaced), since PostgreSQL rejects
+// both; a data error the database still raises (SQLSTATE classes 22, 23) is permanent.
 func (s *Store) Apply(ctx context.Context, e inventory.Event) error {
+	cleanMessage(e.Msg)
+	e.Meta.Host, e.Meta.Kind = clean(e.Meta.Host), clean(e.Meta.Kind)
+	return classify(s.apply(ctx, e))
+}
+
+func (s *Store) apply(ctx context.Context, e inventory.Event) error {
 	return s.tx(ctx, func(tx pgx.Tx) error {
 		host := e.Meta.Host
 		if err := ensureHost(ctx, tx, host); err != nil {
@@ -364,7 +380,7 @@ func applyExposure(ctx context.Context, tx pgx.Tx, m inventory.Meta, ev *asmv1.E
 		p := int16(ev.GetPrevious().GetLevel())
 		prev = &p
 	}
-	origin := ev.GetOrigin()
+	origin := m.Origin
 	if origin == "" {
 		origin = "agent"
 	}

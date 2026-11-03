@@ -82,7 +82,7 @@ func run(path string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleAlerter, "portwarden-alerter"))
+	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleAlerter, "portwarden-alerter", nil))
 	if err != nil {
 		return err
 	}
@@ -101,7 +101,7 @@ func run(path string) error {
 		return err
 	}
 	go func() {
-		if err := svc.Consume(ctx, hb, a.heartbeat); err != nil && ctx.Err() == nil {
+		if err := svc.Consume(ctx, hb, a.heartbeat, svc.ConsumeOptions{}); err != nil && ctx.Err() == nil {
 			slog.Error("heartbeat consumer stopped", "err", err)
 			stop()
 		}
@@ -115,7 +115,7 @@ func run(path string) error {
 	}
 	slog.Info("alerter running", "page_level", rules.PageLevel, "dedupe_window", rules.DedupeWindow.String(),
 		"silent_after", a.live.After.String(), "webhook", hook != nil)
-	return svc.Consume(ctx, ex, a.exposure)
+	return svc.Consume(ctx, ex, a.exposure, svc.ConsumeOptions{})
 }
 
 // heartbeatConsumer re-creates the heartbeat consumer from each host's last heartbeat,

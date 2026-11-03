@@ -30,7 +30,7 @@ func open(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	if _, err := s.pool.Exec(ctx, "TRUNCATE hosts, listeners, exposure_history, proxies"); err != nil {
+	if _, err := s.pool.Exec(ctx, "TRUNCATE hosts, listeners, exposure_history, proxies, quarantine"); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -53,7 +53,12 @@ var streamSeq uint64
 func apply(t *testing.T, s *Store, cur *inventory.Cursor, kind string, m proto.Message) {
 	t.Helper()
 	streamSeq++
-	e := inventory.Event{Meta: inventory.Meta{Host: h1, Kind: kind, StreamSeq: streamSeq, StreamTime: time.Now()}, Cursor: cur, Msg: m}
+	origin := ""
+	switch kind {
+	case "cloud", "verifier":
+		origin, kind = kind, "exposure"
+	}
+	e := inventory.Event{Meta: inventory.Meta{Host: h1, Kind: kind, Origin: origin, StreamSeq: streamSeq, StreamTime: time.Now()}, Cursor: cur, Msg: m}
 	if err := s.Apply(context.Background(), e); err != nil {
 		t.Fatalf("%s: %v", kind, err)
 	}
@@ -111,13 +116,13 @@ func TestStoreLifecycle(t *testing.T) {
 	cloud := &asmv1.ExposureEvent{HostId: h1, RunId: "cloud-1", Origin: "cloud", Trigger: "cloud",
 		Listener: snap.Listeners[1].Listener,
 		Exposure: &asmv1.Exposure{Level: asmv1.ExposureLevel_EXPOSURE_CLOUD_OPEN, Evidence: []string{"cloud: sg-1 allows tcp/8080 from 0.0.0.0/0"}}}
-	apply(t, s, nil, "exposure.changed", cloud)
+	apply(t, s, nil, "cloud", cloud)
 	streamSeq-- // a redelivery of the same stream message
-	apply(t, s, nil, "exposure.changed", cloud)
+	apply(t, s, nil, "cloud", cloud)
 	if l := listener(t, s, 8080); l.Level != "cloud_open" || l.CloudLevel != "cloud_open" {
 		t.Fatalf("after cloud: %+v", l)
 	}
-	apply(t, s, nil, "exposure.confirmed", &asmv1.ExposureConfirmation{HostId: h1, RunId: "verifier-1", Result: "confirmed",
+	apply(t, s, nil, "verifier", &asmv1.ExposureConfirmation{HostId: h1, RunId: "verifier-1", Result: "confirmed",
 		Listener: snap.Listeners[1].Listener, Target: "54.1.2.3:8080", Probe: "tcp-connect", Banner: "HTTP/1.0 200"})
 	if l := listener(t, s, 8080); l.Level != "confirmed" || l.ProbeResult != "confirmed" || l.ProbeAt == nil {
 		t.Fatalf("after probe: %+v", l)
@@ -194,5 +199,73 @@ func TestStoreLifecycle(t *testing.T) {
 	ch, ok, err := s.CloudHost(ctx, h1)
 	if err != nil || !ok || ch.InstanceID != "i-1" || len(ch.Listeners) != 1 {
 		t.Fatalf("cloud host %+v %v %v", ch, ok, err)
+	}
+}
+
+// NUL bytes and invalid UTF-8 (which PostgreSQL rejects) are cleaned, so one host's bad
+// strings never stop the consumer; the cursor's new fields round-trip.
+func TestBadStringsAndCursorFields(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	bad := &asmv1.ListenerState{
+		Listener:  &asmv1.Listener{Netns: 1, Proto: "tcp", Addr: "0.0.0.0", Port: 80, Key: "1/tcp/0.0.0.0:80\x00evil"},
+		Processes: []*asmv1.Process{{Pid: 1, Exe: "/bin/a\x00b\xff", Cmdline: []string{"x\x00y"}}},
+		Exposure:  &asmv1.Exposure{Level: asmv1.ExposureLevel_EXPOSURE_BOUND, Evidence: []string{"nul\x00here"}},
+	}
+	cur := &inventory.Cursor{RunID: "01A", LastSeq: 1, BootID: "boot-1", RunNumber: 4, Retired: []string{"01Z"}}
+	apply(t, s, cur, "snapshot", &asmv1.Snapshot{HostId: h1, RunId: "01A", Seq: 1, Listeners: []*asmv1.ListenerState{bad},
+		Host: &asmv1.HostInfo{Region: "eu\x00", PublicIps: []*asmv1.PublicIP{{Ip: "203.0.113.7", Dir: "in"}}}})
+	ls, err := s.Listeners(ctx, inventory.ListenerFilter{Host: h1})
+	if err != nil || len(ls) != 1 || ls[0].Key != "1/tcp/0.0.0.0:80evil" {
+		t.Fatalf("%+v %v", ls, err)
+	}
+	got, ok, err := s.Cursor(ctx, h1)
+	if err != nil || !ok || got.BootID != "boot-1" || got.RunNumber != 4 || len(got.Retired) != 1 || got.Retired[0] != "01Z" {
+		t.Fatalf("cursor %+v %v %v", got, ok, err)
+	}
+	in, ok, err := s.ProbeInput(ctx, h1, ls[0].Key)
+	if err != nil || !ok || in.Level != 2 || len(in.InboundIPs) != 1 || in.InboundIPs[0] != "203.0.113.7" {
+		t.Fatalf("probe input %+v %v %v", in, ok, err)
+	}
+	stale, err := s.StaleProbes(ctx, time.Now(), 10)
+	if err != nil || len(stale) != 1 {
+		t.Fatalf("stale %v %v", stale, err)
+	}
+	if err := s.Quarantine(ctx, 42, "asm.h.x\x00", "bad\x00", []byte{0, 1, 2}); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	_ = s.pool.QueryRow(ctx, "SELECT count(*) FROM quarantine WHERE stream_seq = 42").Scan(&n)
+	if n != 1 {
+		t.Fatal("quarantine row missing")
+	}
+}
+
+// Through the consumer: a message carrying NUL bytes is applied (cleaned), and the next
+// message after it is applied too.
+func TestConsumerNULDoesNotStall(t *testing.T) {
+	s := open(t)
+	c := &inventory.Consumer{Store: s}
+	ctx := context.Background()
+	msgs := []struct {
+		subject string
+		m       proto.Message
+	}{
+		{"asm." + h1 + ".snapshot", &asmv1.Snapshot{HostId: h1, RunId: "01A", Seq: 1}},
+		{"asm." + h1 + ".listener.opened", &asmv1.ListenerEvent{HostId: h1, RunId: "01A", Seq: 2, Kind: asmv1.Kind_OPENED,
+			Listener:  &asmv1.Listener{Netns: 1, Proto: "tcp", Addr: "0.0.0.0", Port: 81, Key: "k\x0081"},
+			Processes: []*asmv1.Process{{Comm: "nul\x00comm"}}}},
+		{"asm." + h1 + ".listener.opened", &asmv1.ListenerEvent{HostId: h1, RunId: "01A", Seq: 3, Kind: asmv1.Kind_OPENED,
+			Listener: &asmv1.Listener{Netns: 1, Proto: "tcp", Addr: "0.0.0.0", Port: 82, Key: "k82"}}},
+	}
+	for i, m := range msgs {
+		b, _ := proto.Marshal(m.m)
+		if err := c.Handle(ctx, m.subject, b, inventory.Meta{StreamSeq: uint64(1000 + i), StreamTime: time.Now()}); err != nil {
+			t.Fatalf("message %d: %v", i, err)
+		}
+	}
+	ls, err := s.Listeners(ctx, inventory.ListenerFilter{Host: h1})
+	if err != nil || len(ls) != 2 {
+		t.Fatalf("%+v %v", ls, err)
 	}
 }

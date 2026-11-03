@@ -126,3 +126,26 @@ type CloudState interface {
 	CloudHosts(ctx context.Context) ([]string, error)
 	SetCloudStatus(ctx context.Context, host, status string, at time.Time) error
 }
+
+// ProbeInput is the stored state a probe request is built from (never the triggering
+// event's body).
+type ProbeInput struct {
+	Netns            uint32
+	Key, Proto, Addr string
+	Port             int
+	Level            int
+	AgentEvidence    []string
+	// InboundIPs are the host's stored dir=in public-IP candidates.
+	InboundIPs []string
+}
+
+// HostKey names a listener.
+type HostKey struct{ Host, Key string }
+
+// ProbeState reads what the probe requester needs.
+type ProbeState interface {
+	ProbeInput(ctx context.Context, host, key string) (ProbeInput, bool, error)
+	// StaleProbes lists listeners at level bound or above whose last probe is older than
+	// before (or that were never probed), oldest first.
+	StaleProbes(ctx context.Context, before time.Time, limit int) ([]HostKey, error)
+}

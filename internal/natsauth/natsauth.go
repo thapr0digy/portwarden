@@ -46,20 +46,20 @@ const (
 
 // Durable consumer names. Each service may create, read, ack and delete only its own.
 const (
-	ConsumerInventory  = "pw-inventory"
-	ConsumerAlerter    = "pw-alerter"
-	ConsumerAlerterHB  = "pw-alerter-hb"
-	ConsumerVerifier   = "pw-verifier"
-	consumerAPIPrefix  = "$JS.API.CONSUMER."
-	streamInfoSubject  = "$JS.API.STREAM.INFO." + StreamName
-	streamMsgGet       = "$JS.API.STREAM.MSG.GET." + StreamName
-	directGetWildcard  = "$JS.API.DIRECT.GET." + StreamName + ".>"
-	directGetPlain     = "$JS.API.DIRECT.GET." + StreamName
-	jetStreamAPIInfo   = "$JS.API.INFO"
-	ackPrefix          = "$JS.ACK." + StreamName + "."
-	cloudVerdicts      = "pwb.cloud.*.exposure"
-	probeRequests      = "pwb.probe.*.request"
-	verifierResults    = "pwb.verifier.*.exposure"
+	ConsumerInventory = "pw-inventory"
+	ConsumerAlerter   = "pw-alerter"
+	ConsumerAlerterHB = "pw-alerter-hb"
+	ConsumerVerifier  = "pw-verifier"
+	consumerAPIPrefix = "$JS.API.CONSUMER."
+	streamInfoSubject = "$JS.API.STREAM.INFO." + StreamName
+	streamMsgGet      = "$JS.API.STREAM.MSG.GET." + StreamName
+	directGetWildcard = "$JS.API.DIRECT.GET." + StreamName + ".>"
+	directGetPlain    = "$JS.API.DIRECT.GET." + StreamName
+	jetStreamAPIInfo  = "$JS.API.INFO"
+	ackPrefix         = "$JS.ACK." + StreamName + "."
+	cloudVerdicts     = "pwb.cloud.*.exposure"
+	probeRequests     = "pwb.probe.*.request"
+	verifierResults   = "pwb.verifier.*.exposure"
 )
 
 // HostSubjects are the subject kinds an agent publishes under asm.<host>.

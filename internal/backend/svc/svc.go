@@ -61,13 +61,13 @@ type NATS struct {
 }
 
 // Bus converts it for bus.Connect.
-func (n NATS) Bus(role natsauth.Role, name string) bus.Config {
+func (n NATS) Bus(role natsauth.Role, name string, connected func(bool)) bus.Config {
 	url := n.URL
 	if url == "" {
 		url = "nats://127.0.0.1:4222"
 	}
 	return bus.Config{URL: url, CredsFile: n.CredsFile, NkeyFile: n.NkeyFile, CAFile: n.CAFile, CertFile: n.CertFile,
-		KeyFile: n.KeyFile, Role: role, Name: name}
+		KeyFile: n.KeyFile, Role: role, Name: name, Connected: connected}
 }
 
 // Load reads a JSON config file into v, refusing unknown keys.
@@ -104,14 +104,75 @@ func Secret(env, file string) (string, error) {
 	return v, nil
 }
 
-// Handler processes one message; an error means "not done, retry it".
+// Handler processes one message. A nil error acks it. An error wrapped with Permanent
+// (bad data: undecodable, rejected by the store) quarantines it at once; any other error
+// is transient and retried.
 type Handler func(ctx context.Context, m jetstream.Msg) error
 
-// Consume pulls from c and calls h for each message in order. A message h fails on is
-// retried (with backoff up to 30 s) before the next one is looked at, so order holds;
-// it is acked once h succeeds. It returns when ctx ends.
-func Consume(ctx context.Context, c jetstream.Consumer, h Handler) error {
-	it, err := c.Messages(jetstream.PullMaxMessages(256))
+// PermanentError marks a message that can never be processed.
+type PermanentError struct{ Err error }
+
+func (e *PermanentError) Error() string { return "permanent: " + e.Err.Error() }
+func (e *PermanentError) Unwrap() error { return e.Err }
+
+// Permanent marks err as a data error (nil stays nil).
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &PermanentError{Err: err}
+}
+
+// IsPermanent reports whether err was marked Permanent.
+func IsPermanent(err error) bool {
+	var p *PermanentError
+	return errors.As(err, &p)
+}
+
+// QuarantineFunc stores a message that will not be processed (subject, stream sequence,
+// raw data, why). An error from it is treated as transient.
+type QuarantineFunc func(ctx context.Context, m jetstream.Msg, why error) error
+
+// ConsumeOptions bound the retries of one message.
+type ConsumeOptions struct {
+	// Attempts per delivery for a transient error (default 6, backoff 1 s doubling to
+	// 30 s), after which the message is NAKed with NakDelay so the consumer moves on.
+	Attempts int
+	NakDelay time.Duration
+	// MaxDeliver must equal the consumer's MaxDeliver (bus.DurableOptions, default 10): on
+	// the last delivery a still-failing message is quarantined instead of dropped silently.
+	MaxDeliver int
+	// Quarantine stores dropped messages; nil only logs them.
+	Quarantine QuarantineFunc
+	// Prefetch is how many messages are pulled ahead (default 32).
+	Prefetch int
+}
+
+func (o *ConsumeOptions) defaults() {
+	if o.Attempts <= 0 {
+		o.Attempts = 6
+	}
+	if o.NakDelay <= 0 {
+		o.NakDelay = 30 * time.Second
+	}
+	if o.MaxDeliver <= 0 {
+		o.MaxDeliver = DefaultMaxDeliver
+	}
+	if o.Prefetch <= 0 {
+		o.Prefetch = 32
+	}
+}
+
+// DefaultMaxDeliver is the consumers' MaxDeliver.
+const DefaultMaxDeliver = 10
+
+// Consume pulls from c and calls h for each message, one at a time. A transient failure
+// is retried in place (so order holds while the cause is brief), then NAKed with a delay;
+// a permanent one, or a transient one on its last delivery, is quarantined and
+// terminated, so one bad message never stops the consumer. It returns when ctx ends.
+func Consume(ctx context.Context, c jetstream.Consumer, h Handler, o ConsumeOptions) error {
+	o.defaults()
+	it, err := c.Messages(jetstream.PullMaxMessages(o.Prefetch))
 	if err != nil {
 		return err
 	}
@@ -128,26 +189,92 @@ func Consume(ctx context.Context, c jetstream.Consumer, h Handler) error {
 			slog.Warn("consume: next message", "err", err)
 			continue
 		}
-		backoff := time.Second
-		for {
-			// Keep the message from being redelivered while we retry it.
-			_ = m.InProgress()
-			err := h(ctx, m)
-			if err == nil {
-				break
-			}
-			slog.Warn("consume: handling failed; retrying", "subject", m.Subject(), "err", err, "in", backoff)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(backoff):
-			}
-			backoff = min(backoff*2, 30*time.Second)
-		}
-		if err := m.Ack(); err != nil {
-			slog.Warn("consume: ack failed (the message will be redelivered and skipped)", "subject", m.Subject(), "err", err)
+		if err := handleOne(ctx, m, h, o); err != nil {
+			return err
 		}
 	}
+}
+
+func handleOne(ctx context.Context, m jetstream.Msg, h Handler, o ConsumeOptions) error {
+	// Keep the message from being redelivered while it is handled or retried.
+	stopTicker := make(chan struct{})
+	defer close(stopTicker)
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stopTicker:
+				return
+			case <-t.C:
+				_ = m.InProgress()
+			}
+		}
+	}()
+	delivered := uint64(1)
+	if md, err := m.Metadata(); err == nil {
+		delivered = md.NumDelivered
+	}
+	backoff := time.Second
+	var err error
+	for attempt := 1; attempt <= o.Attempts; attempt++ {
+		err = h(ctx, m)
+		if err == nil {
+			if aerr := m.Ack(); aerr != nil {
+				slog.Warn("consume: ack failed (the message will be redelivered and skipped)", "subject", m.Subject(), "err", aerr)
+			}
+			return nil
+		}
+		if IsPermanent(err) {
+			return quarantine(ctx, m, err, o)
+		}
+		if attempt == o.Attempts {
+			break
+		}
+		slog.Warn("consume: handling failed; retrying", "subject", m.Subject(), "err", err, "attempt", attempt, "in", backoff)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, 30*time.Second)
+	}
+	if delivered >= uint64(o.MaxDeliver) {
+		return quarantine(ctx, m, fmt.Errorf("gave up after %d deliveries: %w", delivered, err), o)
+	}
+	slog.Error("consume: message still failing; moving on, it will be redelivered", "subject", m.Subject(),
+		"err", err, "delivery", delivered, "max_deliver", o.MaxDeliver, "nak_delay", o.NakDelay)
+	if nerr := m.NakWithDelay(o.NakDelay); nerr != nil {
+		slog.Warn("consume: nak failed", "err", nerr)
+	}
+	return nil
+}
+
+// quarantine stores the message and terminates it; while the store fails, it retries.
+func quarantine(ctx context.Context, m jetstream.Msg, why error, o ConsumeOptions) error {
+	var seq uint64
+	if md, err := m.Metadata(); err == nil {
+		seq = md.Sequence.Stream
+	}
+	slog.Error("consume: message quarantined", "subject", m.Subject(), "stream_seq", seq, "err", why)
+	backoff := time.Second
+	for o.Quarantine != nil {
+		err := o.Quarantine(ctx, m, why)
+		if err == nil {
+			break
+		}
+		slog.Warn("consume: quarantine store failed; retrying", "err", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, 30*time.Second)
+	}
+	if err := m.Term(); err != nil {
+		slog.Warn("consume: term failed", "err", err)
+	}
+	return nil
 }
 
 // WaitStream waits until the ASM_EVENTS stream exists (an operator creates it), logging

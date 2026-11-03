@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,9 +60,22 @@ type Options struct {
 	MaxPages int
 	// MaxLBs bounds the load balancers read per region (default 500).
 	MaxLBs int
-	// Timeout bounds one host's evaluation (default 60 s).
+	// Timeout bounds one host's EC2 calls (default 60 s).
 	Timeout time.Duration
+	// LBTimeout bounds a region's load-balancer read, which runs outside any host's
+	// budget (default 3 min).
+	LBTimeout time.Duration
+	// Regions, when set, are the only regions looked up (a host block naming another is an
+	// error). At most 64 regions get clients either way.
+	Regions []string
 }
+
+const maxRegions = 64
+
+var (
+	regionRe   = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-[0-9]+$`)
+	instanceRe = regexp.MustCompile(`^i-[0-9a-f]{1,17}$`)
+)
 
 // Provider is the AWS cloud.Provider.
 type Provider struct {
@@ -121,34 +136,57 @@ func NewWithClients(newClients func(region string) Clients, opts Options) *Provi
 	if opts.Timeout <= 0 {
 		opts.Timeout = 60 * time.Second
 	}
+	if opts.LBTimeout <= 0 {
+		opts.LBTimeout = 3 * time.Minute
+	}
 	return &Provider{newClients: newClients, opts: opts, clients: map[string]Clients{}, lbs: map[string]lbEntry{}, now: time.Now}
 }
 
-func (p *Provider) regionClients(region string) Clients {
+func (p *Provider) regionClients(region string) (Clients, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c, ok := p.clients[region]
 	if !ok {
+		if len(p.clients) >= maxRegions {
+			return Clients{}, fmt.Errorf("aws: more than %d regions", maxRegions)
+		}
 		c = p.newClients(region)
 		p.clients[region] = c
 	}
-	return c
+	return c, nil
+}
+
+// validHost checks the host-supplied identity before any call is made with it.
+func (p *Provider) validHost(h cloud.Host) error {
+	if h.InstanceID == "" || h.Region == "" {
+		return errors.New("aws: the host block has no instance id or region (agent older than M5, or IMDS unreachable)")
+	}
+	if !regionRe.MatchString(h.Region) || (len(p.opts.Regions) > 0 && !slices.Contains(p.opts.Regions, h.Region)) {
+		return fmt.Errorf("aws: region %q is not valid or not allowed", h.Region)
+	}
+	if !instanceRe.MatchString(h.InstanceID) {
+		return fmt.Errorf("aws: instance id %q is not valid", h.InstanceID)
+	}
+	return nil
 }
 
 // Evaluate fetches the instance, its security groups and subnet NACLs, and the region's
 // load balancers (cached), then judges ports.
 func (p *Provider) Evaluate(ctx context.Context, h cloud.Host, ports []cloud.Port) ([]cloud.Verdict, error) {
-	if h.InstanceID == "" || h.Region == "" {
-		return nil, errors.New("aws: the host block has no instance id or region (agent older than M5, or IMDS unreachable)")
+	if err := p.validHost(h); err != nil {
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, p.opts.Timeout)
-	defer cancel()
-	c := p.regionClients(h.Region)
-	inst, err := p.instance(ctx, c, h.InstanceID)
+	c, err := p.regionClients(h.Region)
 	if err != nil {
 		return nil, err
 	}
-	lbs, truncated, err := p.regionLBs(ctx, h.Region, c)
+	// The region's load balancers are read (or taken from the cache) outside this host's
+	// budget; a failure leaves them incomplete, never fails the host.
+	lbs, incomplete := p.regionLBs(ctx, h.Region, c)
+	hctx, cancel := context.WithTimeout(ctx, p.opts.Timeout)
+	defer cancel()
+	ctx = hctx
+	inst, err := p.instance(ctx, c, h.InstanceID)
 	if err != nil {
 		return nil, err
 	}
@@ -160,18 +198,25 @@ func (p *Provider) Evaluate(ctx context.Context, h cloud.Host, ports []cloud.Por
 		groups = append(groups, lb.SecurityGroups...)
 	}
 	sort.Strings(groups)
-	sgs, err := p.securityGroups(ctx, c, slices.Compact(groups))
+	sgs, sgTrunc, err := p.securityGroups(ctx, c, slices.Compact(groups))
 	if err != nil {
 		return nil, err
 	}
-	nacls, err := p.nacls(ctx, c, instanceSubnets(inst))
+	if sgTrunc {
+		incomplete = append(incomplete, "security groups truncated")
+	}
+	nacls, aclTrunc, err := p.nacls(ctx, c, instanceSubnets(inst))
 	if err != nil {
 		return nil, err
+	}
+	if aclTrunc {
+		incomplete = append(incomplete, "network ACLs truncated")
 	}
 	verdicts := Evaluate(HostData{Instance: inst, SecurityGroups: sgs, NACLs: nacls, LBs: lbs}, ports)
-	if truncated {
+	if len(incomplete) > 0 {
 		for i := range verdicts {
-			verdicts[i].Evidence = append(verdicts[i].Evidence, fmt.Sprintf("cloud: load balancers read only up to %d", p.opts.MaxLBs))
+			verdicts[i].Complete = false
+			verdicts[i].Evidence = append(verdicts[i].Evidence, cloud.IncompleteEvidence+" ("+strings.Join(incomplete, "; ")+")")
 		}
 	}
 	return verdicts, nil
@@ -195,27 +240,29 @@ func (p *Provider) instance(ctx context.Context, c Clients, id string) (ec2types
 	return ec2types.Instance{}, fmt.Errorf("aws: instance %s not found", id)
 }
 
-func (p *Provider) securityGroups(ctx context.Context, c Clients, ids []string) (map[string]ec2types.SecurityGroup, error) {
+func (p *Provider) securityGroups(ctx context.Context, c Clients, ids []string) (map[string]ec2types.SecurityGroup, bool, error) {
 	out := map[string]ec2types.SecurityGroup{}
+	truncated := false
 	for chunk := range slices.Chunk(ids, 100) {
 		pg := ec2.NewDescribeSecurityGroupsPaginator(c.EC2, &ec2.DescribeSecurityGroupsInput{GroupIds: chunk})
 		for page := 0; pg.HasMorePages() && page < p.opts.MaxPages; page++ {
 			res, err := pg.NextPage(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("aws: DescribeSecurityGroups: %w", err)
+				return nil, false, fmt.Errorf("aws: DescribeSecurityGroups: %w", err)
 			}
 			for _, g := range res.SecurityGroups {
 				out[deref(g.GroupId)] = g
 			}
 		}
+		truncated = truncated || pg.HasMorePages()
 	}
-	return out, nil
+	return out, truncated, nil
 }
 
-func (p *Provider) nacls(ctx context.Context, c Clients, subnets []string) (map[string]ec2types.NetworkAcl, error) {
+func (p *Provider) nacls(ctx context.Context, c Clients, subnets []string) (map[string]ec2types.NetworkAcl, bool, error) {
 	out := map[string]ec2types.NetworkAcl{}
 	if len(subnets) == 0 {
-		return out, nil
+		return out, false, nil
 	}
 	pg := ec2.NewDescribeNetworkAclsPaginator(c.EC2, &ec2.DescribeNetworkAclsInput{
 		Filters: []ec2types.Filter{{Name: awssdk.String("association.subnet-id"), Values: subnets}},
@@ -223,7 +270,7 @@ func (p *Provider) nacls(ctx context.Context, c Clients, subnets []string) (map[
 	for page := 0; pg.HasMorePages() && page < p.opts.MaxPages; page++ {
 		res, err := pg.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("aws: DescribeNetworkAcls: %w", err)
+			return nil, false, fmt.Errorf("aws: DescribeNetworkAcls: %w", err)
 		}
 		for _, acl := range res.NetworkAcls {
 			for _, a := range acl.Associations {
@@ -233,25 +280,39 @@ func (p *Provider) nacls(ctx context.Context, c Clients, subnets []string) (map[
 			}
 		}
 	}
-	return out, nil
+	return out, pg.HasMorePages(), nil
 }
 
-// regionLBs returns the region's internet-facing load balancers, cached for LBTTL.
-func (p *Provider) regionLBs(ctx context.Context, region string, c Clients) (RegionLBs, bool, error) {
+// regionLBs returns the region's internet-facing load balancers, cached for LBTTL and read
+// with their own deadline (LBTimeout), not the host's. What could not be read in full is
+// returned as reasons: a failed refresh keeps the last good data (stale) or none.
+func (p *Provider) regionLBs(ctx context.Context, region string, c Clients) (RegionLBs, []string) {
 	p.mu.Lock()
 	e, ok := p.lbs[region]
 	p.mu.Unlock()
 	if ok && p.now().Sub(e.at) < p.opts.LBTTL {
-		return e.data, e.truncated, nil
+		return e.data, e.reasons()
 	}
-	data, truncated, err := p.fetchLBs(ctx, c)
+	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.opts.LBTimeout)
+	defer cancel()
+	data, truncated, err := p.fetchLBs(lctx, c)
 	if err != nil {
-		return RegionLBs{}, false, err
+		if ok {
+			return e.data, append(e.reasons(), "load balancers stale ("+err.Error()+")")
+		}
+		return RegionLBs{}, []string{"load balancers unreadable (" + err.Error() + ")"}
 	}
 	p.mu.Lock()
 	p.lbs[region] = lbEntry{at: p.now(), data: data, truncated: truncated}
 	p.mu.Unlock()
-	return data, truncated, nil
+	return data, p.lbs[region].reasons()
+}
+
+func (e lbEntry) reasons() []string {
+	if e.truncated {
+		return []string{"load balancers truncated"}
+	}
+	return nil
 }
 
 func (p *Provider) fetchLBs(ctx context.Context, c Clients) (RegionLBs, bool, error) {
@@ -279,6 +340,7 @@ func (p *Provider) fetchLBs(ctx context.Context, c Clients) (RegionLBs, bool, er
 			out.V2 = append(out.V2, v)
 		}
 	}
+	truncated = truncated || pg.HasMorePages()
 	cpg := elb.NewDescribeLoadBalancersPaginator(c.ELB, &elb.DescribeLoadBalancersInput{})
 	for page := 0; cpg.HasMorePages() && page < p.opts.MaxPages; page++ {
 		res, err := cpg.NextPage(ctx)
@@ -295,6 +357,10 @@ func (p *Provider) fetchLBs(ctx context.Context, c Clients) (RegionLBs, bool, er
 			}
 			out.Classic = append(out.Classic, lb)
 		}
+	}
+	truncated = truncated || cpg.HasMorePages()
+	for _, v := range out.V2 {
+		truncated = truncated || v.truncated
 	}
 	return out, truncated, nil
 }
@@ -323,8 +389,10 @@ func (p *Provider) fetchV2(ctx context.Context, c Clients, lb elbv2types.LoadBal
 				}
 			}
 			v.Listeners = append(v.Listeners, vl)
+			v.truncated = v.truncated || rpg.HasMorePages()
 		}
 	}
+	v.truncated = v.truncated || lpg.HasMorePages()
 	tpg := elbv2.NewDescribeTargetGroupsPaginator(c.ELBv2, &elbv2.DescribeTargetGroupsInput{LoadBalancerArn: lb.LoadBalancerArn})
 	for page := 0; tpg.HasMorePages() && page < p.opts.MaxPages; page++ {
 		res, err := tpg.NextPage(ctx)
@@ -339,6 +407,7 @@ func (p *Provider) fetchV2(ctx context.Context, c Clients, lb elbv2types.LoadBal
 			v.TargetGroups[deref(tg.TargetGroupArn)] = V2TargetGroup{TG: tg, Targets: th.TargetHealthDescriptions}
 		}
 	}
+	v.truncated = v.truncated || tpg.HasMorePages()
 	return v, nil
 }
 

@@ -12,8 +12,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,13 +37,19 @@ type Config struct {
 	NATS svc.NATS `json:"nats"`
 	// PostgresDSNFile holds the DSN (with its password); PORTWARDEN_INVENTORY_DSN wins.
 	PostgresDSNFile string `json:"postgres_dsn_file"`
-	// Listen is the API address; loopback by default.
-	Listen string `json:"listen"`
+	// Listen is the API address; loopback by default. The API has no TLS of its own, so a
+	// non-loopback address (bearer token in cleartext) is refused unless
+	// AllowInsecureListen is set (e.g. behind a TLS-terminating proxy on the same host).
+	Listen              string `json:"listen"`
+	AllowInsecureListen bool   `json:"allow_insecure_listen"`
 	// TokenFile holds the API bearer token; PORTWARDEN_INVENTORY_TOKEN wins.
 	TokenFile string `json:"token_file"`
 	// SilentAfter: a host without a heartbeat this long is silent (default 90s).
 	SilentAfter svc.Duration `json:"silent_after"`
 	Cloud       CloudConfig  `json:"cloud"`
+	// Reprobe: listeners at level bound or above whose last outside probe is older than
+	// this are requested again (default 24h).
+	Reprobe svc.Duration `json:"reprobe"`
 }
 
 // CloudConfig turns on the level 3 look-up.
@@ -51,6 +59,8 @@ type CloudConfig struct {
 	AWS      bool         `json:"aws"`
 	Refresh  svc.Duration `json:"refresh"`
 	Endpoint string       `json:"endpoint"`
+	// Regions, when set, are the only regions looked up.
+	Regions []string `json:"regions"`
 }
 
 func main() {
@@ -70,6 +80,9 @@ func run(path string) error {
 	}
 	if cfg.Listen == "" {
 		cfg.Listen = "127.0.0.1:8740"
+	}
+	if err := checkListen(cfg.Listen, cfg.AllowInsecureListen); err != nil {
+		return err
 	}
 	dsn, err := svc.Secret("PORTWARDEN_INVENTORY_DSN", cfg.PostgresDSNFile)
 	if err != nil {
@@ -111,7 +124,9 @@ func run(path string) error {
 		_ = httpSrv.Shutdown(sctx)
 	}()
 
-	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleInventory, "portwarden-inventory"))
+	silentAfter := cfg.SilentAfter.D(90 * time.Second)
+	cons := &inventory.Consumer{Store: store, Liveness: liveness.New(silentAfter), Feed: liveness.NewFeed(silentAfter, time.Now())}
+	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleInventory, "portwarden-inventory", cons.SetConnected))
 	if err != nil {
 		return err
 	}
@@ -120,25 +135,34 @@ func run(path string) error {
 	if err != nil {
 		return err
 	}
-
-	cons := &inventory.Consumer{Store: store, Snapshots: inventory.StreamSnapshots{Stream: stream},
-		Liveness: liveness.New(cfg.SilentAfter.D(90 * time.Second))}
+	cons.Snapshots = inventory.StreamSnapshots{Stream: stream}
 	if err := cons.SeedLiveness(ctx); err != nil {
 		return err
 	}
+	// Background workers stop before the store closes (deferred above).
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	ctx, cancelWorkers := context.WithCancel(ctx)
+	defer cancelWorkers()
+
+	pub := bus.NewPublisher(js, "inventory")
+	probes := inventory.NewProbeRequester(store, pub.Publish)
+	probes.Reprobe = cfg.Reprobe.D(24 * time.Hour)
+	cons.Exposed = probes.Notify
+	wg.Go(func() { probes.Run(ctx) })
 	if cfg.Cloud.AWS {
-		prov, err := cloudaws.New(ctx, cloudaws.Options{Endpoint: cfg.Cloud.Endpoint})
+		prov, err := cloudaws.New(ctx, cloudaws.Options{Endpoint: cfg.Cloud.Endpoint, Regions: cfg.Cloud.Regions})
 		if err != nil {
 			return err
 		}
-		pub := bus.NewPublisher(js, "cloud")
-		lookup := inventory.NewCloudLookup(store, map[string]cloud.Provider{"aws": prov}, pub.Publish, pub.RunID)
+		cpub := bus.NewPublisher(js, "cloud")
+		lookup := inventory.NewCloudLookup(store, map[string]cloud.Provider{"aws": prov}, cpub.Publish, cpub.RunID)
 		lookup.Refresh = cfg.Cloud.Refresh.D(10 * time.Minute)
 		cons.Changed = lookup.Notify
-		go lookup.Run(ctx)
+		wg.Go(func() { lookup.Run(ctx) })
 		slog.Info("cloud look-up on", "providers", "aws (gcp, azure: unsupported)", "refresh", lookup.Refresh.String())
 	}
-	go func() {
+	wg.Go(func() {
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()
 		for {
@@ -151,9 +175,10 @@ func run(path string) error {
 				}
 			}
 		}
-	}()
+	})
 
-	c, err := bus.Durable(ctx, js, natsauth.ConsumerInventory, bus.DurableOptions{Filters: []string{"asm.>"}})
+	c, err := bus.Durable(ctx, js, natsauth.ConsumerInventory, bus.DurableOptions{
+		Filters: []string{"asm.>", "pwb.cloud.*.exposure", "pwb.verifier.*.exposure"}})
 	if err != nil {
 		return err
 	}
@@ -164,5 +189,23 @@ func run(path string) error {
 			meta.StreamSeq, meta.StreamTime = md.Sequence.Stream, md.Timestamp
 		}
 		return cons.Handle(ctx, m.Subject(), m.Data(), meta)
-	})
+	}, svc.ConsumeOptions{Quarantine: func(ctx context.Context, m jetstream.Msg, why error) error {
+		var seq uint64
+		if md, err := m.Metadata(); err == nil {
+			seq = md.Sequence.Stream
+		}
+		return store.Quarantine(ctx, seq, m.Subject(), why.Error(), m.Data())
+	}})
+}
+
+// checkListen refuses a non-loopback API address without TLS unless allowed.
+func checkListen(addr string, allowInsecure bool) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	if ip, err := netip.ParseAddr(host); (err == nil && ip.IsLoopback()) || host == "localhost" || allowInsecure {
+		return nil
+	}
+	return fmt.Errorf("listen %s is not loopback and the API has no TLS: the bearer token would cross the network in cleartext (set allow_insecure_listen to accept that)", addr)
 }

@@ -10,6 +10,7 @@ import (
 
 	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
 	"github.com/thapr0digy/portwarden/internal/backend/liveness"
+	"github.com/thapr0digy/portwarden/internal/backend/svc"
 )
 
 const host = "h1"
@@ -77,9 +78,21 @@ func opened(run string, seq uint64) *asmv1.ListenerEvent {
 
 func handle(t *testing.T, c *Consumer, kind string, m proto.Message) {
 	t.Helper()
-	if err := c.Handle(context.Background(), "asm."+host+"."+kind, marshal(t, m), Meta{StreamTime: time.Now()}); err != nil {
+	subject := "asm." + host + "." + kind
+	switch kind {
+	case "cloud":
+		subject = "pwb.cloud." + host + ".exposure"
+	case "verifier":
+		subject = "pwb.verifier." + host + ".exposure"
+	}
+	if err := c.Handle(context.Background(), subject, marshal(t, m), Meta{StreamTime: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func handleErr(c *Consumer, subject string, m proto.Message) error {
+	b, _ := proto.Marshal(m)
+	return c.Handle(context.Background(), subject, b, Meta{StreamTime: time.Now()})
 }
 
 // seqs lists the agent seq of each applied event (0 for backend events).
@@ -168,56 +181,134 @@ func TestBackendEventsLeaveTheCursor(t *testing.T) {
 	var changed []string
 	c := &Consumer{Store: f, Changed: func(h string) { changed = append(changed, h) }}
 	handle(t, c, "snapshot", &asmv1.Snapshot{HostId: host, RunId: "01A", Seq: 1})
-	handle(t, c, "exposure.changed", &asmv1.ExposureEvent{HostId: host, RunId: "cloud-01X", Origin: "cloud"})
-	handle(t, c, "exposure.confirmed", &asmv1.ExposureConfirmation{HostId: host, RunId: "verifier-01Y", Result: "confirmed"})
+	handle(t, c, "cloud", &asmv1.ExposureEvent{HostId: host, RunId: "cloud-01X"})
+	handle(t, c, "verifier", &asmv1.ExposureConfirmation{HostId: host, RunId: "verifier-01Y", Result: "confirmed"})
 	if len(f.applied) != 3 || f.applied[1].Cursor != nil || f.applied[2].Cursor != nil {
 		t.Fatalf("applied %+v", f.applied)
+	}
+	if f.applied[1].Msg.(*asmv1.ExposureEvent).GetOrigin() != "cloud" || f.applied[1].Meta.Origin != "cloud" {
+		t.Fatal("origin must come from the subject")
 	}
 	if cur := f.cursors[host]; cur.LastSeq != 1 {
 		t.Fatalf("cursor moved: %+v", cur)
 	}
-	if len(changed) != 2 { // snapshot and the cloud exposure; not the probe result
+	if len(changed) != 1 { // only the agent's snapshot triggers the cloud look-up
 		t.Fatalf("changed calls %v", changed)
 	}
-	// A body naming another host than its subject is dropped.
-	handle(t, c, "listener.opened", &asmv1.ListenerEvent{HostId: "other", RunId: "01A", Seq: 2})
-	if len(f.applied) != 3 {
-		t.Fatal("impersonating message applied")
+}
+
+// Forgeries in the host's own namespace are permanent errors (quarantined), and a body
+// naming another host too.
+func TestForgedOriginsAreQuarantined(t *testing.T) {
+	f := newFake()
+	c := &Consumer{Store: f}
+	handle(t, c, "snapshot", &asmv1.Snapshot{HostId: host, RunId: "01A", Seq: 1})
+	for _, tc := range []struct {
+		subject string
+		m       proto.Message
+	}{
+		{"asm." + host + ".exposure.changed", &asmv1.ExposureEvent{HostId: host, RunId: "01A", Seq: 2, Origin: "cloud"}},
+		{"asm." + host + ".exposure.confirmed", &asmv1.ExposureConfirmation{HostId: host, Result: "confirmed"}},
+		{"asm." + host + ".listener.opened", &asmv1.ListenerEvent{HostId: "other", RunId: "01A", Seq: 2}},
+		{"pwb.verifier." + host + ".exposure", &asmv1.ExposureConfirmation{HostId: "other"}},
+	} {
+		if err := handleErr(c, tc.subject, tc.m); !svc.IsPermanent(err) {
+			t.Errorf("%s: err %v, want permanent", tc.subject, err)
+		}
+	}
+	if err := c.Handle(context.Background(), "asm."+host+".heartbeat", []byte{0xff, 0xff}, Meta{}); !svc.IsPermanent(err) {
+		t.Errorf("undecodable: %v", err)
+	}
+	if len(f.applied) != 1 {
+		t.Fatalf("forgeries applied: %d", len(f.applied))
+	}
+}
+
+// Runs are ordered by (boot id, run number), not by the run id's clock: a later run whose
+// ULID sorts lower (the clock stepped back) is still the new run, and the old run's late
+// messages are skipped.
+func TestRunOrderByBootAndCounter(t *testing.T) {
+	f := newFake()
+	c := &Consumer{Store: f}
+	handle(t, c, "snapshot", &asmv1.Snapshot{HostId: host, RunId: "01Z", Seq: 1, BootId: "b1", RunNumber: 7})
+	handle(t, c, "snapshot", &asmv1.Snapshot{HostId: host, RunId: "01A", Seq: 1, BootId: "b1", RunNumber: 8})
+	if cur := f.cursors[host]; cur.RunID != "01A" || cur.RunNumber != 8 || !slices.Contains(cur.Retired, "01Z") {
+		t.Fatalf("clock-stepped-back run not adopted: %+v", cur)
+	}
+	handle(t, c, "listener.opened", &asmv1.ListenerEvent{HostId: host, RunId: "01Z", Seq: 2, BootId: "b1", RunNumber: 7})
+	if len(f.applied) != 2 {
+		t.Fatal("retired run's leftover applied")
+	}
+	// A new boot is always a new run, whatever its counter (the spool may have been wiped).
+	handle(t, c, "snapshot", &asmv1.Snapshot{HostId: host, RunId: "01B", Seq: 1, BootId: "b2", RunNumber: 1})
+	if cur := f.cursors[host]; cur.RunID != "01B" || cur.BootID != "b2" {
+		t.Fatalf("new boot: %+v", cur)
+	}
+	// A run id never seen, with a lower counter in the same boot, is not adopted.
+	handle(t, c, "snapshot", &asmv1.Snapshot{HostId: host, RunId: "01C", Seq: 1, BootId: "b2", RunNumber: 0})
+	if f.cursors[host].RunID != "01B" {
+		t.Fatal("an unnumbered run replaced a numbered one")
+	}
+	if got := runOrder(Cursor{RunID: "01B", RunNumber: 3, BootID: "b"}, true, "01X", "b", 2); got != runSkip {
+		t.Fatalf("lower counter same boot: %v", got)
 	}
 }
 
 func TestSilenceAndRecovery(t *testing.T) {
 	f := newFake()
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
-	c := &Consumer{Store: f, Liveness: liveness.New(90 * time.Second), Now: func() time.Time { return now }}
+	after := 90 * time.Second
+	c := &Consumer{Store: f, Liveness: liveness.New(after), Feed: liveness.NewFeed(after, now), Now: func() time.Time { return now }}
 	f.last["old"] = now.Add(-time.Hour)
 	if err := c.SeedLiveness(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	hb := func(seq uint64, at time.Time) {
+	hb := func(seq uint64, h string) {
 		t.Helper()
-		if err := c.Handle(context.Background(), "asm."+host+".heartbeat",
-			marshal(t, &asmv1.Heartbeat{HostId: host, RunId: "01A", Seq: seq}), Meta{StreamTime: at}); err != nil {
+		if err := handleErr(c, "asm."+h+".heartbeat", &asmv1.Heartbeat{HostId: h, RunId: "01A", Seq: seq}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	hb(1, now)
-	if err := c.CheckSilence(context.Background()); err != nil {
-		t.Fatal(err)
+	other := 0
+	beat := func() { other++; hb(uint64(other), "busy") } // keeps the feed alive
+	beat()
+	hb(1, host)
+	now = now.Add(time.Minute)
+	beat()
+	_ = c.CheckSilence(context.Background())
+	if len(f.silent) != 0 {
+		t.Fatal("judged within the start-up grace")
 	}
-	if _, ok := f.silent["old"]; !ok {
-		t.Fatal("seeded host with an hour-old heartbeat not silent")
-	}
-	if _, ok := f.silent[host]; ok {
-		t.Fatal("live host silent")
-	}
-	now = now.Add(2 * time.Minute)
+	now = now.Add(time.Minute)
+	beat()
 	_ = c.CheckSilence(context.Background())
 	if since := f.silent[host]; since.IsZero() {
 		t.Fatal("host not silent after 2 minutes")
 	}
-	hb(2, now)
+	if _, ok := f.silent["old"]; !ok {
+		t.Fatal("a seeded host that never spoke again must go silent")
+	}
+	if _, ok := f.silent["busy"]; ok {
+		t.Fatal("live host silent")
+	}
+	hb(2, host)
 	if since, ok := f.silent[host]; !ok || !since.IsZero() {
 		t.Fatalf("host not recovered: %v %v", since, ok)
+	}
+}
+
+// When nothing arrives from any host, the feed is stalled and no host is marked silent.
+func TestFeedStallSuppressesHostSilence(t *testing.T) {
+	f := newFake()
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	c := &Consumer{Store: f, Liveness: liveness.New(time.Minute), Feed: liveness.NewFeed(time.Minute, now), Now: func() time.Time { return now }}
+	_ = handleErr(c, "asm.a.heartbeat", &asmv1.Heartbeat{HostId: "a", RunId: "01A", Seq: 1})
+	_ = handleErr(c, "asm.b.heartbeat", &asmv1.Heartbeat{HostId: "b", RunId: "01A", Seq: 1})
+	for range 10 {
+		now = now.Add(30 * time.Second)
+		_ = c.CheckSilence(context.Background())
+	}
+	if len(f.silent) != 0 {
+		t.Fatalf("hosts marked silent while the feed was stalled: %v", f.silent)
 	}
 }

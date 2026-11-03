@@ -87,7 +87,7 @@ func run(path string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleVerifier, "portwarden-verifier"))
+	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleVerifier, "portwarden-verifier", nil))
 	if err != nil {
 		return err
 	}
@@ -133,7 +133,7 @@ func run(path string) error {
 			}
 		}
 		return nil
-	})
+	}, svc.ConsumeOptions{})
 }
 
 func buildScope(cfg Config) (verifier.Scope, error) {

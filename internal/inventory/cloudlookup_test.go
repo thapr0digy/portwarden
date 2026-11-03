@@ -35,9 +35,10 @@ func (f *fakeCloudState) SetCloudStatus(_ context.Context, h, s string, _ time.T
 }
 
 type fakeProvider struct {
-	open map[string]bool
-	err  error
-	got  []cloud.Port
+	incomplete bool
+	open       map[string]bool
+	err        error
+	got        []cloud.Port
 }
 
 func (f *fakeProvider) Evaluate(_ context.Context, _ cloud.Host, ports []cloud.Port) ([]cloud.Verdict, error) {
@@ -51,6 +52,7 @@ func (f *fakeProvider) Evaluate(_ context.Context, _ cloud.Host, ports []cloud.P
 		if v.Open {
 			v.Evidence = []string{"cloud: sg-1 allows tcp from 0.0.0.0/0"}
 		}
+		v.Complete = !f.incomplete
 		out = append(out, v)
 	}
 	return out, nil
@@ -67,7 +69,7 @@ func TestCloudLookupPublishesOnlyChanges(t *testing.T) {
 	prov := &fakeProvider{open: map[string]bool{"a": true}}
 	var sent []*asmv1.ExposureEvent
 	l := NewCloudLookup(state, map[string]cloud.Provider{"aws": prov}, func(_ context.Context, subject, _ string, m proto.Message) error {
-		if subject != "asm.h1.exposure.changed" {
+		if subject != "pwb.cloud.h1.exposure" {
 			t.Errorf("subject %s", subject)
 		}
 		sent = append(sent, m.(*asmv1.ExposureEvent))
@@ -127,5 +129,33 @@ func TestCloudLookupUnsupported(t *testing.T) {
 	}
 	if _, ok := state.status["n"]; ok {
 		t.Fatal("a host off-cloud got a cloud status")
+	}
+}
+
+// Partial cloud data never lowers a verdict, and a verdict already published is not
+// republished while the store has not caught up with it.
+func TestCloudLookupIncompleteNeverLowers(t *testing.T) {
+	state := &fakeCloudState{status: map[string]string{}, hosts: map[string]CloudHost{"h1": {ID: "h1", Cloud: "aws", InstanceID: "i-1", Region: "r",
+		Listeners: []CloudListener{{Key: "a", Proto: "tcp", Port: 443, AgentLevel: 2, CloudLevel: 4, CloudEvidence: []string{"cloud: lb x"}}}}}}
+	prov := &fakeProvider{open: map[string]bool{}, incomplete: true}
+	sent := 0
+	l := NewCloudLookup(state, map[string]cloud.Provider{"aws": prov}, func(context.Context, string, string, proto.Message) error {
+		sent++
+		return nil
+	}, "r")
+	if err := l.Check(context.Background(), "h1"); err != nil {
+		t.Fatal(err)
+	}
+	if sent != 0 || !strings.HasPrefix(state.status["h1"], "incomplete:") {
+		t.Fatalf("sent %d status %q", sent, state.status["h1"])
+	}
+	prov.incomplete, prov.open = false, map[string]bool{"b": true}
+	h := state.hosts["h1"]
+	h.Listeners = append(h.Listeners, CloudListener{Key: "b", Proto: "tcp", Port: 80, AgentLevel: 3})
+	state.hosts["h1"] = h
+	_ = l.Check(context.Background(), "h1") // lowers a (complete data), opens b
+	_ = l.Check(context.Background(), "h1") // the store still has the old state: nothing new
+	if sent != 2 {
+		t.Fatalf("sent %d, want 2", sent)
 	}
 }

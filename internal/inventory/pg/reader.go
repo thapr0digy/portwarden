@@ -252,3 +252,58 @@ var (
 	_ inventory.Reader     = (*Store)(nil)
 	_ inventory.CloudState = (*Store)(nil)
 )
+
+// ProbeInput returns a listener's stored state for a probe request.
+func (s *Store) ProbeInput(ctx context.Context, host, key string) (inventory.ProbeInput, bool, error) {
+	var in inventory.ProbeInput
+	var netns int64
+	var lvl int16
+	var evd, ips []byte
+	err := s.pool.QueryRow(ctx, `SELECT l.netns, l.key, l.proto, l.addr, l.port, l.level, l.agent_evidence, h.public_ips
+		FROM listeners l JOIN hosts h ON h.host_id = l.host_id WHERE l.host_id = $1 AND l.key = $2`, clean(host), clean(key)).
+		Scan(&netns, &in.Key, &in.Proto, &in.Addr, &in.Port, &lvl, &evd, &ips)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return in, false, nil
+	}
+	if err != nil {
+		return in, false, err
+	}
+	in.Netns, in.Level = uint32(netns), int(lvl)
+	if err := json.Unmarshal(evd, &in.AgentEvidence); err != nil {
+		return in, false, err
+	}
+	var cands []struct {
+		IP  string `json:"ip"`
+		Dir string `json:"dir"`
+	}
+	if err := json.Unmarshal(ips, &cands); err != nil {
+		return in, false, err
+	}
+	for _, c := range cands {
+		if c.Dir == "in" {
+			in.InboundIPs = append(in.InboundIPs, c.IP)
+		}
+	}
+	return in, true, nil
+}
+
+// StaleProbes lists listeners due for a reprobe.
+func (s *Store) StaleProbes(ctx context.Context, before time.Time, limit int) ([]inventory.HostKey, error) {
+	rows, err := s.pool.Query(ctx, `SELECT host_id, key FROM listeners WHERE level >= 2 AND (probe_at IS NULL OR probe_at < $1)
+		ORDER BY probe_at NULLS FIRST, host_id, key LIMIT $2`, before, clampLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []inventory.HostKey
+	for rows.Next() {
+		var hk inventory.HostKey
+		if err := rows.Scan(&hk.Host, &hk.Key); err != nil {
+			return nil, err
+		}
+		out = append(out, hk)
+	}
+	return out, rows.Err()
+}
+
+var _ inventory.ProbeState = (*Store)(nil)

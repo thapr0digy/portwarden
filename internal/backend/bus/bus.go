@@ -27,6 +27,8 @@ type Config struct {
 	CAFile, CertFile, KeyFile string
 	Role                      natsauth.Role
 	Name                      string // client name, e.g. portwarden-inventory
+	// Connected, when set, is told about every reconnect (true) and disconnect (false).
+	Connected func(bool)
 }
 
 // Connect connects with reconnects forever; an unreachable server at start is retried in
@@ -63,8 +65,16 @@ func Connect(cfg Config) (*nats.Conn, jetstream.JetStream, error) {
 			if err != nil {
 				slog.Warn("nats disconnected", "err", err)
 			}
+			if cfg.Connected != nil {
+				cfg.Connected(false)
+			}
 		}),
-		nats.ReconnectHandler(func(*nats.Conn) { slog.Info("nats reconnected") }),
+		nats.ReconnectHandler(func(*nats.Conn) {
+			slog.Info("nats reconnected")
+			if cfg.Connected != nil {
+				cfg.Connected(true)
+			}
+		}),
 	}
 	if cfg.CredsFile != "" {
 		opts = append(opts, nats.UserCredentials(cfg.CredsFile))
@@ -131,6 +141,9 @@ type DurableOptions struct {
 	// DeliverNew starts a newly created consumer at new messages instead of the stream's
 	// start (used by the alerter: paging for a week of history on first start is noise).
 	DeliverNew bool
+	// MaxDeliver bounds deliveries of one message (default 10; svc.Consume quarantines a
+	// message on its last one).
+	MaxDeliver int
 }
 
 // Durable creates or updates the named durable pull consumer on ASM_EVENTS. Explicit
@@ -139,11 +152,15 @@ func Durable(ctx context.Context, js jetstream.JetStream, name string, o Durable
 	if o.AckWait <= 0 {
 		o.AckWait = 30 * time.Second
 	}
+	if o.MaxDeliver <= 0 {
+		o.MaxDeliver = 10
+	}
 	cfg := jetstream.ConsumerConfig{
 		Durable:       name,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       o.AckWait,
 		MaxAckPending: 1000,
+		MaxDeliver:    o.MaxDeliver,
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 	}
 	if o.DeliverNew {

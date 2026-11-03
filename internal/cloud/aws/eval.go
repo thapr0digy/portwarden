@@ -52,6 +52,8 @@ type V2LB struct {
 	Listeners []V2Listener
 	// TargetGroups by ARN, with their registered targets.
 	TargetGroups map[string]V2TargetGroup
+	// truncated: some listeners, rules or target groups were not read (page cap).
+	truncated bool
 }
 
 // V2Listener is a listener with the actions of its non-default rules.
@@ -76,7 +78,7 @@ func Evaluate(d HostData, ports []cloud.Port) []cloud.Verdict {
 }
 
 func evaluatePort(d HostData, p cloud.Port) cloud.Verdict {
-	v := cloud.Verdict{Key: p.Key}
+	v := cloud.Verdict{Key: p.Key, Complete: true}
 	direct, directWhy := directPath(d, p)
 	lb := lbPaths(d, p)
 	switch {
@@ -97,45 +99,84 @@ func evaluatePort(d HostData, p cloud.Port) cloud.Verdict {
 	return v
 }
 
-// directPath reports whether the instance is reachable directly from 0/0, and why (not).
-func directPath(d HostData, p cloud.Port) (bool, []string) {
-	inst := d.Instance
-	if !hasPublicAddress(inst) {
-		return false, []string{"cloud: instance has no public IPv4 or IPv6 address"}
-	}
-	sgWhy, sgOK := sgAllows(d, instanceGroups(inst), p.Proto, p.Port)
-	if !sgOK {
-		return false, []string{fmt.Sprintf("cloud: no security group allows %s/%d from 0/0", p.Proto, p.Port)}
-	}
-	why := []string{sgWhy}
-	for _, subnet := range instanceSubnets(inst) {
-		acl, ok := d.NACLs[subnet]
-		if !ok {
-			why = append(why, "cloud: nacl for "+subnet+" not read (assumed open)")
-			continue
-		}
-		allowed, ruleWhy := naclAllows(acl, p.Proto, p.Port)
-		why = append(why, ruleWhy)
-		if !allowed {
-			return false, why
-		}
-	}
-	return true, why
+// eniPath is one network interface's way in: its public addresses by family, its groups
+// and its subnet.
+type eniPath struct {
+	id     string
+	v4, v6 bool
+	groups []string
+	subnet string
 }
 
-func hasPublicAddress(inst ec2types.Instance) bool {
-	if deref(inst.PublicIpAddress) != "" || deref(inst.Ipv6Address) != "" {
-		return true
-	}
+// paths lists the instance's interfaces. An instance described without interfaces is one
+// path from its instance-level fields.
+func paths(inst ec2types.Instance) []eniPath {
+	var out []eniPath
+	anyV4 := false
 	for _, n := range inst.NetworkInterfaces {
-		if n.Association != nil && deref(n.Association.PublicIp) != "" {
-			return true
+		p := eniPath{id: deref(n.NetworkInterfaceId), v4: n.Association != nil && deref(n.Association.PublicIp) != "",
+			v6: len(n.Ipv6Addresses) > 0, subnet: deref(n.SubnetId)}
+		for _, g := range n.Groups {
+			p.groups = append(p.groups, deref(g.GroupId))
 		}
-		if len(n.Ipv6Addresses) > 0 {
-			return true
+		if len(p.groups) == 0 {
+			p.groups = instanceGroups(inst)
+		}
+		if p.subnet == "" {
+			p.subnet = deref(inst.SubnetId)
+		}
+		anyV4 = anyV4 || p.v4
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return []eniPath{{id: deref(inst.InstanceId), v4: deref(inst.PublicIpAddress) != "", v6: deref(inst.Ipv6Address) != "",
+			groups: instanceGroups(inst), subnet: deref(inst.SubnetId)}}
+	}
+	if !anyV4 && deref(inst.PublicIpAddress) != "" {
+		out[0].v4 = true // the instance's public IPv4 belongs to its primary interface
+	}
+	return out
+}
+
+// directPath reports whether some interface of the instance lets the port in from 0/0
+// (each interface with its own groups and subnet ACL, each address family on its own),
+// and why (not).
+func directPath(d HostData, p cloud.Port) (bool, []string) {
+	var why []string
+	public := false
+	for _, e := range paths(d.Instance) {
+		for _, fam := range []int{4, 6} {
+			if (fam == 4 && !e.v4) || (fam == 6 && !e.v6) {
+				continue
+			}
+			public = true
+			sgWhy, ok := sgAllows(d, e.groups, p.Proto, p.Port, fam)
+			if !ok {
+				why = append(why, fmt.Sprintf("cloud: %s: no security group allows %s/%d from %s", e.id, p.Proto, p.Port, anywhere(fam)))
+				continue
+			}
+			acl, read := d.NACLs[e.subnet]
+			if !read {
+				return true, []string{sgWhy, "cloud: nacl for " + e.subnet + " not read (assumed open)"}
+			}
+			allowed, ruleWhy := naclAllows(acl, p.Proto, p.Port, fam)
+			if allowed {
+				return true, []string{sgWhy, ruleWhy}
+			}
+			why = append(why, "cloud: "+e.id+": "+strings.TrimPrefix(ruleWhy, "cloud: "))
 		}
 	}
-	return false
+	if !public {
+		return false, []string{"cloud: instance has no public IPv4 or IPv6 address"}
+	}
+	return false, why
+}
+
+func anywhere(fam int) string {
+	if fam == 6 {
+		return "::/0"
+	}
+	return "0.0.0.0/0"
 }
 
 func instanceGroups(inst ec2types.Instance) []string {
@@ -191,7 +232,7 @@ func instancePrivateIPs(inst ec2types.Instance) []string {
 
 // sgAllows reports whether any of groups allows proto/port from 0.0.0.0/0 or ::/0. A
 // group that was not read counts as allowing (over-reporting beats under-reporting).
-func sgAllows(d HostData, groups []string, proto string, port int) (string, bool) {
+func sgAllows(d HostData, groups []string, proto string, port int, fam int) (string, bool) {
 	for _, id := range groups {
 		sg, ok := d.SecurityGroups[id]
 		if !ok {
@@ -202,12 +243,12 @@ func sgAllows(d HostData, groups []string, proto string, port int) (string, bool
 				continue
 			}
 			for _, r := range perm.IpRanges {
-				if isAnywhere(deref(r.CidrIp)) {
+				if fam == 4 && isAnywhere(deref(r.CidrIp)) {
 					return fmt.Sprintf("cloud: %s allows %s/%d from %s", sgName(sg), proto, port, deref(r.CidrIp)), true
 				}
 			}
 			for _, r := range perm.Ipv6Ranges {
-				if isAnywhere(deref(r.CidrIpv6)) {
+				if fam == 6 && isAnywhere(deref(r.CidrIpv6)) {
 					return fmt.Sprintf("cloud: %s allows %s/%d from %s", sgName(sg), proto, port, deref(r.CidrIpv6)), true
 				}
 			}
@@ -260,15 +301,17 @@ func isAnywhere(cidr string) bool {
 
 // naclAllows evaluates inbound entries in rule-number order: the first entry whose CIDR is
 // 0/0 and that matches protocol and port decides.
-func naclAllows(acl ec2types.NetworkAcl, proto string, port int) (bool, string) {
+func naclAllows(acl ec2types.NetworkAcl, proto string, port int, fam int) (bool, string) {
 	entries := slices.Clone(acl.Entries)
 	sort.Slice(entries, func(i, j int) bool { return deref32(entries[i].RuleNumber) < deref32(entries[j].RuleNumber) })
 	for _, e := range entries {
 		if e.Egress != nil && *e.Egress {
 			continue
 		}
+		// IPv4 and IPv6 entries share one rule order but a path is judged by its own
+		// family's entries only.
 		cidr := deref(e.CidrBlock)
-		if cidr == "" {
+		if fam == 6 {
 			cidr = deref(e.Ipv6CidrBlock)
 		}
 		if !isAnywhere(cidr) {
@@ -291,7 +334,7 @@ func naclAllows(acl ec2types.NetworkAcl, proto string, port int) (bool, string) 
 		}
 		return false, fmt.Sprintf("cloud: %s rule %s denies %s/%d from %s", deref(acl.NetworkAclId), rule, proto, port, cidr)
 	}
-	return false, fmt.Sprintf("cloud: %s has no inbound rule for %s/%d from 0/0 (denied)", deref(acl.NetworkAclId), proto, port)
+	return false, fmt.Sprintf("cloud: %s has no inbound rule for %s/%d from %s (denied)", deref(acl.NetworkAclId), proto, port, anywhere(fam))
 }
 
 // lbPaths returns one evidence line per internet-facing load balancer path to the port.
@@ -327,7 +370,7 @@ func lbPaths(d HostData, p cloud.Port) []string {
 						continue
 					}
 					if len(lb.LB.SecurityGroups) > 0 {
-						if _, ok := sgAllows(d, lb.LB.SecurityGroups, lbFrontProto(l.Listener.Protocol), lport); !ok {
+						if _, ok := sgAllows(d, lb.LB.SecurityGroups, lbFrontProto(l.Listener.Protocol), lport, 4); !ok {
 							continue
 						}
 					}
@@ -351,7 +394,7 @@ func lbPaths(d HostData, p cloud.Port) []string {
 				continue
 			}
 			if len(lb.SecurityGroups) > 0 {
-				if _, ok := sgAllows(d, lb.SecurityGroups, "tcp", int(l.LoadBalancerPort)); !ok {
+				if _, ok := sgAllows(d, lb.SecurityGroups, "tcp", int(l.LoadBalancerPort), 4); !ok {
 					continue
 				}
 			}

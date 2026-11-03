@@ -35,6 +35,14 @@ type CloudLookup struct {
 	Now       func() time.Time
 
 	pending chan string
+	// sent remembers the last verdict published per host/listener, so consumer lag (the
+	// store not yet holding it) does not republish it.
+	sent map[string]sentVerdict
+}
+
+type sentVerdict struct {
+	open     bool
+	evidence []string
 }
 
 // NewCloudLookup returns a look-up with GCP and Azure registered as unsupported.
@@ -44,7 +52,7 @@ func NewCloudLookup(state CloudState, providers map[string]cloud.Provider, publi
 		all[k] = v
 	}
 	return &CloudLookup{State: state, Providers: all, Publish: publish, RunID: runID,
-		Refresh: 10 * time.Minute, Settle: 2 * time.Second, pending: make(chan string, 1024)}
+		Refresh: 10 * time.Minute, Settle: 2 * time.Second, pending: make(chan string, 1024), sent: map[string]sentVerdict{}}
 }
 
 // Notify queues a host for a look-up; it never blocks (a full queue drops it: the next
@@ -139,14 +147,23 @@ func (l *CloudLookup) Check(ctx context.Context, host string) error {
 	for _, cl := range h.Listeners {
 		byKey[cl.Key] = cl
 	}
-	open := 0
+	open, incomplete := 0, 0
 	for _, v := range verdicts {
 		cl := byKey[v.Key]
 		if v.Open {
 			open++
 		}
-		wasOpen := cl.CloudLevel >= cloud.LevelCloudOpen
-		if v.Open == wasOpen && (!v.Open || slices.Equal(v.Evidence, cl.CloudEvidence)) {
+		if !v.Complete {
+			incomplete++
+		}
+		wasOpen, wasEvidence := cl.CloudLevel >= cloud.LevelCloudOpen, cl.CloudEvidence
+		if s, ok := l.sent[host+"/"+v.Key]; ok {
+			wasOpen, wasEvidence = s.open, s.evidence
+		}
+		if !v.Open && wasOpen && !v.Complete {
+			continue // partial data may raise a verdict, never lower it
+		}
+		if v.Open == wasOpen && (!v.Open || slices.Equal(v.Evidence, wasEvidence)) {
 			continue
 		}
 		if err := l.publish(ctx, host, cl, v.Open, v.Evidence, now); err != nil {
@@ -158,7 +175,11 @@ func (l *CloudLookup) Check(ctx context.Context, host string) error {
 			return err
 		}
 	}
-	return l.State.SetCloudStatus(ctx, host, fmt.Sprintf("ok: %d listeners checked, %d open", len(verdicts), open), now)
+	status := fmt.Sprintf("ok: %d listeners checked, %d open", len(verdicts), open)
+	if incomplete > 0 {
+		status = fmt.Sprintf("incomplete: %d listeners checked, %d open (data not read in full; nothing was lowered)", len(verdicts), open)
+	}
+	return l.State.SetCloudStatus(ctx, host, status, now)
 }
 
 func (l *CloudLookup) publish(ctx context.Context, host string, cl CloudListener, open bool, evidence []string, now time.Time) error {
@@ -175,7 +196,11 @@ func (l *CloudLookup) publish(ctx context.Context, host string, cl CloudListener
 		Trigger:  "cloud", Origin: "cloud",
 	}
 	slog.Info("cloud verdict changed", "host", host, "listener", cl.Key, "open", open, "evidence", evidence)
-	return l.Publish(ctx, bus.Subject(host, bus.KindExposureChanged), id, ev)
+	if err := l.Publish(ctx, bus.CloudSubject(host), id, ev); err != nil {
+		return err
+	}
+	l.sent[host+"/"+cl.Key] = sentVerdict{open: open, evidence: slices.Clone(evidence)}
+	return nil
 }
 
 func (l *CloudLookup) now() time.Time {

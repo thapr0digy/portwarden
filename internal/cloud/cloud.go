@@ -32,7 +32,13 @@ type Verdict struct {
 	Key      string
 	Open     bool
 	Evidence []string
+	// Complete is false when some data was truncated, unreadable or stale: such a
+	// verdict may raise a listener to cloud_open but never lower it.
+	Complete bool
 }
+
+// IncompleteEvidence prefixes the evidence line naming what was not read in full.
+const IncompleteEvidence = "cloud:incomplete"
 
 // Provider evaluates one host's listeners. Verdicts come in the order of ports.
 type Provider interface {

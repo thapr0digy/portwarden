@@ -112,7 +112,8 @@ var responses = map[string]string{
 // fakeAWS answers the query-protocol calls; elbv2 and Classic ELB share the action name
 // DescribeLoadBalancers and differ by API version.
 type fakeAWS struct {
-	mu    sync.Mutex
+	failELB bool
+	mu      sync.Mutex
 	calls []string
 	nacl  string // the association.subnet-id filter value seen
 }
@@ -131,6 +132,11 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.nacl = r.Form.Get("Filter.1.Name") + "=" + r.Form.Get("Filter.1.Value.1")
 	}
 	f.mu.Unlock()
+	if f.failELB && svc != "ec2" {
+		w.WriteHeader(503)
+		_, _ = w.Write([]byte(`<ErrorResponse><Error><Code>ServiceUnavailable</Code><Message>down</Message></Error><RequestId>x</RequestId></ErrorResponse>`))
+		return
+	}
 	body, ok := responses[key]
 	if !ok {
 		http.Error(w, "unexpected call "+key, 400)
@@ -219,5 +225,35 @@ func TestProviderErrors(t *testing.T) {
 	}
 	if _, err := p.Evaluate(context.Background(), cloud.Host{InstanceID: "i-1"}, nil); err == nil {
 		t.Fatal("missing region accepted")
+	}
+}
+
+// A load-balancer read that fails does not fail the host: its direct-path verdicts come
+// back, marked incomplete (so they may raise but never lower), with the reason.
+func TestLBFailureIsIncompleteNotFatal(t *testing.T) {
+	fake := &fakeAWS{failELB: true}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	cfg := awssdk.Config{Region: "eu-west-1", Credentials: credentials.NewStaticCredentialsProvider("AKIDTEST", "x", ""),
+		Retryer: func() awssdk.Retryer { return awssdk.NopRetryer{} }}
+	p := NewWithConfig(cfg, Options{Endpoint: srv.URL})
+	vs, err := p.Evaluate(context.Background(), cloud.Host{InstanceID: "i-0abc", Region: "eu-west-1"},
+		[]cloud.Port{{Key: "a", Proto: "tcp", Addr: "0.0.0.0", Port: 443, AgentLevel: 3}, {Key: "c", Proto: "tcp", Addr: "0.0.0.0", Port: 8080, AgentLevel: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !vs[0].Open || vs[0].Complete || vs[1].Open || vs[1].Complete ||
+		!strings.Contains(strings.Join(vs[1].Evidence, "\n"), "cloud:incomplete (load balancers unreadable") {
+		t.Fatalf("%+v", vs)
+	}
+}
+
+func TestHostIdentityValidated(t *testing.T) {
+	p := NewWithClients(func(string) Clients { return Clients{} }, Options{Regions: []string{"eu-west-1"}})
+	for _, h := range []cloud.Host{{InstanceID: "i-0abc", Region: "eu-west-2"}, {InstanceID: "i-0abc", Region: "../x"},
+		{InstanceID: "sg-123", Region: "eu-west-1"}} {
+		if _, err := p.Evaluate(context.Background(), h, nil); err == nil {
+			t.Errorf("%+v accepted", h)
+		}
 	}
 }

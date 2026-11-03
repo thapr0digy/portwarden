@@ -2,12 +2,14 @@ package discover
 
 import (
 	"bytes"
+	"io/fs"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thapr0digy/portwarden/internal/model"
 	"github.com/thapr0digy/portwarden/internal/state"
@@ -21,6 +23,9 @@ type fakeProc struct {
 	mntns   uint64
 	bin     string
 	cgroup  string
+	uid     uint32
+	exeUID  uint32
+	exeMode fs.FileMode
 }
 
 type fakeProcs map[uint32]fakeProc
@@ -182,5 +187,42 @@ func TestNginxConfFromCompiledPrefix(t *testing.T) {
 		if got := nginxConf([]string{c.cmdline}, bin(c.configure)); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+func (f fakeProcs) EUID(pid uint32) (uint32, bool) {
+	p, ok := f[pid]
+	return p.uid, ok
+}
+
+func (f fakeProcs) ExeOwner(pid uint32) (uint32, fs.FileMode, bool) {
+	p := f[pid]
+	if p.exeMode == 0 {
+		p.exeMode = 0o755
+	}
+	return p.exeUID, p.exeMode, true
+}
+
+func (f fakeProcs) OldestChildStart(uint32) (time.Time, bool) { return time.Time{}, false }
+
+func TestTrustNeedsRootMasterAndRootOwnedExe(t *testing.T) {
+	procs := fakeProcs{
+		10: {ppid: 1, exe: "/usr/sbin/nginx", mntns: 7},
+		20: {ppid: 1, exe: "/tmp/nginx", mntns: 7, uid: 1000, exeUID: 1000},
+		30: {ppid: 1, exe: "/usr/sbin/nginx", mntns: 7, exeMode: 0o777},
+	}
+	l := func(port uint16, pid uint32, exe string) state.Listener {
+		return state.Listener{Key: key(port), Procs: []model.Process{{PID: pid, Exe: exe}}}
+	}
+	got := Find([]state.Listener{l(80, 10, "/usr/sbin/nginx"), l(81, 20, "/tmp/nginx"), l(82, 30, "/usr/sbin/nginx")}, procs, 7, nil)
+	why := map[uint32]string{}
+	for _, in := range got {
+		why[in.Master().PID] = in.Untrusted
+		if (in.Master().PID == 10) != in.Trusted {
+			t.Errorf("%d trusted=%v", in.Master().PID, in.Trusted)
+		}
+	}
+	if why[20] != "master runs as uid 1000" || why[30] != "executable writable by group or others (-rwxrwxrwx)" {
+		t.Errorf("reasons = %v", why)
 	}
 }

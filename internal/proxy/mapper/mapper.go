@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/thapr0digy/portwarden/internal/model"
@@ -26,9 +27,15 @@ import (
 	"github.com/thapr0digy/portwarden/internal/state"
 )
 
-// ObservedTTL is how long an observed destination is kept without a new connection: a
-// backend left behind by a config change stops showing as seen (or inferred) after it.
+// ObservedTTL is how long an observed destination is kept without a new connection
+// when there is no recheck; with one, it is three recheck intervals. A backend left
+// behind by a config change stops showing as seen (or inferred) after it.
 const ObservedTTL = time.Hour
+
+// reloadSlack absorbs the coarse clocks behind a worker's start time (whole-second boot
+// time, 10 ms ticks): files changed less than this after the oldest worker started are
+// not called pending.
+const reloadSlack = time.Second
 
 // Conn is one counted destination (probes.ProxyConn).
 type Conn struct {
@@ -72,11 +79,25 @@ type tracked struct {
 	pending string // a newer fingerprint waiting to settle
 	stable  int    // polls that have seen pending unchanged since it appeared
 	// observed accumulates the counted destinations; raw is the last kernel count per
-	// destination, so a count that drops (entries evicted or reset) is not lost.
+	// (tgid, destination) key, so a key that drops (evicted, or untracked after a
+	// reload) loses nothing and is not counted twice.
 	observed map[netip.AddrPort]proxy.Observed
-	raw      map[netip.AddrPort]uint64
-	trigger  string
-	at       time.Time
+	raw      map[rawKey]rawCount
+	// pendingReload: the config files are newer than the proxy's oldest worker, so
+	// what was read may not be what runs yet.
+	pendingReload bool
+	trigger       string
+	at            time.Time
+}
+
+type rawKey struct {
+	tgid uint32
+	addr netip.AddrPort
+}
+
+type rawCount struct {
+	count uint64
+	seen  time.Time
 }
 
 // Mapper runs the proxy mapping; create it with New, feed it Listeners, start Run.
@@ -86,7 +107,8 @@ type Mapper struct {
 	proxies   map[string]*tracked
 	addrs     map[uint32][]netip.Addr
 	current   []state.Listener
-	attached  string // the last cgroup and pid sets given to Conns, to skip no-op updates
+	attached  string // the last cgroup and pid sets Conns accepted, to skip no-op updates
+	trackErr  string // why the last tracking update failed ("" when it succeeded)
 }
 
 // New returns a mapper; Poll and Settle default to 2 s.
@@ -140,6 +162,12 @@ func (m *Mapper) Run(ctx context.Context, out func(proxy.Update)) {
 			}
 		case now := <-poll.C:
 			changed := m.checkConfigs(now)
+			if m.track() {
+				changed = true // a failed attach is retried every poll
+			}
+			if m.checkReloads() {
+				changed = true
+			}
 			if m.readConns(now) {
 				changed = true
 			}
@@ -168,7 +196,7 @@ func (m *Mapper) sync(now time.Time) bool {
 		t, ok := m.proxies[inst.ID]
 		switch {
 		case !ok:
-			t = &tracked{observed: make(map[netip.AddrPort]proxy.Observed), raw: make(map[netip.AddrPort]uint64)}
+			t = &tracked{observed: make(map[netip.AddrPort]proxy.Observed), raw: make(map[rawKey]rawCount)}
 			t.inst = inst
 			m.proxies[inst.ID] = t
 			m.read(t, model.ProxyTriggerStarted, now)
@@ -193,7 +221,9 @@ func (m *Mapper) sync(now time.Time) bool {
 	if m.refreshAddrs() {
 		changed = true
 	}
-	m.track()
+	if m.track() {
+		changed = true
+	}
 	return changed
 }
 
@@ -202,14 +232,20 @@ func sameInstance(a, b discover.Instance) bool {
 		slices.EqualFunc(a.Procs, b.Procs, model.Process.SameIdentity) && a.Cgroup == b.Cgroup
 }
 
-// track gives the connect probe the proxies' cgroups and pids.
-func (m *Mapper) track() {
+// track gives the connect probe the trusted proxies' cgroups and pids (an untrusted
+// look-alike gets no hook). The sets count as applied only when Conns accepted them, so
+// a failure is retried at the next poll; it is reported on every proxy meanwhile. It
+// reports whether that report changed.
+func (m *Mapper) track() bool {
 	if m.cfg.Conns == nil {
-		return
+		return false
 	}
 	var cgroups []string
 	var pids []uint32
 	for _, t := range m.proxies {
+		if !t.inst.Trusted {
+			continue
+		}
 		if t.inst.Cgroup != "" && !slices.Contains(cgroups, t.inst.Cgroup) {
 			cgroups = append(cgroups, t.inst.Cgroup)
 		}
@@ -218,16 +254,46 @@ func (m *Mapper) track() {
 	slices.Sort(cgroups)
 	slices.Sort(pids)
 	key := fmt.Sprint(cgroups, pids)
-	if key == m.attached {
-		return
+	if key == m.attached && m.trackErr == "" {
+		return false
 	}
-	m.attached = key
+	prev := m.trackErr
+	m.trackErr = ""
 	if err := m.cfg.Conns.SetPIDs(pids); err != nil {
-		slog.Warn("proxy connection tracking: pids", "error", err.Error())
+		m.trackErr = err.Error()
 	}
-	if err := m.cfg.Conns.SetCgroups(cgroups); err != nil {
-		slog.Warn("proxy connection tracking: cgroups", "error", err.Error())
+	if err := m.cfg.Conns.SetCgroups(cgroups); err != nil && m.trackErr == "" {
+		m.trackErr = err.Error()
 	}
+	if m.trackErr == "" {
+		m.attached = key
+	} else if m.trackErr != prev {
+		slog.Warn("proxy connection tracking", "error", m.trackErr)
+	}
+	return m.trackErr != prev
+}
+
+// checkReloads re-evaluates which proxies run older workers than their config files.
+func (m *Mapper) checkReloads() bool {
+	changed := false
+	for _, t := range m.proxies {
+		if p := m.pendingReload(t); p != t.pendingReload {
+			t.pendingReload = p
+			changed = true
+		}
+	}
+	return changed
+}
+
+// pendingReload: the newest config file read is newer than the proxy's oldest living
+// worker (every reload of nginx, Apache and HAProxy replaces all workers). A proxy
+// without workers cannot tell and is never pending.
+func (m *Mapper) pendingReload(t *tracked) bool {
+	if t.res.Newest.IsZero() || len(t.res.Routes) == 0 {
+		return false
+	}
+	oldest, ok := m.cfg.Procs.OldestChildStart(t.inst.Master().PID)
+	return ok && t.res.Newest.After(oldest.Add(reloadSlack))
 }
 
 // refreshAddrs reads the addresses of every netns that holds a listener and is not
@@ -270,8 +336,14 @@ func (m *Mapper) refreshAddrs() bool {
 func (m *Mapper) read(t *tracked, trigger string, now time.Time) {
 	t.trigger, t.at = trigger, now
 	t.pending = ""
+	defer func() { t.pendingReload = m.pendingReload(t) }()
 	if !discover.ConfigReadable(t.inst.Kind) {
 		t.res = conf.Result{}
+		return
+	}
+	if !t.inst.Trusted {
+		t.res = conf.Result{Notes: []string{"config:untrusted " + t.inst.Untrusted + "; not read, no connection tracking"}}
+		t.fp = ""
 		return
 	}
 	fsys, err := m.cfg.OpenRoot(t.inst.Root)
@@ -290,6 +362,23 @@ func (m *Mapper) read(t *tracked, trigger string, now time.Time) {
 		t.res = haproxy.Load(fsys, t.inst.HAProxyFile)
 	}
 	t.fp = fingerprint(fsys, t.res.Watch)
+	if len(t.res.Untrusted) > 0 {
+		// Files someone other than root could have written do not speak for the proxy:
+		// the routes are dropped (the files stay watched, so a fix is noticed).
+		why := t.res.Untrusted
+		more := ""
+		if len(why) > 3 {
+			why, more = why[:3], fmt.Sprintf(" (and %d more)", len(t.res.Untrusted)-3)
+		}
+		t.res.Routes = nil
+		t.res.Notes = append([]string{"config:untrusted " + strings.Join(why, ", ") + more + "; routes not published"}, t.res.Notes...)
+	}
+	for i, r := range t.res.Routes {
+		t.res.Routes[i] = conf.RedactRoute(r)
+	}
+	for i, n := range t.res.Notes {
+		t.res.Notes[i] = conf.Redact(n)
+	}
 }
 
 // fingerprint identifies the state of every watched path: identity, size and mtime of
@@ -338,7 +427,17 @@ func (m *Mapper) checkConfigs(now time.Time) bool {
 	return changed
 }
 
-// readConns folds the kernel's counts into each proxy's observed destinations.
+// observedTTL is how long a destination is kept without a new connection.
+func (m *Mapper) observedTTL() time.Duration {
+	if m.cfg.Recheck > 0 {
+		return 3 * m.cfg.Recheck
+	}
+	return ObservedTTL
+}
+
+// readConns folds the kernel's counts into each proxy's observed destinations. Counts
+// are cumulative per (tgid, destination) key; each key's growth since the last read is
+// added, and a key that shrank (evicted and recreated) adds its whole count.
 func (m *Mapper) readConns(now time.Time) bool {
 	if m.cfg.Conns == nil || len(m.proxies) == 0 {
 		return false
@@ -353,60 +452,50 @@ func (m *Mapper) readConns(now time.Time) bool {
 			owner[pid] = t
 		}
 	}
-	type sum struct {
-		count uint64
-		last  time.Time
+	changed := false
+	ttl := m.observedTTL()
+	for _, t := range m.proxies {
+		for a, o := range t.observed {
+			if now.Sub(o.Last) > ttl {
+				delete(t.observed, a)
+				changed = true
+			}
+		}
+		for k, r := range t.raw {
+			if now.Sub(r.seen) > ttl {
+				delete(t.raw, k)
+			}
+		}
 	}
-	sums := make(map[*tracked]map[netip.AddrPort]sum)
+	newDest := make(map[*tracked]bool)
 	for _, c := range conns {
 		t := owner[c.Proxy]
 		if t == nil {
 			continue
 		}
-		if sums[t] == nil {
-			sums[t] = make(map[netip.AddrPort]sum)
+		k := rawKey{c.Proxy, c.Addr}
+		prev := t.raw[k]
+		delta := c.Count
+		if c.Count >= prev.count {
+			delta = c.Count - prev.count
 		}
-		s := sums[t][c.Addr]
-		s.count += c.Count
-		if c.Last.After(s.last) {
-			s.last = c.Last
+		t.raw[k] = rawCount{count: c.Count, seen: now}
+		if delta == 0 {
+			continue
 		}
-		sums[t][c.Addr] = s
+		o, had := t.observed[c.Addr]
+		o.Addr, o.Count = c.Addr, o.Count+delta
+		if c.Last.After(o.Last) {
+			o.Last = c.Last
+		}
+		t.observed[c.Addr] = o
+		changed = true
+		if !had {
+			newDest[t] = true
+		}
 	}
-	changed := false
-	for _, t := range m.proxies {
-		for a, o := range t.observed {
-			if now.Sub(o.Last) > ObservedTTL {
-				delete(t.observed, a)
-				changed = true
-			}
-		}
-	}
-	for t, byAddr := range sums {
-		newDest := false
-		for a, s := range byAddr {
-			delta := s.count
-			if prev := t.raw[a]; s.count >= prev {
-				delta = s.count - prev
-			}
-			t.raw[a] = s.count
-			if delta == 0 {
-				continue
-			}
-			o, had := t.observed[a]
-			o.Addr, o.Count = a, o.Count+delta
-			if s.last.After(o.Last) {
-				o.Last = s.last
-			}
-			t.observed[a] = o
-			changed = true
-			if !had {
-				newDest = true
-			}
-		}
-		if newDest {
-			t.trigger, t.at = model.ProxyTriggerTraffic, now
-		}
+	for t := range newDest {
+		t.trigger, t.at = model.ProxyTriggerTraffic, now
 	}
 	return changed
 }
@@ -429,10 +518,18 @@ func (m *Mapper) update() proxy.Update {
 		inst.Listeners = slices.Clone(inst.Listeners)
 		inst.Files = slices.Clone(t.res.Files)
 		inst.Notes = slices.Clone(t.res.Notes)
-		if m.cfg.Conns == nil {
+		switch {
+		case m.cfg.Conns == nil:
 			inst.Notes = append(inst.Notes, "observed connections unavailable")
+		case m.trackErr != "" && t.inst.Trusted:
+			inst.Notes = append(inst.Notes, "observed connections unavailable: "+m.trackErr)
 		}
-		if !discover.ConfigReadable(inst.Kind) {
+		if t.pendingReload {
+			inst.Notes = append(inst.Notes, "pending reload: config files changed after the running workers started; routes are as written")
+		}
+		if !t.inst.Trusted && !discover.ConfigReadable(inst.Kind) {
+			inst.Notes = append(inst.Notes, "config:untrusted "+t.inst.Untrusted+"; no connection tracking")
+		} else if !discover.ConfigReadable(inst.Kind) {
 			inst.Notes = append(inst.Notes, "config not read for "+inst.Kind+": routes are inferred from observed connections")
 		}
 		s := proxy.State{Instance: inst, Routes: t.res.Routes, Trigger: t.trigger, At: t.at}

@@ -2,6 +2,8 @@ package mapper
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"net/netip"
 	"slices"
 	"sync"
@@ -37,11 +39,24 @@ func (procs) Environ(uint32) map[string]string                { return nil }
 func (procs) MountNS(uint32) (uint64, bool)                   { return 7, true }
 func (procs) ExeString(uint32, string, string) (string, bool) { return "", false }
 func (procs) Cgroup(uint32) string                            { return "/system.slice/nginx.service" }
+func (procs) EUID(uint32) (uint32, bool)                      { return 0, true }
+func (procs) ExeOwner(uint32) (uint32, fs.FileMode, bool)     { return 0, 0o755, true }
+func (procs) OldestChildStart(uint32) (time.Time, bool)       { return time.Time{}, false }
 
 // files is a MemFS the test edits while the mapper reads it.
 type files struct {
-	mu sync.Mutex
-	m  conf.MemFS
+	mu    sync.Mutex
+	m     conf.MemFS
+	owner uint32    // the uid every file is owned by
+	mtime time.Time // the mtime every file has (zero: the MemFS default)
+}
+
+func (f *files) info(in rootfs.Info) rootfs.Info {
+	in.Uid = f.owner
+	if !f.mtime.IsZero() {
+		in.ModTime = f.mtime
+	}
+	return in
 }
 
 func (f *files) set(p, data string) {
@@ -60,7 +75,8 @@ func (v fsView) ReadFile(p string) ([]byte, error) {
 func (v fsView) ReadFileInfo(p string) ([]byte, rootfs.Info, error) {
 	v.f.mu.Lock()
 	defer v.f.mu.Unlock()
-	return v.f.m.ReadFileInfo(p)
+	b, in, err := v.f.m.ReadFileInfo(p)
+	return b, v.f.info(in), err
 }
 func (v fsView) ReadDir(p string) ([]string, error) {
 	v.f.mu.Lock()
@@ -70,12 +86,14 @@ func (v fsView) ReadDir(p string) ([]string, error) {
 func (v fsView) Stat(p string) (rootfs.Info, error) {
 	v.f.mu.Lock()
 	defer v.f.mu.Unlock()
-	return v.f.m.Stat(p)
+	in, err := v.f.m.Stat(p)
+	return v.f.info(in), err
 }
 func (v fsView) Close() error { return nil }
 
 type conns struct {
 	mu      sync.Mutex
+	failCg  int // SetCgroups fails this many more times
 	cgroups []string
 	pids    []uint32
 	list    []Conn
@@ -84,6 +102,10 @@ type conns struct {
 func (c *conns) SetCgroups(p []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.failCg > 0 {
+		c.failCg--
+		return errors.New("attach refused")
+	}
 	c.cgroups = slices.Clone(p)
 	return nil
 }

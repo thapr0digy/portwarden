@@ -5,10 +5,13 @@
 package discover
 
 import (
+	"fmt"
+	"io/fs"
 	"path"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/thapr0digy/portwarden/internal/model"
 	"github.com/thapr0digy/portwarden/internal/proxy/apache"
@@ -63,6 +66,14 @@ type Procs interface {
 	ExeString(pid uint32, prefix, stop string) (string, bool)
 	// Cgroup is the cgroup v2 path ("/system.slice/nginx.service").
 	Cgroup(pid uint32) string
+	// EUID is the process's effective uid.
+	EUID(pid uint32) (uint32, bool)
+	// ExeOwner stats the very executable the process runs (/proc/<pid>/exe): its owner
+	// and permission bits.
+	ExeOwner(pid uint32) (uid uint32, mode fs.FileMode, ok bool)
+	// OldestChildStart is when the process's oldest living child started (a reload
+	// replaces every worker); ok is false without children.
+	OldestChildStart(pid uint32) (time.Time, bool)
 }
 
 // Instance is one proxy and how to read its configuration.
@@ -74,6 +85,11 @@ type Instance struct {
 	Root string
 	// Cgroup is the master's cgroup v2 path.
 	Cgroup string
+	// Trusted: the master runs as root and its executable is root-owned and writable by
+	// root only. Only a trusted proxy's config is read and only a trusted proxy gets the
+	// connect hook; Untrusted says why not.
+	Trusted   bool
+	Untrusted string
 	// One of these says how to load the config, by Kind.
 	NginxConf   string
 	Apache      apache.Options
@@ -147,6 +163,7 @@ func Find(listeners []state.Listener, p Procs, selfMountNS uint64, enrich func(m
 			inst.Root = "/proc/" + strconv.FormatUint(uint64(m), 10) + "/root"
 		}
 		inst.Cgroup = p.Cgroup(m)
+		inst.Trusted, inst.Untrusted = trust(m, p)
 		locate(inst, master, p)
 		inst.ID = inst.Kind + "/" + strconv.FormatUint(uint64(inst.NetNS), 10) + "/" + idPath(inst, master)
 		out = append(out, *inst)
@@ -173,6 +190,28 @@ func idPath(inst *Instance, master model.Process) string {
 		id += "@" + master.Container.ID
 	}
 	return id
+}
+
+// trust decides whether a proxy's own files may speak for it: a look-alike started by
+// an unprivileged user (any binary named nginx) must not get its config published.
+func trust(master uint32, p Procs) (bool, string) {
+	uid, ok := p.EUID(master)
+	switch {
+	case !ok:
+		return false, "master uid unreadable"
+	case uid != 0:
+		return false, fmt.Sprintf("master runs as uid %d", uid)
+	}
+	owner, mode, ok := p.ExeOwner(master)
+	switch {
+	case !ok:
+		return false, "executable unreadable"
+	case owner != 0:
+		return false, fmt.Sprintf("executable owned by uid %d", owner)
+	case mode&0o022 != 0:
+		return false, fmt.Sprintf("executable writable by group or others (%v)", mode)
+	}
+	return true, ""
 }
 
 // isApache tells Apache httpd from other programs called httpd (BusyBox's applet, for

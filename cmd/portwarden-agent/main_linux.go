@@ -284,19 +284,15 @@ func run(opts options, log *slog.Logger) error {
 		return fmt.Errorf("publisher: %w", err)
 	}
 	pubRef.Store(pub)
+	// The fingerprint first: the host block set next is the first one stamped with it.
 	pub.SetFirewall(initialView.FirewallDigest())
 	pub.SetHost(hostInfo.Host())
 
 	judges := make(chan agent.Judge, 1)
-	go watcher.Run(ctx, initialView, func(v *exposure.View) {
-		if ifs, err := v.Interfaces(); err == nil {
-			hostInfo.SetInterfaces(ifs)
-		}
-		hostInfo.SetConditions(v.Conditions())
-		// Before the view is judged, so its exposure events carry its fingerprint.
-		pub.SetFirewall(v.FirewallDigest())
-		offerLatest(judges, v)
-	})
+	// The host block and the fingerprint follow the view the agent loop actually judges
+	// with (agentOpts.OnJudge), not the watcher's latest read, so no event of the old
+	// ruleset carries the new fingerprint.
+	go watcher.Run(ctx, initialView, func(v *exposure.View) { offerLatest(judges, v) })
 	if opts.imds == "auto" {
 		if cloud := publicip.Detect(dmiDir); cloud != "" {
 			log.Info("cloud detected; reading instance metadata", "cloud", cloud)
@@ -325,6 +321,7 @@ func run(opts options, log *slog.Logger) error {
 		Settle:     recheckSettle,
 		Judge:      initialView,
 		Judges:     judges,
+		OnJudge:    onJudge(pub, hostInfo),
 		// Removals and first route sets go out at once; later changes at most once per gap.
 		ProxyMinInterval: proxyMinGap,
 	}
@@ -372,6 +369,9 @@ func run(opts options, log *slog.Logger) error {
 
 // offerLatest hands j to the agent loop, replacing a judge it has not taken yet: only
 // the newest view matters.
+// onJudge publishes nothing for a judge that is not a viewInfo; the views must be.
+var _ viewInfo = (*exposure.View)(nil)
+
 func offerLatest(ch chan agent.Judge, j agent.Judge) {
 	for {
 		select {

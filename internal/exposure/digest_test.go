@@ -70,3 +70,40 @@ func TestFirewallDigestEmptyWhenUnreadable(t *testing.T) {
 		t.Fatalf("partly read firewall: digest %q, want empty", d)
 	}
 }
+
+// Golden digests: the published value must be the same in every process and release for
+// the same rules (an agent restart must not look like a rule change). A change to the
+// canonical encoding changes these on purpose, and moves every host's changed_at once.
+func TestFirewallDigestGolden(t *testing.T) {
+	cases := []struct {
+		name, want string
+		in         MergeInput
+		addrs      []string // address-bearing values that must appear in the canonical text
+	}{
+		{"iptables-save with DNAT targets", "e00b53db0c53b8dc4332e6e208f27727de1d166861b82ac3a8e9f343aac03332",
+			MergeInput{IPT4: readFixture(t, "docker-iptables-nft.v4.txt")}, []string{"172.17.0.2", "172.17.0.0/16"}},
+		{"native nft host firewall", "514199ac07b8d9e85d19e9621cfb023646dfee35346bfa55075e851e66e9bd41",
+			MergeInput{NFT: readFixture(t, "../nft/testdata/host-firewall.json")}, []string{"10.0.0.0/8", "fe80::/10"}},
+	}
+	for _, c := range cases {
+		fw, err := Merge(c.in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		canon := fw.Rules.Canonical()
+		if i := strings.Index(canon, "0x"); i >= 0 {
+			t.Errorf("%s: canonical text holds a pointer or hex dump near %q", c.name, canon[max(0, i-40):min(len(canon), i+40)])
+		}
+		if strings.Contains(canon, "expr type=") {
+			t.Errorf("%s: an expression type has no canonical encoding", c.name)
+		}
+		for _, a := range c.addrs {
+			if !strings.Contains(canon, a) {
+				t.Errorf("%s: canonical text lacks %s", c.name, a)
+			}
+		}
+		if got := NewView(TriggerStart, 0, fw, nil, nil, nil).FirewallDigest(); got != c.want {
+			t.Errorf("%s: digest %s, want %s", c.name, got, c.want)
+		}
+	}
+}

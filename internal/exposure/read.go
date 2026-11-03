@@ -285,11 +285,9 @@ func prefixed(tool string, err error) string {
 	return tool + ": " + msg
 }
 
-// fingerprint hashes the parsed rules, so counters and dump timestamps do not count.
+// fingerprint hashes the parsed rules' canonical text, so counters and dump timestamps
+// do not count, and the same rules give the same value in every process.
 func fingerprint(rs *firewall.Ruleset) string {
-	h := sha256.New()
-	for _, c := range rs.Chains {
-		fmt.Fprintf(h, "%#v\n", *c)
-	}
-	return hex.EncodeToString(h.Sum(nil))
+	sum := sha256.Sum256([]byte(rs.Canonical()))
+	return hex.EncodeToString(sum[:])
 }

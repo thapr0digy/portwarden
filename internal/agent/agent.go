@@ -69,6 +69,10 @@ type Options struct {
 	// Judges delivers newer judges (the firewall or the interfaces changed); each one
 	// re-rates every listener. Ignored without Judge.
 	Judges <-chan Judge
+	// OnJudge, when set, is called on the agent loop with each judge from Judges just
+	// before it is used, so what describes the judge (its firewall fingerprint, the host
+	// conditions) is published before the events it causes. It must not block.
+	OnJudge func(Judge)
 	// Proxies delivers the proxy mapper's views; each one is joined to the listener
 	// table and every proxy whose routes changed is published. nil: no proxy mapping.
 	Proxies <-chan proxy.Update
@@ -244,6 +248,9 @@ func (l *loop) run(ctx context.Context, events <-chan model.Observation) error {
 			if !ok {
 				judges = nil
 				continue
+			}
+			if l.opts.OnJudge != nil {
+				l.opts.OnJudge(j)
 			}
 			l.judge = j
 			l.rejudge(nil, j.Trigger())

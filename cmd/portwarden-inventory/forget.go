@@ -18,13 +18,15 @@ import (
 	"github.com/thapr0digy/portwarden/internal/natsauth"
 )
 
-const forgetUsage = `usage: portwarden-inventory forget-host [--config FILE] [--url URL] [--token-file FILE] <host-id>
+const forgetUsage = `usage: portwarden-inventory forget-host [--config FILE] [--url URL] [--token-file FILE] [--force] <host-id>
 
 Forgets a decommissioned host through the running inventory's API (DELETE /v1/hosts/<id>):
 its listeners, proxies and exposure history are removed, the alerter drops its silence,
 tamper and dedupe marks, and it stops paging host_silent. Stop the host's agent first: a
-host that sends again afterwards is a new host. The API address and token come from the
-service's config (listen, token_file); PORTWARDEN_INVENTORY_TOKEN wins over the file.`
+host that is not silent yet is refused unless --force, and a host that sends again
+afterwards is a new host. The API address and the admin token come from the service's
+config (listen, api.admin_token_file; the read token cannot forget);
+PORTWARDEN_INVENTORY_ADMIN_TOKEN wins over the file.`
 
 // forgetHost runs the forget-host subcommand.
 func forgetHost(args []string, stdout io.Writer, getenv func(string) string) error {
@@ -32,7 +34,8 @@ func forgetHost(args []string, stdout io.Writer, getenv func(string) string) err
 	fs.SetOutput(io.Discard)
 	cfgPath := fs.String("config", "/etc/portwarden/inventory.json", "the inventory's config file")
 	base := fs.String("url", "", "the API's base URL (default: from the config's listen)")
-	tokenFile := fs.String("token-file", "", "the API token file (default: the config's token_file)")
+	tokenFile := fs.String("token-file", "", "the admin token file (default: the config's api.admin_token_file)")
+	force := fs.Bool("force", false, "forget a host that is not silent yet")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w\n%s", err, forgetUsage)
 	}
@@ -43,7 +46,7 @@ func forgetHost(args []string, stdout io.Writer, getenv func(string) string) err
 	if err := natsauth.ValidHostID(host); err != nil {
 		return err
 	}
-	token := strings.TrimSpace(getenv("PORTWARDEN_INVENTORY_TOKEN"))
+	token := strings.TrimSpace(getenv(adminTokenEnv))
 	if *base == "" || (token == "" && *tokenFile == "") {
 		var cfg Config
 		if err := loadConfig(*cfgPath, &cfg); err != nil {
@@ -53,12 +56,12 @@ func forgetHost(args []string, stdout io.Writer, getenv func(string) string) err
 			*base = apiBase(cfg.Listen)
 		}
 		if *tokenFile == "" {
-			*tokenFile = cfg.TokenFile
+			*tokenFile = cfg.API.AdminTokenFile
 		}
 	}
 	if token == "" {
 		if *tokenFile == "" {
-			return errors.New("no API token: set PORTWARDEN_INVENTORY_TOKEN, --token-file or the config's token_file")
+			return errors.New("no admin token: set " + adminTokenEnv + ", --token-file or the config's api.admin_token_file")
 		}
 		b, err := os.ReadFile(*tokenFile)
 		if err != nil {
@@ -68,7 +71,11 @@ func forgetHost(args []string, stdout io.Writer, getenv func(string) string) err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, strings.TrimRight(*base, "/")+"/v1/hosts/"+url.PathEscape(host), nil)
+	target := strings.TrimRight(*base, "/") + "/v1/hosts/" + url.PathEscape(host)
+	if *force {
+		target += "?force=1"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, target, nil)
 	if err != nil {
 		return err
 	}

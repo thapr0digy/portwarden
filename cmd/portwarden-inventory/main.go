@@ -48,6 +48,8 @@ type Config struct {
 	AllowInsecureListen bool   `json:"allow_insecure_listen"`
 	// TokenFile holds the API bearer token; PORTWARDEN_INVENTORY_TOKEN wins.
 	TokenFile string `json:"token_file"`
+	// API holds the admin token (M8: forgetting hosts); without one, forgetting is off.
+	API APIConfig `json:"api"`
 	// SilentAfter: a host without a heartbeat this long is silent (default 90s).
 	SilentAfter svc.Duration `json:"silent_after"`
 	Cloud       CloudConfig  `json:"cloud"`
@@ -55,6 +57,13 @@ type Config struct {
 	// this are requested again (default 24h).
 	Reprobe   svc.Duration    `json:"reprobe"`
 	Retention RetentionConfig `json:"retention"`
+}
+
+// APIConfig configures the API's admin side.
+type APIConfig struct {
+	// AdminTokenFile holds the token DELETE /v1/hosts/{id} needs (not the read token);
+	// PORTWARDEN_INVENTORY_ADMIN_TOKEN wins. Unset: forgetting hosts is disabled (403).
+	AdminTokenFile string `json:"admin_token_file"`
 }
 
 // RetentionConfig prunes old rows (M8). History and Quarantine are ages; unset means the
@@ -80,6 +89,16 @@ func (c Config) retention() inventory.Retention {
 }
 
 const defaultListen = "127.0.0.1:8740"
+
+// adminToken returns the admin token ("" when none is configured).
+func adminToken(cfg Config) (string, error) {
+	if os.Getenv(adminTokenEnv) == "" && cfg.API.AdminTokenFile == "" {
+		return "", nil
+	}
+	return svc.Secret(adminTokenEnv, cfg.API.AdminTokenFile)
+}
+
+const adminTokenEnv = "PORTWARDEN_INVENTORY_ADMIN_TOKEN"
 
 // CloudConfig turns on the level 3 look-up.
 type CloudConfig struct {
@@ -159,7 +178,13 @@ func run(path string) error {
 	if err != nil {
 		return err
 	}
-	apiSrv.SetForget(cons.Forget)
+	if admin, err := adminToken(cfg); err != nil {
+		return fmt.Errorf("api admin token: %w", err)
+	} else if admin == "" {
+		slog.Warn("forgetting hosts is disabled: no api.admin_token_file (DELETE /v1/hosts/{id} answers 403)")
+	} else if err := apiSrv.SetForget(admin, cons.Forget); err != nil {
+		return err
+	}
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err

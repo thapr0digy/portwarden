@@ -3,7 +3,7 @@
 //	GET    /healthz                                (no auth) database reachable
 //	GET    /v1/hosts?limit=&cursor=                hosts by id
 //	GET    /v1/hosts/{id}                          one host
-//	DELETE /v1/hosts/{id}                          forget a decommissioned host (M8)
+//	DELETE /v1/hosts/{id}?force=                   forget a decommissioned host (M8; admin token)
 //	GET    /v1/listeners?host=&proto=&port=&addr=&min_level=&unit=&exe=&limit=&cursor=
 //	GET    /v1/exposure-history?host=&key=&limit=&cursor=  one listener's level changes, newest first
 //	GET    /v1/proxy-routes?host=&proxy=           proxies with their route sets
@@ -16,7 +16,10 @@
 // from page to page.
 //
 // Every /v1 request needs "Authorization: Bearer <token>"; the token is compared in
-// constant time (over SHA-256 digests, so its length does not leak either).
+// constant time (over SHA-256 digests, so its length does not leak either). The read
+// token never forgets: DELETE needs the separate admin token (SetForget), and answers 403
+// "forget disabled" when none is configured. A host that is not silent is forgotten only
+// with force=1.
 package api
 
 import (
@@ -42,13 +45,23 @@ const MinTokenLength = 16
 type Server struct {
 	r      inventory.Reader
 	token  [sha256.Size]byte
+	admin  *[sha256.Size]byte
 	forget func(ctx context.Context, host string) (inventory.ForgetResult, error)
 }
 
-// SetForget enables DELETE /v1/hosts/{id} (the consumer's Forget); without it the call
-// answers 503.
-func (s *Server) SetForget(f func(ctx context.Context, host string) (inventory.ForgetResult, error)) {
-	s.forget = f
+// SetForget enables DELETE /v1/hosts/{id} for adminToken (at least 16 characters, not the
+// read token), running f (the consumer's Forget). Without it the call answers 403.
+func (s *Server) SetForget(adminToken string, f func(ctx context.Context, host string) (inventory.ForgetResult, error)) error {
+	adminToken = strings.TrimSpace(adminToken)
+	if len(adminToken) < MinTokenLength {
+		return errors.New("api: the admin token must be at least 16 characters")
+	}
+	sum := sha256.Sum256([]byte(adminToken))
+	if subtle.ConstantTimeCompare(sum[:], s.token[:]) == 1 {
+		return errors.New("api: the admin token must differ from the read token")
+	}
+	s.admin, s.forget = &sum, f
+	return nil
 }
 
 const (
@@ -71,7 +84,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.Handle("GET /v1/hosts", s.auth(s.hosts))
 	mux.Handle("GET /v1/hosts/{id}", s.auth(s.host))
-	mux.Handle("DELETE /v1/hosts/{id}", s.auth(s.forgetHost))
+	mux.HandleFunc("DELETE /v1/hosts/{id}", s.forgetHost)
 	mux.Handle("GET /v1/listeners", s.auth(s.listeners))
 	mux.Handle("GET /v1/exposure-history", s.auth(s.history))
 	mux.Handle("GET /v1/proxy-routes", s.auth(s.proxies))
@@ -140,14 +153,47 @@ func (s *Server) hosts(w http.ResponseWriter, r *http.Request) {
 	reply(w, hs, err)
 }
 
+// bearer returns the request's token digest.
+func bearer(r *http.Request) ([sha256.Size]byte, bool) {
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return sha256.Sum256([]byte(strings.TrimSpace(got))), ok
+}
+
 func (s *Server) forgetHost(w http.ResponseWriter, r *http.Request) {
-	if s.forget == nil {
-		writeError(w, http.StatusServiceUnavailable, "forget is unavailable (no bus)")
+	sum, ok := bearer(r)
+	isRead := ok && subtle.ConstantTimeCompare(sum[:], s.token[:]) == 1
+	isAdmin := ok && s.admin != nil && subtle.ConstantTimeCompare(sum[:], s.admin[:]) == 1
+	switch {
+	case isAdmin:
+	case s.admin == nil && isRead:
+		writeError(w, http.StatusForbidden, "forget disabled (no admin token configured: api.admin_token_file)")
+		return
+	case isRead:
+		writeError(w, http.StatusForbidden, "the read token cannot forget hosts; use the admin token")
+		return
+	default:
+		w.Header().Set("WWW-Authenticate", `Bearer realm="portwarden-inventory"`)
+		writeError(w, http.StatusUnauthorized, "missing or wrong bearer token")
 		return
 	}
+	host := r.PathValue("id")
+	force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
+	slog.Info("api: forget requested", "token", "admin", "host", host, "force", force, "remote", r.RemoteAddr)
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	res, err := s.forget(ctx, r.PathValue("id"))
+	if !force {
+		h, known, err := s.r.Host(ctx, host)
+		if err != nil {
+			slog.Error("api: forget: host lookup failed", "host", host, "err", err)
+			writeError(w, http.StatusInternalServerError, "query failed")
+			return
+		}
+		if known && !h.Silent {
+			writeError(w, http.StatusConflict, "host is not silent: stop its agent and wait for silent_after, or force=1")
+			return
+		}
+	}
+	res, err := s.forget(ctx, host)
 	switch {
 	case errors.Is(err, inventory.ErrBadHost):
 		writeError(w, http.StatusBadRequest, "host id must be one plain subject token (and not reserved)")
@@ -155,6 +201,7 @@ func (s *Server) forgetHost(w http.ResponseWriter, r *http.Request) {
 		slog.Error("api: forget failed", "host", r.PathValue("id"), "err", err)
 		writeError(w, http.StatusServiceUnavailable, "forget failed; nothing or only part was done, run it again")
 	default:
+		slog.Info("api: host forgotten", "token", "admin", "host", host, "force", force, "existed", res.Existed, "stream_seq", res.StreamSeq)
 		writeJSON(w, http.StatusOK, res)
 	}
 }

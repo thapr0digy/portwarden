@@ -20,7 +20,7 @@ func forgetServer(t *testing.T, status int, body string) (*httptest.Server, *[]s
 	t.Helper()
 	var calls []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls = append(calls, r.Method+" "+r.URL.EscapedPath()+" "+r.Header.Get("Authorization"))
+		calls = append(calls, r.Method+" "+r.URL.RequestURI()+" "+r.Header.Get("Authorization"))
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
 	}))
@@ -59,11 +59,11 @@ func TestForgetHostReadsTheConfig(t *testing.T) {
 	srv, calls := forgetServer(t, 200, `{}`)
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	tok := writeFile(t, "token", testToken)
-	cfg := writeFile(t, "inventory.json", `{"listen": "`+addr+`", "token_file": "`+tok+`", "nats": {"url": "nats://x:4222"}}`)
+	cfg := writeFile(t, "inventory.json", `{"listen": "`+addr+`", "token_file": "/nonexistent", "api": {"admin_token_file": "`+tok+`"}, "nats": {"url": "nats://x:4222"}}`)
 	if err := forgetHost([]string{"--config", cfg, "h2"}, &bytes.Buffer{}, func(string) string { return "" }); err != nil {
 		t.Fatal(err)
 	}
-	if len(*calls) != 1 || !strings.HasPrefix((*calls)[0], "DELETE /v1/hosts/h2 ") {
+	if len(*calls) != 1 || (*calls)[0] != "DELETE /v1/hosts/h2 Bearer "+testToken {
 		t.Fatalf("calls %q", *calls)
 	}
 	if got := apiBase("0.0.0.0:8740"); got != "http://127.0.0.1:8740" {
@@ -80,7 +80,7 @@ func TestForgetHostReadsTheConfig(t *testing.T) {
 func TestForgetHostEnvTokenWins(t *testing.T) {
 	srv, calls := forgetServer(t, 200, `{}`)
 	env := func(k string) string {
-		if k == "PORTWARDEN_INVENTORY_TOKEN" {
+		if k == "PORTWARDEN_INVENTORY_ADMIN_TOKEN" {
 			return "env-token-0123456789"
 		}
 		return ""
@@ -90,6 +90,31 @@ func TestForgetHostEnvTokenWins(t *testing.T) {
 	}
 	if !strings.HasSuffix((*calls)[0], "Bearer env-token-0123456789") {
 		t.Fatalf("calls %q", *calls)
+	}
+}
+
+func TestForgetHostForce(t *testing.T) {
+	srv, calls := forgetServer(t, 200, `{}`)
+	tok := writeFile(t, "token", testToken)
+	if err := forgetHost([]string{"--url", srv.URL, "--token-file", tok, "--force", "h4"}, &bytes.Buffer{}, func(string) string { return "" }); err != nil {
+		t.Fatal(err)
+	}
+	if (*calls)[0] != "DELETE /v1/hosts/h4?force=1 Bearer "+testToken {
+		t.Fatalf("calls %q", *calls)
+	}
+}
+
+func TestAdminTokenConfig(t *testing.T) {
+	t.Setenv(adminTokenEnv, "")
+	if tok, err := adminToken(Config{}); err != nil || tok != "" {
+		t.Fatalf("none configured: %q %v", tok, err)
+	}
+	if _, err := adminToken(Config{API: APIConfig{AdminTokenFile: "/nonexistent"}}); err == nil {
+		t.Fatal("an unreadable admin token file was accepted")
+	}
+	f := writeFile(t, "admin", " admin-0123456789abcdef\n")
+	if tok, err := adminToken(Config{API: APIConfig{AdminTokenFile: f}}); err != nil || tok != "admin-0123456789abcdef" {
+		t.Fatalf("file: %q %v", tok, err)
 	}
 }
 

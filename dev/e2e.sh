@@ -35,7 +35,8 @@
 #      second (fake) host still sending heartbeats, stopping the agent makes the host
 #      silent in the inventory and pages host_silent. Before that (M7), an nft rule for a
 #      port nothing listens on changes the inventory's firewall_fingerprint and moves its
-#      firewall_changed_at, with no exposure event and no page.
+#      firewall_changed_at, with no exposure event and no page; an agent restart with
+#      the same rules then leaves both unchanged.
 #  11. hardened unit and tamper (M6): until here the agent ran with --tamper-interval 1s and
 #      must have raised no tamper signal. Then the deploy/ unit itself (as the .deb installs
 #      it, with a runtime drop-in for the e2e NATS) runs the agent as portwarden-agent under
@@ -797,6 +798,17 @@ sleep 3 # an exposure event or page from that view would be out by now
 [ "$(wc -l <"$work/hook.jsonl")" -eq "$pages_before" ] || fail "a firewall-only change paged: $(tail -n 1 "$work/hook.jsonl")"
 read -r fw_after fw_changed_after <<<"$(inv_fw)"
 echo "firewall fingerprint: ${fw_before:0:12} -> ${fw_after:0:12} in the inventory after $fw_ms ms (changed_at $fw_changed_before -> $fw_changed_after), no exposure event, no page"
+# An agent restart with the same rules (a new run) must not look like a rule change.
+run_before=$(api "/v1/hosts/$host_id" | jq -r .run_id)
+hb_seen=$(count_in "$work/watch.log" "HEARTBEAT .* fw=${fw_after:0:12}")
+stop_agent
+start_agent
+new_run() { [ "$(api "/v1/hosts/$host_id" | jq -r .run_id)" != "$run_before" ]; }
+wait_for "the restarted agent's run in the inventory" 20 new_run
+wait_for "a heartbeat of the new run with fw=${fw_after:0:12}" 10 seen "HEARTBEAT .* fw=${fw_after:0:12}" "$((hb_seen + 2))"
+sleep 2 # the inventory has applied those heartbeats by now
+[ "$(inv_fw)" = "$fw_after $fw_changed_after" ] || fail "an agent restart with the same rules moved the fingerprint: '$fw_after $fw_changed_after' -> '$(inv_fw)'"
+echo "firewall fingerprint: unchanged across an agent restart (run $run_before -> $(api "/v1/hosts/$host_id" | jq -r .run_id))"
 
 log "backend: stopping the agent makes the host silent (another host keeps the feed alive)"
 stop_agent

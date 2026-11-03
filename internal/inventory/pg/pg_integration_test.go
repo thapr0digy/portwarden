@@ -341,9 +341,27 @@ func TestFirewallFingerprint(t *testing.T) {
 	if hv := host(); *hv.FirewallFingerprint != b || !hv.FirewallChangedAt.Equal(t0.Add(6*time.Minute)) {
 		t.Fatalf("a stale message rolled it back: %+v", hv)
 	}
-	// Unreadable: present and empty is a value, and a change.
+	// Unreadable ("") is unknown: the last good value stays and changed_at does not move.
 	send("heartbeat", beat(8, fp("")), t0.Add(9*time.Minute))
-	if hv := host(); hv.FirewallFingerprint == nil || *hv.FirewallFingerprint != "" || !hv.FirewallChangedAt.Equal(t0.Add(9*time.Minute)) {
-		t.Fatalf("unreadable: %+v", hv)
+	send("heartbeat", beat(9, fp(b)), t0.Add(10*time.Minute)) // X, "", X: no change
+	if hv := host(); *hv.FirewallFingerprint != b || !hv.FirewallChangedAt.Equal(t0.Add(6*time.Minute)) {
+		t.Fatalf("X, \"\", X: %+v", hv)
+	}
+	// Invalid values are ignored; the message's other effects still apply.
+	send("heartbeat", beat(10, fp("iptables -A INPUT -j ACCEPT")), t0.Add(11*time.Minute))
+	send("heartbeat", beat(11, fp(strings.ToUpper(a))), t0.Add(12*time.Minute))
+	if hv := host(); *hv.FirewallFingerprint != b || hv.LastSeq != 11 {
+		t.Fatalf("invalid fingerprint stored or message dropped: %+v", hv)
+	}
+	// A restart (a new run) with the same rules: no change.
+	send("snapshot", &asmv1.Snapshot{HostId: h1, RunId: "01B", Seq: 1, BootId: "b1", RunNumber: 4, Host: &asmv1.HostInfo{FirewallFingerprint: fp(b)}}, t0.Add(13*time.Minute))
+	if hv := host(); hv.RunID != "01B" || *hv.FirewallFingerprint != b || !hv.FirewallChangedAt.Equal(t0.Add(6*time.Minute)) {
+		t.Fatalf("a restart with the same rules moved changed_at: %+v", hv)
+	}
+	// X, "", Y: one change, at Y.
+	send("heartbeat", &asmv1.Heartbeat{HostId: h1, RunId: "01B", Seq: 2, BootId: "b1", RunNumber: 4, FirewallFingerprint: fp("")}, t0.Add(14*time.Minute))
+	send("heartbeat", &asmv1.Heartbeat{HostId: h1, RunId: "01B", Seq: 3, BootId: "b1", RunNumber: 4, FirewallFingerprint: fp(a)}, t0.Add(15*time.Minute))
+	if hv := host(); *hv.FirewallFingerprint != a || !hv.FirewallChangedAt.Equal(t0.Add(15*time.Minute)) {
+		t.Fatalf("X, \"\", Y: %+v", hv)
 	}
 }

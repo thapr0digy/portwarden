@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,24 +44,51 @@ func TestFirewallFingerprintCarried(t *testing.T) {
 
 func TestFirewallObserve(t *testing.T) {
 	t0 := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
-	t1, t2 := t0.Add(time.Minute), t0.Add(2*time.Minute)
+	at := func(m int) time.Time { return t0.Add(time.Duration(m) * time.Minute) }
+	x, y := strings.Repeat("a", 64), strings.Repeat("b", 64)
 
 	var f Firewall
-	f, write, changed := f.Observe("aa", t0)
-	if !write || changed || f.Fingerprint != "aa" || !f.ChangedAt.Equal(t0) || !f.Known {
+	if f, write, changed := f.Observe("", at(0)); write || changed || f.Known {
+		t.Fatalf("unreadable before any value: %+v write=%v changed=%v (unknown, nothing stored)", f, write, changed)
+	}
+	f, write, changed := f.Observe(x, at(1))
+	if !write || changed || f.Fingerprint != x || !f.ChangedAt.Equal(at(1)) || !f.Known {
 		t.Fatalf("first sight: %+v write=%v changed=%v (first sight sets it, and is not a change)", f, write, changed)
 	}
-	f, write, changed = f.Observe("aa", t1)
-	if write || changed || !f.ChangedAt.Equal(t0) {
+	f, write, changed = f.Observe(x, at(2))
+	if write || changed || !f.ChangedAt.Equal(at(1)) {
 		t.Fatalf("same value: %+v write=%v changed=%v", f, write, changed)
 	}
-	f, write, changed = f.Observe("bb", t2)
-	if !write || !changed || f.Fingerprint != "bb" || !f.ChangedAt.Equal(t2) {
-		t.Fatalf("new value: %+v write=%v changed=%v", f, write, changed)
+	// X -> "" -> X: no change.
+	f, write, changed = f.Observe("", at(3))
+	if write || changed || f.Fingerprint != x || !f.ChangedAt.Equal(at(1)) {
+		t.Fatalf("unreadable keeps the last good value: %+v write=%v changed=%v", f, write, changed)
 	}
-	f, write, changed = f.Observe("", t2.Add(time.Minute))
-	if !write || !changed || f.Fingerprint != "" {
-		t.Fatalf("became unreadable: %+v write=%v changed=%v", f, write, changed)
+	f, write, changed = f.Observe(x, at(4))
+	if write || changed || !f.ChangedAt.Equal(at(1)) {
+		t.Fatalf("X, \"\", X: %+v write=%v changed=%v", f, write, changed)
+	}
+	// X -> "" -> Y: one change, at Y.
+	f, _, _ = f.Observe("", at(5))
+	f, write, changed = f.Observe(y, at(6))
+	if !write || !changed || f.Fingerprint != y || !f.ChangedAt.Equal(at(6)) {
+		t.Fatalf("X, \"\", Y: %+v write=%v changed=%v", f, write, changed)
+	}
+}
+
+func TestValidFirewallFingerprint(t *testing.T) {
+	for fp, want := range map[string]bool{
+		"":                            true,
+		strings.Repeat("0a", 32):      true,
+		strings.Repeat("0A", 32):      false, // upper case
+		strings.Repeat("a", 63):       false,
+		strings.Repeat("a", 65):       false,
+		strings.Repeat("g", 64):       false,
+		"iptables -A INPUT -j ACCEPT": false,
+	} {
+		if got := ValidFirewallFingerprint(fp); got != want {
+			t.Errorf("%q: %v, want %v", fp, got, want)
+		}
 	}
 }
 
@@ -104,5 +132,20 @@ func TestFirewallStaleMessagesDoNotRollBack(t *testing.T) {
 	handle(t, c, "cloud", cloud)
 	if f.fw.Fingerprint != "cc" {
 		t.Fatalf("a backend event set the fingerprint: %+v", f.fw)
+	}
+}
+
+// An agent restart with the same rules (a new run, same digest) is not a change.
+func TestFirewallRestartWithSameRules(t *testing.T) {
+	f := &fwStore{fakeStore: newFake()}
+	c := &Consumer{Store: f}
+	x := strings.Repeat("c", 64)
+	handle(t, c, "heartbeat", hb("01A", 1, "b1", 5, x))
+	at := f.fw.ChangedAt
+	snap := &asmv1.Snapshot{HostId: host, RunId: "01B", Seq: 1, BootId: "b1", RunNumber: 6, Host: &asmv1.HostInfo{FirewallFingerprint: ptr(x)}}
+	handle(t, c, "snapshot", snap)
+	handle(t, c, "heartbeat", hb("01C", 1, "b2", 1, x)) // after a reboot
+	if f.cursors[host].RunID != "01C" || f.fw.Fingerprint != x || !f.fw.ChangedAt.Equal(at) {
+		t.Fatalf("a restart moved changed_at: %+v cursor %+v", f.fw, f.cursors[host])
 	}
 }

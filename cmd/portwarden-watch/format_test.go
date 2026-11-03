@@ -355,6 +355,13 @@ func TestFormatFirewallFingerprint(t *testing.T) {
 	if want := "2026-10-30T14:02:11.418Z 01234567 seq=9 HEARTBEAT drops=0/0 tamper=ok fw=-"; got != want {
 		t.Fatalf("got  %q\nwant %q", got, want)
 	}
+	for _, bad := range []string{"abc", strings.ToUpper(fp), "\x1b[31mred" + fp[11:]} {
+		hb.FirewallFingerprint = &bad
+		got, _ = formatEvent("asm."+hostID+".heartbeat", mustMarshal(t, hb))
+		if want := "2026-10-30T14:02:11.418Z 01234567 seq=9 HEARTBEAT drops=0/0 tamper=ok fw=?"; got != want {
+			t.Fatalf("invalid %q: got %q, want %q", bad, got, want)
+		}
+	}
 	snap := &asmv1.Snapshot{HostId: hostID, RunId: "r1", Seq: 1, TakenAt: at, Host: &asmv1.HostInfo{FirewallFingerprint: &fp}}
 	got, _ = formatEvent("asm."+hostID+".snapshot", mustMarshal(t, snap))
 	if want := "2026-10-30T14:02:11.418Z 01234567 seq=1 SNAPSHOT n=0 tcp=0 udp=0 fw=0123456789ab"; got != want {

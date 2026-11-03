@@ -31,9 +31,10 @@ type HostView struct {
 	SilentSince    *time.Time      `json:"silent_since"`
 	CloudStatus    string          `json:"cloud_status,omitempty"`
 	CloudCheckedAt *time.Time      `json:"cloud_checked_at"`
-	// FirewallFingerprint is the agent's digest of its firewall ruleset (null until an
-	// agent sent one; "" while the host's firewall cannot be read in full).
-	// FirewallChangedAt is when it last changed (first sight sets it).
+	// FirewallFingerprint is the last digest of its firewall ruleset an agent sent (null
+	// until one did; an unreadable firewall keeps the last good one, see Conditions).
+	// FirewallChangedAt is the stream time at which the backend first saw the current
+	// value (first sight sets it), not when the rule changed.
 	FirewallFingerprint *string    `json:"firewall_fingerprint"`
 	FirewallChangedAt   *time.Time `json:"firewall_changed_at"`
 	Listeners           int        `json:"listeners"`

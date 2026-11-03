@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,6 +34,8 @@ const migrationLock = 0x7077696e76
 // Store implements inventory.Store, inventory.Reader and inventory.CloudState.
 type Store struct {
 	pool *pgxpool.Pool
+	// badFirewall holds the hosts already logged for an invalid firewall fingerprint.
+	badFirewall sync.Map
 }
 
 // Open connects and migrates. The DSN is a libpq URL or key=value string; keep the
@@ -239,12 +243,24 @@ func (s *Store) apply(ctx context.Context, e inventory.Event) error {
 			return nil // a backend event: never the host's firewall
 		}
 		if fp, ok := inventory.FirewallFingerprint(e.Msg); ok {
-			if err := setFirewall(ctx, tx, host, fp, at); err != nil {
+			if !inventory.ValidFirewallFingerprint(fp) {
+				s.warnBadFirewall(host, fp)
+			} else if err := setFirewall(ctx, tx, host, fp, at); err != nil {
 				return err
 			}
 		}
 		return setCursor(ctx, tx, host, *e.Cursor)
 	})
+}
+
+// warnBadFirewall logs, once per host and process, an agent message whose firewall
+// fingerprint is neither "" nor 64 lowercase hex. The value is ignored (never stored, and
+// not logged: it is not a digest); the rest of the message is applied.
+func (s *Store) warnBadFirewall(host, fp string) {
+	if _, seen := s.badFirewall.LoadOrStore(host, true); seen {
+		return
+	}
+	slog.Warn("inventory: ignoring an invalid firewall fingerprint (want 64 lowercase hex); logged once per host", "host", host, "length", len(fp))
 }
 
 // setFirewall records the fingerprint an agent message carried (inventory.Firewall.Observe

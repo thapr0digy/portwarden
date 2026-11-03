@@ -1,0 +1,35 @@
+[Unit]
+Description=Portwarden alerter (newly reachable listeners, confirmations, host silence -> webhook)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Secrets are passed as systemd credentials (readable only by this service, under
+# /run/credentials/portwarden-alerter.service/); the config file names those paths.
+LoadCredential=nats.nk:/etc/portwarden/nats/alerter.nk
+LoadCredential=webhook.secret:/etc/portwarden/alerter.webhook-secret
+LoadCredential=dsn:/etc/portwarden/alerter.dsn
+# One instance only: it recreates its heartbeat consumer at start.
+ExecStart=/usr/local/bin/portwarden-alerter --config /etc/portwarden/alerter.json
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

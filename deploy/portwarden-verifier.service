@@ -1,0 +1,34 @@
+[Unit]
+Description=Portwarden outside checker (probes inventory addresses, publishes exposure.confirmed)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Run this on a machine OUTSIDE the servers' networks, with fixed source addresses and a
+# clear reverse DNS name (design §9: the checker looks like a scanner to an IDS).
+# Secrets are passed as systemd credentials (readable only by this service, under
+# /run/credentials/portwarden-verifier.service/); the config file names those paths.
+LoadCredential=nats.nk:/etc/portwarden/nats/verifier.nk
+ExecStart=/usr/local/bin/portwarden-verifier --config /etc/portwarden/verifier.json
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

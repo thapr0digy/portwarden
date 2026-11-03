@@ -631,7 +631,7 @@ func TestMissingStreamIsCreatedWithAgentConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := streamConfig(t, js)
-	if cfg.MaxAge != streamMaxAge || cfg.Duplicates != dedupeWindow || !slices.Equal(cfg.Subjects, []string{"asm.>"}) {
+	if cfg.MaxAge != streamMaxAge || cfg.Duplicates != dedupeWindow || !slices.Equal(cfg.Subjects, []string{"asm.>", "pwb.>"}) {
 		t.Fatalf("created stream config = %+v", cfg)
 	}
 }

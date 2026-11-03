@@ -23,6 +23,17 @@
 #      :18082 updates the routes; the backend that then opens on :18082 carries
 #      behind=nginx:<pid>:/ on its OPENED. In the efficiency step the connect hook must not
 #      run for the 10 000 non-proxy connections, and must run for requests through nginx.
+#  10. backend (M5): NATS runs with nkey users minted by portwarden-natsauth (the agent as
+#      its host user, which cannot publish under another host's prefix); portwarden-inventory
+#      (a throwaway PostgreSQL database), portwarden-alerter (a local HMAC-checking webhook)
+#      and portwarden-verifier (in its own netns, probing the VM over a veth pair) run. A
+#      listener opened behind an nft accept reaches the inventory API within 10 s; the
+#      verifier (driven by the inventory's probe requests) publishes confirmed for it and
+#      unreachable for one behind an nft drop; the webhook gets exactly one page for the
+#      accepted port and none for the dropped one; the host user cannot publish under
+#      another host's prefix nor forge a verifier or cloud verdict for itself; with a
+#      second (fake) host still sending heartbeats, stopping the agent makes the host
+#      silent in the inventory and pages host_silent.
 # Self-contained: it builds its own binaries, runs its own nats-server on a private port
 # and store, runs its agent with its own spool directory, stops the portwarden-agent
 # systemd unit while it runs (it would share the BPF programs' run counters) and puts
@@ -55,10 +66,23 @@ MAX_LATENCY_MS=1000
 LINE_TIMEOUT_S=5
 RESTART_WINDOW_S=3
 RECHECK_S=10
+M5_OPEN_PORT=8092
+M5_FW_PORT=8091
+INV_PORT=18740
+HOOK_PORT=18741
+M5_NFT_TABLE=pw_e2e_m5
+M5_NETNS=pw-e2e-out
+M5_HOST_IP=10.231.0.1
+M5_NS_IP=10.231.0.2
+INV_WINDOW_S=10
+SILENT_AFTER_S=6
 REQUIRED_PROGS=(on_listen on_stop on_udp_bind on_udp_unhash on_connect4 on_connect6) # the probes must be among the agent's programs
 
 work=$(mktemp -d)
 nats_url="nats://127.0.0.1:$NATS_PORT"
+host_id=$(cat /etc/machine-id)
+pg_db=""
+m5_netns=false
 pids=() # background children of this script (not the sudo-run agent)
 agent_pid=""
 nats_pid=""
@@ -72,7 +96,7 @@ log() { echo "e2e: $*"; }
 
 fail() {
 	echo "e2e: FAIL: $*" >&2
-	for f in agent nats watch watch-replay; do
+	for f in agent nats watch watch-replay inventory alerter verifier hook; do
 		[ -s "$work/$f.log" ] && { echo "--- $f.log (tail) ---" >&2; tail -n 20 "$work/$f.log" >&2; }
 	done
 	exit 1
@@ -90,6 +114,12 @@ cleanup() {
 	sudo systemctl stop "$RESTART_UNIT" 2>/dev/null || true
 	sudo systemctl stop "$PROXY_UNIT" 2>/dev/null || true
 	sudo nft delete table inet "$NFT_TABLE" 2>/dev/null || true
+	sudo nft delete table inet "$M5_NFT_TABLE" 2>/dev/null || true
+	sudo pkill -TERM -f "^$work/portwarden-verifier " 2>/dev/null || true
+	$m5_netns && sudo ip netns delete "$M5_NETNS" 2>/dev/null || true
+	if [ -n "$pg_db" ]; then
+		sudo -u postgres psql -q -c "DROP DATABASE IF EXISTS $pg_db WITH (FORCE)" -c "DROP ROLE IF EXISTS $pg_db" >/dev/null 2>&1 || true
+	fi
 	$docker_rule && sudo iptables -D DOCKER-USER -p tcp --dport 80 -j DROP 2>/dev/null || true
 	$docker_started && sudo docker rm -f "$DOCKER_NAME" >/dev/null 2>&1 || true
 	for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
@@ -180,15 +210,36 @@ stop_server() {
 	wait "$server_pid" 2>/dev/null || true
 }
 
+# natscli: the nats CLI as the admin user.
+natscli() { nats --server "$nats_url" --nkey "$work/users/admin.nk" "$@"; }
+
+# nats_setup: mints the admin, this host's and the backend services' nkey users (and a
+# user for another host id) and writes a server config with their permissions. NATS
+# listens on all addresses so the verifier's netns reaches it over the veth pair.
+nats_setup() {
+	local role
+	for role in admin inventory alerter verifier; do
+		"$work/portwarden-natsauth" mint --dir "$work/users" --role "$role" >/dev/null
+	done
+	"$work/portwarden-natsauth" mint --dir "$work/users" --role host --host "$host_id" >/dev/null
+	"$work/portwarden-natsauth" mint --dir "$work/users" --role host --host e2eother >/dev/null # dev/fakehost
+	"$work/portwarden-natsauth" render --dir "$work/users" --out "$work/users.conf" >/dev/null
+	cat >"$work/nats.conf" <<CONF
+listen: 0.0.0.0:$NATS_PORT
+jetstream { store_dir: "$work/js" }
+include "users.conf"
+CONF
+}
+
 start_nats() {
-	nats-server -js -a 127.0.0.1 -p "$NATS_PORT" -sd "$work/js" >>"$work/nats.log" 2>&1 &
+	nats-server -c "$work/nats.conf" >>"$work/nats.log" 2>&1 &
 	nats_pid=$!
 	pids+=("$nats_pid")
 	wait_for "nats-server" 10 bash -c "exec 3<>/dev/tcp/127.0.0.1/$NATS_PORT" 2>/dev/null
 }
 
 start_agent() {
-	sudo "$work/portwarden-agent" --nats-url "$nats_url" --heartbeat 1s --recheck "${RECHECK_S}s" \
+	sudo "$work/portwarden-agent" --nats-url "$nats_url" --nats-nkey "$work/users/host-$host_id.nk" --heartbeat 1s --recheck "${RECHECK_S}s" \
 		--spool-dir "$work/spool" >>"$work/agent.log" 2>&1 &
 	agent_pid=$!
 }
@@ -201,7 +252,7 @@ stop_agent() {
 }
 
 agent_alive() { kill -0 "$agent_pid" 2>/dev/null || fail "portwarden-agent exited early"; }
-stream_ready() { agent_alive; nats --server "$nats_url" stream info ASM_EVENTS >/dev/null 2>&1; }
+stream_ready() { agent_alive; natscli stream info ASM_EVENTS >/dev/null 2>&1; }
 
 # hold_udp <port>: binds a UDP socket to 0.0.0.0:<port> in the background and holds it.
 hold_udp() {
@@ -213,7 +264,7 @@ signal.pause()' "$1" &
 }
 
 for port in "$SERVER_PORT" "$RESTART_PORT" "$NETNS_PORT" "$SPOOL_PORT" "$EXPOSURE_PORT" "$DOCKER_HOST_PORT" \
-	"$PROXY_PORT" "$BACKEND_PORT" "$BACKEND2_PORT"; do
+	"$PROXY_PORT" "$BACKEND_PORT" "$BACKEND2_PORT" "$M5_OPEN_PORT" "$M5_FW_PORT" "$INV_PORT" "$HOOK_PORT"; do
 	ss -Hltn "sport = :$port" | grep -q . && fail "tcp port $port is already in use"
 done
 for port in "$UDP_PORT" "$MARKER_PORT"; do
@@ -228,15 +279,24 @@ mkdir -p "$work/www"
 log "building"
 go build -o "$work/portwarden-agent" ./cmd/portwarden-agent
 go build -o "$work/portwarden-watch" ./cmd/portwarden-watch
+for b in portwarden-natsauth portwarden-inventory portwarden-alerter portwarden-verifier; do
+	go build -o "$work/$b" "./cmd/$b"
+done
+go build -o "$work/fakehost" ./dev/fakehost
+systemctl is-active --quiet postgresql || fail "postgresql is not running (dev/install-postgres.sh)"
+nats_setup
 
 systemctl is-active --quiet portwarden-agent && unit_was_active=true
 $unit_was_active && sudo systemctl stop portwarden-agent
 
 start_nats
+# Host users may not create the stream: the admin does, as an operator would.
+natscli stream add ASM_EVENTS --subjects 'asm.>' --subjects 'pwb.>' --storage file --retention limits --max-age 168h \
+	--dupe-window 2m --replicas 1 --allow-direct --defaults >/dev/null || fail "creating the stream as admin"
 start_agent
 wait_for "stream ASM_EVENTS" 15 stream_ready
 
-"$work/portwarden-watch" --nats-url "$nats_url" --since 0s >"$work/watch.log" 2>&1 &
+"$work/portwarden-watch" --nats-url "$nats_url" --nats-nkey "$work/users/admin.nk" --since 0s >"$work/watch.log" 2>&1 &
 pids+=($!)
 # A heartbeat arriving proves the consumer is live before any listener is opened.
 wait_for "first heartbeat in portwarden-watch" 10 seen HEARTBEAT 1
@@ -522,7 +582,7 @@ agent_stopped_at=$(now_ns)
 stop_agent
 start_agent
 start_nats
-"$work/portwarden-watch" --nats-url "$nats_url" --since 5m >"$work/watch-replay.log" 2>&1 &
+"$work/portwarden-watch" --nats-url "$nats_url" --nats-nkey "$work/users/admin.nk" --since 5m >"$work/watch-replay.log" 2>&1 &
 pids+=($!)
 wait_for "replayed OPENED tcp 0.0.0.0:$SPOOL_PORT" 30 \
 	seen_in "$work/watch-replay.log" "OPENED tcp 0.0.0.0:$SPOOL_PORT " 1
@@ -532,4 +592,155 @@ spool_line=$(grep -m1 -- "OPENED tcp 0.0.0.0:$SPOOL_PORT " "$work/watch-replay.l
 echo "spool: replayed $(cut -d' ' -f1,4- <<<"$spool_line")"
 
 ! grep -q '^GAP ' "$work/watch.log" "$work/watch-replay.log" || fail "portwarden-watch reported a GAP"
+log "backend: inventory, alerter, verifier (netns $M5_NETNS), webhook"
+# A throwaway database and role with a generated password.
+pg_db="pw_e2e_$$"
+pg_pass=$(openssl rand -hex 24)
+# The password goes through stdin, not the command line (ps).
+sudo -u postgres psql -q -v ON_ERROR_STOP=1 -f - >/dev/null <<SQL
+CREATE ROLE $pg_db LOGIN PASSWORD '$pg_pass';
+SQL
+sudo -u postgres psql -q -v ON_ERROR_STOP=1 -c "CREATE DATABASE $pg_db OWNER $pg_db" >/dev/null
+( umask 077
+  echo "postgres://$pg_db:$pg_pass@127.0.0.1:5432/$pg_db?sslmode=disable" >"$work/inventory.dsn"
+  openssl rand -hex 24 >"$work/inventory.token"
+  openssl rand -hex 32 >"$work/webhook.secret" )
+api_token=$(cat "$work/inventory.token")
+
+log "backend: a host's credentials cannot publish under another host's prefix, nor forge verdicts"
+host_nats() { nats --server "$nats_url" --nkey "$work/users/host-$host_id.nk" "$@"; }
+for forged in "asm.e2evictim.heartbeat" "pwb.verifier.$host_id.exposure" "pwb.cloud.$host_id.exposure" "asm.$host_id.exposure.confirmed"; do
+	host_nats pub "$forged" forged >>"$work/natspub.log" 2>&1 || true
+done
+sleep 1
+for forged in "asm.e2evictim.heartbeat" "pwb.verifier.$host_id.exposure" "pwb.cloud.$host_id.exposure" "asm.$host_id.exposure.confirmed"; do
+	! natscli stream get ASM_EVENTS --last-for "$forged" >/dev/null 2>&1 || fail "host $host_id published $forged"
+done
+natscli stream get ASM_EVENTS --last-for "asm.$host_id.heartbeat" >/dev/null 2>&1 || fail "the agent's own heartbeats (as its host user) are not in the stream"
+echo "host credentials: own heartbeats stored; asm.e2evictim.heartbeat, pwb.verifier/pwb.cloud verdicts for itself and asm exposure.confirmed refused"
+
+# The webhook receiver: accepts only correctly signed alerts, one JSON line each.
+cat >"$work/hook.py" <<'PY'
+import hashlib, hmac, http.server, sys
+secret = open(sys.argv[2], "rb").read().strip()
+out = sys.argv[3]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        ts = self.headers.get("X-Portwarden-Timestamp", "")
+        want = "sha256=" + hmac.new(secret, ts.encode() + b"." + body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(want, self.headers.get("X-Portwarden-Signature", "")):
+            print("bad signature", flush=True)
+            self.send_response(401); self.end_headers(); return
+        with open(out, "ab") as f:
+            f.write(body + b"\n")
+        self.send_response(204); self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+python3 "$work/hook.py" "$HOOK_PORT" "$work/webhook.secret" "$work/hook.jsonl" >>"$work/hook.log" 2>&1 &
+pids+=($!)
+touch "$work/hook.jsonl"
+
+# The checker's vantage point: a netns joined to the VM by a veth pair.
+sudo ip netns delete "$M5_NETNS" 2>/dev/null || true
+m5_netns=true
+sudo ip netns add "$M5_NETNS"
+sudo ip link add pw-e2e-h type veth peer name pw-e2e-n
+sudo ip link set pw-e2e-n netns "$M5_NETNS"
+sudo ip addr add "$M5_HOST_IP/24" dev pw-e2e-h
+sudo ip link set pw-e2e-h up
+sudo ip netns exec "$M5_NETNS" ip addr add "$M5_NS_IP/24" dev pw-e2e-n
+sudo ip netns exec "$M5_NETNS" ip link set pw-e2e-n up
+sudo ip netns exec "$M5_NETNS" ip link set lo up
+
+cat >"$work/inventory.json" <<JSON
+{"nats": {"url": "$nats_url", "nkey_file": "$work/users/inventory.nk"},
+ "postgres_dsn_file": "$work/inventory.dsn", "token_file": "$work/inventory.token",
+ "listen": "127.0.0.1:$INV_PORT", "silent_after": "${SILENT_AFTER_S}s"}
+JSON
+cat >"$work/alerter.json" <<JSON
+{"nats": {"url": "$nats_url", "nkey_file": "$work/users/alerter.nk"},
+ "postgres_dsn_file": "$work/inventory.dsn",
+ "rules": {"page_level": "host_firewall_open", "silent_after": "${SILENT_AFTER_S}s", "dedupe_window": "1h"},
+ "webhook": {"url": "http://127.0.0.1:$HOOK_PORT/", "secret_file": "$work/webhook.secret", "timeout": "2s", "allow_insecure": true}}
+JSON
+cat >"$work/verifier.json" <<JSON
+{"nats": {"url": "nats://$M5_HOST_IP:$NATS_PORT", "nkey_file": "$work/users/verifier.nk"},
+ "checker": "portwarden-verifier@e2e", "allow_cidrs": ["$M5_HOST_IP/32"],
+ "host_addresses": {"$host_id": ["$M5_HOST_IP"]},
+ "rate": {"global_per_second": 20, "per_host_per_minute": 600, "concurrency": 8},
+ "timeouts": {"connect": "2s", "banner": "1s"}, "min_gap": "1s"}
+JSON
+"$work/portwarden-inventory" --config "$work/inventory.json" >>"$work/inventory.log" 2>&1 &
+pids+=($!)
+"$work/fakehost" --nats-url "$nats_url" --nats-nkey "$work/users/host-e2eother.nk" --host e2eother >>"$work/fakehost.log" 2>&1 &
+pids+=($!)
+"$work/portwarden-alerter" --config "$work/alerter.json" >>"$work/alerter.log" 2>&1 &
+pids+=($!)
+sudo ip netns exec "$M5_NETNS" "$work/portwarden-verifier" --config "$work/verifier.json" >>"$work/verifier.log" 2>&1 &
+pids+=($!)
+api() { curl -sf --max-time 5 -H "Authorization: Bearer $api_token" "http://127.0.0.1:$INV_PORT$1"; }
+inventory_up() { curl -sf --max-time 2 "http://127.0.0.1:$INV_PORT/healthz" >/dev/null; }
+wait_for "inventory API" 20 inventory_up
+wait_for "alerter consuming" 20 seen_in "$work/alerter.log" '"msg":"alerter running"' 1
+wait_for "verifier consuming" 20 seen_in "$work/verifier.log" '"msg":"verifier running"' 1
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$INV_PORT/v1/hosts")
+[ "$code" = 401 ] || fail "inventory API without a token answered $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong-token-0123456789" "http://127.0.0.1:$INV_PORT/v1/hosts")
+[ "$code" = 401 ] || fail "inventory API with a wrong token answered $code"
+
+reads_before=$(firewall_reads)
+sudo nft -f - <<NFT
+table inet $M5_NFT_TABLE {
+	chain input {
+		type filter hook input priority 10; policy accept;
+		tcp dport $M5_OPEN_PORT accept
+		tcp dport $M5_FW_PORT drop
+	}
+}
+NFT
+wait_for "the agent to read the M5 rules" "$EXPOSURE_WINDOW_S" read_since
+t0=$(now_ns)
+python3 -m http.server "$M5_OPEN_PORT" --bind 0.0.0.0 --directory "$work/www" >/dev/null 2>&1 &
+pids+=($!)
+python3 -m http.server "$M5_FW_PORT" --bind 0.0.0.0 --directory "$work/www" >/dev/null 2>&1 &
+pids+=($!)
+inv_level() { api "/v1/listeners?host=$host_id&proto=tcp&port=$1" | jq -r '.[0].level // empty'; }
+inv_open() { case "$(inv_level "$M5_OPEN_PORT")" in host_firewall_open | confirmed) true ;; *) false ;; esac; }
+wait_for "inventory API shows :$M5_OPEN_PORT open" "$INV_WINDOW_S" inv_open
+echo "inventory: :$M5_OPEN_PORT in the API after $((($(now_ns) - t0) / 1000000)) ms (level $(inv_level "$M5_OPEN_PORT"))"
+
+confirmed_line="PROBE tcp 0\\.0\\.0\\.0:$M5_OPEN_PORT result=confirmed target=$M5_HOST_IP:$M5_OPEN_PORT probe=tcp-connect"
+unreachable_line="PROBE tcp 0\\.0\\.0\\.0:$M5_FW_PORT result=unreachable target=$M5_HOST_IP:$M5_FW_PORT .*no answer"
+wait_for "verifier confirmed :$M5_OPEN_PORT" 20 seen "$confirmed_line" 1
+wait_for "verifier unreachable :$M5_FW_PORT" 20 seen "$unreachable_line" 1
+echo "verifier: $(grep -m1 -E -- "$confirmed_line" "$work/watch.log" | cut -d' ' -f4-)"
+echo "verifier: $(grep -m1 -E -- "$unreachable_line" "$work/watch.log" | cut -d' ' -f4-)"
+inv_confirmed() { [ "$(inv_level "$M5_OPEN_PORT")" = confirmed ]; }
+wait_for "inventory level confirmed for :$M5_OPEN_PORT" 10 inv_confirmed
+[ "$(inv_level "$M5_FW_PORT")" = bound ] || fail "inventory level for :$M5_FW_PORT is $(inv_level "$M5_FW_PORT"), want bound"
+api "/v1/exposure-history?host=$host_id&key=$(api "/v1/listeners?host=$host_id&port=$M5_OPEN_PORT" | jq -r '.[0].key | @uri')" |
+	jq -e 'map(.origin) | index("verifier") and index("agent")' >/dev/null || fail "exposure history lacks agent and verifier entries"
+
+pages() { jq -c "select(.listener.port == $1)" "$work/hook.jsonl" | wc -l; }
+has_page() { [ "$(pages "$M5_OPEN_PORT")" -ge 1 ]; }
+wait_for "a page for :$M5_OPEN_PORT" 15 has_page
+sleep 3 # the confirmation (suppressed by dedupe) has been seen by now; give any second page time
+[ "$(pages "$M5_OPEN_PORT")" -eq 1 ] || fail "expected one page for :$M5_OPEN_PORT, got $(pages "$M5_OPEN_PORT"): $(cat "$work/hook.jsonl")"
+[ "$(pages "$M5_FW_PORT")" -eq 0 ] || fail "the firewalled :$M5_FW_PORT was paged"
+seen_in "$work/alerter.log" '"msg":"alert suppressed".*"rule":"dedupe"' 1 || fail "the confirmation was not suppressed by dedupe"
+echo "alerter: one page for :$M5_OPEN_PORT ($(jq -r "select(.listener.port == $M5_OPEN_PORT) | .kind + \" \" + .summary" "$work/hook.jsonl")), none for :$M5_FW_PORT"
+! grep -q "bad signature" "$work/hook.log" || fail "the webhook saw a bad signature"
+
+log "backend: stopping the agent makes the host silent (another host keeps the feed alive)"
+stop_agent
+t0=$(now_ns)
+inv_silent() { api "/v1/hosts/$host_id" | jq -e '.silent == true' >/dev/null; }
+wait_for "inventory host silent" $((SILENT_AFTER_S + 15)) inv_silent
+silent_page() { [ "$(jq -c "select(.kind == \"host_silent\" and .host == \"$host_id\")" "$work/hook.jsonl" | wc -l)" -ge 1 ]; }
+wait_for "host_silent page" $((SILENT_AFTER_S + 15)) silent_page
+echo "silence: inventory silent and host_silent paged $((($(now_ns) - t0) / 1000000)) ms after the agent stopped"
+! grep -q '^GAP ' "$work/watch.log" || fail "portwarden-watch reported a GAP"
+
 log "ok"

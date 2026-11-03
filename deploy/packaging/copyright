@@ -1,0 +1,11 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: portwarden
+Upstream-Contact: thapr0digy <thapr0digy@users.noreply.github.com>
+Source: https://github.com/thapr0digy/portwarden
+
+Files: *
+Copyright: thapr0digy
+License: Proprietary
+ No license has been granted yet; all rights reserved by the copyright holder.
+ The eBPF programs embedded in portwarden-agent are licensed Dual BSD/GPL, as
+ declared in their license section.

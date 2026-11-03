@@ -1,0 +1,52 @@
+# nFPM config for the agent's .deb (dev/dist.sh sets the PW_* variables).
+name: portwarden-agent
+arch: ${PW_ARCH}
+platform: linux
+version: ${PW_VERSION}
+version_schema: none
+release: "1"
+section: net
+priority: optional
+maintainer: thapr0digy <thapr0digy@users.noreply.github.com>
+vendor: Portwarden
+homepage: https://github.com/thapr0digy/portwarden
+license: Proprietary
+mtime: ${PW_MTIME}
+umask: 0o022
+description: |-
+  Listening-socket inventory agent (eBPF) publishing to NATS JetStream
+  Watches every TCP and UDP listening socket from boot with eBPF (CO-RE, BTF),
+  attributes it to its program, unit and container, judges its exposure
+  (firewall, port mappings, interfaces, proxies) and publishes each change to
+  NATS JetStream within a second. Runs as the portwarden-agent system user with
+  CAP_BPF, CAP_PERFMON, CAP_SYS_PTRACE and CAP_NET_ADMIN under a hardened
+  systemd unit, and reports tamper signals about itself.
+recommends:
+  - nftables
+  - iptables
+contents:
+  - src: ${PW_BIN}/portwarden-agent
+    dst: /usr/bin/portwarden-agent
+    file_info:
+      mode: 0755
+  - src: deploy/portwarden-agent.service
+    dst: /usr/lib/systemd/system/portwarden-agent.service
+    file_info:
+      mode: 0644
+  - src: deploy/packaging/default/portwarden-agent
+    dst: /etc/default/portwarden-agent
+    type: config|noreplace
+    file_info:
+      mode: 0644
+  - src: deploy/packaging/copyright
+    dst: /usr/share/doc/portwarden-agent/copyright
+    file_info:
+      mode: 0644
+  - src: ${PW_WORK}/changelog.Debian.gz
+    dst: /usr/share/doc/portwarden-agent/changelog.Debian.gz
+    file_info:
+      mode: 0644
+scripts:
+  postinstall: deploy/packaging/scripts/agent-postinst
+  preremove: deploy/packaging/scripts/agent-prerm
+  postremove: deploy/packaging/scripts/agent-postrm

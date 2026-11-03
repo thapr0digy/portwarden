@@ -1,0 +1,15 @@
+#!/bin/sh
+# portwarden-backend postinst: the units are installed but not enabled (each needs its
+# config and credentials in /etc/portwarden first, see README "Backend"); units already
+# running are restarted onto the new binaries.
+set -e
+
+if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
+	systemctl daemon-reload >/dev/null || true
+	for unit in portwarden-inventory portwarden-alerter portwarden-verifier; do
+		if systemctl is-active --quiet "$unit.service"; then
+			systemctl restart "$unit.service" >/dev/null || echo "$unit did not restart; see journalctl -u $unit" >&2
+		fi
+	done
+fi
+exit 0

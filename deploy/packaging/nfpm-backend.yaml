@@ -1,0 +1,79 @@
+# nFPM config for the backend services' .deb (dev/dist.sh sets the PW_* variables).
+name: portwarden-backend
+arch: ${PW_ARCH}
+platform: linux
+version: ${PW_VERSION}
+version_schema: none
+release: "1"
+section: net
+priority: optional
+maintainer: thapr0digy <thapr0digy@users.noreply.github.com>
+vendor: Portwarden
+homepage: https://github.com/thapr0digy/portwarden
+license: Proprietary
+mtime: ${PW_MTIME}
+umask: 0o022
+description: |-
+  Portwarden backend: inventory, alerter, outside checker, NATS users
+  portwarden-inventory (events to PostgreSQL, read-only API, cloud look-up),
+  portwarden-alerter (pages on newly reachable listeners, host silence and
+  agent tamper signals), portwarden-verifier (the outside checker),
+  portwarden-natsauth (least-privilege NATS users) and portwarden-watch (a
+  stream viewer). The systemd units are installed but not enabled: each
+  needs its config in /etc/portwarden first (examples in
+  /usr/share/doc/portwarden-backend/examples).
+recommends:
+  - postgresql-client
+suggests:
+  - nats-server
+  - postgresql
+contents:
+  - src: ${PW_BIN}/portwarden-inventory
+    dst: /usr/bin/portwarden-inventory
+    file_info: {mode: 0755}
+  - src: ${PW_BIN}/portwarden-alerter
+    dst: /usr/bin/portwarden-alerter
+    file_info: {mode: 0755}
+  - src: ${PW_BIN}/portwarden-verifier
+    dst: /usr/bin/portwarden-verifier
+    file_info: {mode: 0755}
+  - src: ${PW_BIN}/portwarden-natsauth
+    dst: /usr/bin/portwarden-natsauth
+    file_info: {mode: 0755}
+  - src: ${PW_BIN}/portwarden-watch
+    dst: /usr/bin/portwarden-watch
+    file_info: {mode: 0755}
+  - src: deploy/portwarden-inventory.service
+    dst: /usr/lib/systemd/system/portwarden-inventory.service
+    file_info: {mode: 0644}
+  - src: deploy/portwarden-alerter.service
+    dst: /usr/lib/systemd/system/portwarden-alerter.service
+    file_info: {mode: 0644}
+  - src: deploy/portwarden-verifier.service
+    dst: /usr/lib/systemd/system/portwarden-verifier.service
+    file_info: {mode: 0644}
+  - src: deploy/inventory.example.json
+    dst: /usr/share/doc/portwarden-backend/examples/inventory.example.json
+    file_info: {mode: 0644}
+  - src: deploy/alerter.example.json
+    dst: /usr/share/doc/portwarden-backend/examples/alerter.example.json
+    file_info: {mode: 0644}
+  - src: deploy/verifier.example.json
+    dst: /usr/share/doc/portwarden-backend/examples/verifier.example.json
+    file_info: {mode: 0644}
+  - src: deploy/nats-server-auth.example.conf
+    dst: /usr/share/doc/portwarden-backend/examples/nats-server-auth.example.conf
+    file_info: {mode: 0644}
+  - src: deploy/aws-iam-policy.json
+    dst: /usr/share/doc/portwarden-backend/examples/aws-iam-policy.json
+    file_info: {mode: 0644}
+  - src: deploy/packaging/copyright
+    dst: /usr/share/doc/portwarden-backend/copyright
+    file_info: {mode: 0644}
+  - src: ${PW_WORK}/changelog.Debian.gz
+    dst: /usr/share/doc/portwarden-backend/changelog.Debian.gz
+    file_info: {mode: 0644}
+scripts:
+  postinstall: deploy/packaging/scripts/backend-postinst
+  preremove: deploy/packaging/scripts/backend-prerm
+  postremove: deploy/packaging/scripts/backend-postrm

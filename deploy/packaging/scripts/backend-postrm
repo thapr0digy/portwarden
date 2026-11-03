@@ -1,0 +1,9 @@
+#!/bin/sh
+# portwarden-backend postrm: reload systemd. Configs in /etc/portwarden are the
+# operator's and are never removed.
+set -e
+
+if [ -d /run/systemd/system ]; then
+	systemctl daemon-reload >/dev/null || true
+fi
+exit 0

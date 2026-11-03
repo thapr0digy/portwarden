@@ -1,0 +1,8 @@
+# Settings for portwarden-agent.service (read by its EnvironmentFile=).
+# Extra command-line flags; see `portwarden-agent --help`. For example:
+#   PORTWARDEN_AGENT_ARGS="--nats-url tls://nats.example:4222 --nats-nkey /etc/portwarden/agent/host.nk --tls-ca /etc/portwarden/nats-ca.pem --tamper-files /etc/portwarden/agent/host.nk"
+# Credential files must be readable by the portwarden-agent user, e.g.
+#   install -d -m 0750 -o root -g portwarden-agent /etc/portwarden/agent
+#   install -m 0640 -o root -g portwarden-agent host-<id>.nk /etc/portwarden/agent/host.nk
+# Then: systemctl restart portwarden-agent
+PORTWARDEN_AGENT_ARGS=""

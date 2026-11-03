@@ -1,0 +1,12 @@
+#!/bin/sh
+# portwarden-agent postrm: reload systemd; on purge also drop the spool directory. The
+# system user is kept (Debian practice: files it owned may remain elsewhere).
+set -e
+
+if [ -d /run/systemd/system ]; then
+	systemctl daemon-reload >/dev/null || true
+fi
+if [ "$1" = purge ]; then
+	rm -rf /var/lib/portwarden
+fi
+exit 0

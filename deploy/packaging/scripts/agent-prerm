@@ -1,0 +1,9 @@
+#!/bin/sh
+# portwarden-agent prerm: stop the unit on removal (an upgrade restarts it in postinst).
+set -e
+
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+	systemctl stop portwarden-agent.service >/dev/null || true
+	systemctl disable portwarden-agent.service >/dev/null || true
+fi
+exit 0

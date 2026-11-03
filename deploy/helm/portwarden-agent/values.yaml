@@ -1,0 +1,47 @@
+# Image built from deploy/Dockerfile after `make dist`.
+image:
+  repository: ghcr.io/thapr0digy/portwarden-agent
+  tag: ""          # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+
+nats:
+  url: tls://nats.example:4222
+  # A Secret holding the NATS credential under the key named by credentialKey: an nkey
+  # seed (portwarden-natsauth mint --role host) or a .creds file (credentialType: creds).
+  # Host users are per host id (/etc/machine-id); one Secret serves every node only with
+  # a creds-file user whose permissions cover all of them.
+  existingSecret: portwarden-agent-nats
+  credentialKey: host.nk
+  credentialType: nkey   # nkey | creds
+  # Optional CA for tls:// (a Secret key holding a PEM bundle).
+  caSecret: ""
+  caKey: ca.pem
+
+agent:
+  heartbeat: 30s
+  tamperInterval: 30s
+  proxyMap: auto
+  imds: auto
+  # Extra flags, appended last.
+  extraArgs: []
+
+# The runtime's default seccomp profile is used unless set to Unconfined (needed only on
+# runtimes whose default profile gates bpf()/perf_event_open() on CAP_SYS_ADMIN).
+seccompProfile: RuntimeDefault
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+priorityClassName: system-node-critical
+tolerations:
+  - operator: Exists
+nodeSelector: {}
+affinity: {}
+podAnnotations: {}
+
+# Where the spool survives restarts on each node.
+spoolHostPath: /var/lib/portwarden

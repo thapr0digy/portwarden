@@ -1,0 +1,21 @@
+#!/bin/sh
+# portwarden-agent postinst: the system user, then enable and (re)start the unit, which
+# starts early in boot (sysinit.target). Configure NATS in /etc/default/portwarden-agent;
+# until then the agent spools to /var/lib/portwarden.
+set -e
+
+if [ "$1" = configure ]; then
+	if ! getent passwd portwarden-agent >/dev/null; then
+		useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
+			--user-group portwarden-agent
+	fi
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload >/dev/null || true
+		systemctl enable portwarden-agent.service >/dev/null || true
+		# A restart picks up a new binary: the running agent would otherwise report its
+		# replaced executable as tamper (binary_replaced) until it restarts.
+		systemctl restart portwarden-agent.service >/dev/null ||
+			echo "portwarden-agent: the service did not start; see journalctl -u portwarden-agent" >&2
+	fi
+fi
+exit 0

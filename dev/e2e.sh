@@ -34,6 +34,14 @@
 #      another host's prefix nor forge a verifier or cloud verdict for itself; with a
 #      second (fake) host still sending heartbeats, stopping the agent makes the host
 #      silent in the inventory and pages host_silent.
+#  11. hardened unit and tamper (M6): until here the agent ran with --tamper-interval 1s and
+#      must have raised no tamper signal. Then the deploy/ unit itself (as the .deb installs
+#      it, with a runtime drop-in for the e2e NATS) runs the agent as portwarden-agent under
+#      the full hardening: it publishes a listener, the host recovers, and each induced
+#      tamper raises a TAMPER event and one alerter page: a ptrace (PTRACE_SEIZE), an edit
+#      of the unit file, the executable replaced on disk, and the agent's cgroup connect
+#      links detached from outside (bpftool link detach); the ptrace and the restored unit
+#      file and executable clear again.
 # Self-contained: it builds its own binaries, runs its own nats-server on a private port
 # and store, runs its agent with its own spool directory, stops the portwarden-agent
 # systemd unit while it runs (it would share the BPF programs' run counters) and puts
@@ -68,6 +76,11 @@ RESTART_WINDOW_S=3
 RECHECK_S=10
 M5_OPEN_PORT=8092
 M5_FW_PORT=8091
+UNIT_PORT=8090
+TAMPER_WINDOW_S=10
+UNIT_DROPIN_DIR=/run/systemd/system/portwarden-agent.service.d
+UNIT_CRED_DIR=/run/portwarden-e2e
+UNIT_SPOOL=/var/lib/portwarden/e2e-spool
 INV_PORT=18740
 HOOK_PORT=18741
 M5_NFT_TABLE=pw_e2e_m5
@@ -87,6 +100,7 @@ pids=() # background children of this script (not the sudo-run agent)
 agent_pid=""
 nats_pid=""
 unit_was_active=false
+unit_started=false # step 11 runs the real unit with an e2e drop-in
 old_bpf_stats=""
 ssh_service_restore="" # start|stop: undoes the socket-activation check's change to ssh.service
 docker_started=false
@@ -125,6 +139,13 @@ cleanup() {
 	for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
 	[ -n "$ssh_service_restore" ] && sudo systemctl -q "$ssh_service_restore" ssh.service || true
 	[ -n "$old_bpf_stats" ] && sudo sysctl -q kernel.bpf_stats_enabled="$old_bpf_stats" || true
+	if $unit_started; then
+		sudo systemctl stop portwarden-agent 2>/dev/null || true
+		sudo rm -rf "${UNIT_DROPIN_DIR:?}" "${UNIT_CRED_DIR:?}" "${UNIT_SPOOL:?}"
+		sudo install -m 0755 "$work/portwarden-agent" /usr/bin/portwarden-agent
+		sudo install -m 0644 deploy/portwarden-agent.service /etc/systemd/system/portwarden-agent.service
+		sudo systemctl daemon-reload
+	fi
 	$unit_was_active && sudo systemctl start portwarden-agent || true
 	sudo rm -rf "$work/spool" # written by the root-run agent
 	rm -rf "$work"
@@ -239,7 +260,7 @@ start_nats() {
 }
 
 start_agent() {
-	sudo "$work/portwarden-agent" --nats-url "$nats_url" --nats-nkey "$work/users/host-$host_id.nk" --heartbeat 1s --recheck "${RECHECK_S}s" \
+	sudo "$work/portwarden-agent" --nats-url "$nats_url" --nats-nkey "$work/users/host-$host_id.nk" --heartbeat 1s --recheck "${RECHECK_S}s" --tamper-interval 1s \
 		--spool-dir "$work/spool" >>"$work/agent.log" 2>&1 &
 	agent_pid=$!
 }
@@ -264,7 +285,7 @@ signal.pause()' "$1" &
 }
 
 for port in "$SERVER_PORT" "$RESTART_PORT" "$NETNS_PORT" "$SPOOL_PORT" "$EXPOSURE_PORT" "$DOCKER_HOST_PORT" \
-	"$PROXY_PORT" "$BACKEND_PORT" "$BACKEND2_PORT" "$M5_OPEN_PORT" "$M5_FW_PORT" "$INV_PORT" "$HOOK_PORT"; do
+	"$PROXY_PORT" "$BACKEND_PORT" "$BACKEND2_PORT" "$M5_OPEN_PORT" "$M5_FW_PORT" "$INV_PORT" "$HOOK_PORT" "$UNIT_PORT"; do
 	ss -Hltn "sport = :$port" | grep -q . && fail "tcp port $port is already in use"
 done
 for port in "$UDP_PORT" "$MARKER_PORT"; do
@@ -742,5 +763,91 @@ silent_page() { [ "$(jq -c "select(.kind == \"host_silent\" and .host == \"$host
 wait_for "host_silent page" $((SILENT_AFTER_S + 15)) silent_page
 echo "silence: inventory silent and host_silent paged $((($(now_ns) - t0) / 1000000)) ms after the agent stopped"
 ! grep -q '^GAP ' "$work/watch.log" || fail "portwarden-watch reported a GAP"
+
+log "tamper: no signal from a healthy agent (checks every 1 s during steps 1-10)"
+! seen " TAMPER " 1 || fail "a healthy agent raised tamper signals: $(grep ' TAMPER ' "$work/watch.log" | head -3)"
+seen "HEARTBEAT .* tamper=ok" 1 || fail "heartbeats carry no tamper status"
+tamper_pages() { jq -c "select(.kind == \"tamper\" and .host == \"$host_id\")" "$work/hook.jsonl"; }
+[ -z "$(tamper_pages)" ] || fail "tamper pages for a healthy agent: $(tamper_pages)"
+echo "tamper: $(count_in "$work/watch.log" "HEARTBEAT .* tamper=ok") heartbeats with tamper=ok, no TAMPER event, no tamper page"
+
+log "hardened unit: deploy/portwarden-agent.service runs the agent as portwarden-agent"
+id portwarden-agent >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin portwarden-agent
+unit_started=true
+sudo install -m 0755 "$work/portwarden-agent" /usr/bin/portwarden-agent
+sudo install -m 0644 deploy/portwarden-agent.service /etc/systemd/system/portwarden-agent.service
+sudo install -d -m 0750 -o root -g portwarden-agent "$UNIT_CRED_DIR"
+sudo install -m 0640 -o root -g portwarden-agent "$work/users/host-$host_id.nk" "$UNIT_CRED_DIR/host.nk"
+sudo mkdir -p "$UNIT_DROPIN_DIR"
+# The last --spool-dir wins, so the e2e run leaves the installed agent's spool alone.
+sudo tee "$UNIT_DROPIN_DIR/e2e.conf" >/dev/null <<UNIT
+[Service]
+Environment="PORTWARDEN_AGENT_ARGS=--nats-url $nats_url --nats-nkey $UNIT_CRED_DIR/host.nk --heartbeat 1s --recheck ${RECHECK_S}s --tamper-interval 1s --spool-dir $UNIT_SPOOL"
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl start portwarden-agent
+unit_pid() { systemctl show -p MainPID --value portwarden-agent; }
+ok_heartbeats() { [ "$(count_in "$work/watch.log" "HEARTBEAT .* tamper=ok")" -ge "$1" ]; }
+hb_before=$(count_in "$work/watch.log" "HEARTBEAT .* tamper=ok")
+wait_for "heartbeats from the unit's agent" 15 ok_heartbeats "$((hb_before + 2))"
+[ "$(ps -o user= -p "$(unit_pid)")" = portwarden-agent ] || fail "the unit's agent does not run as portwarden-agent"
+recovered_page() { [ "$(jq -c "select(.kind == \"host_recovered\" and .host == \"$host_id\")" "$work/hook.jsonl" | wc -l)" -ge 1 ]; }
+wait_for "host_recovered page" 15 recovered_page
+python3 -m http.server "$UNIT_PORT" --bind 0.0.0.0 --directory "$work/www" >/dev/null 2>&1 &
+pids+=($!)
+wait_for "OPENED tcp 0.0.0.0:$UNIT_PORT from the unit's agent" "$LINE_TIMEOUT_S" seen "OPENED tcp 0.0.0.0:$UNIT_PORT " 1
+sudo journalctl -u portwarden-agent --since "-2min" -o cat | grep -q '"msg":"tamper: watching unit files"' ||
+	fail "the unit's agent does not watch its unit files"
+upid=$(unit_pid)
+echo "hardened unit: user $(ps -o user= -p "$upid"), CapEff $(awk '/^CapEff:/ {print $2}' "/proc/$upid/status"), Seccomp $(awk '/^Seccomp:/ {print $2}' "/proc/$upid/status"); OPENED :$UNIT_PORT; host_recovered paged"
+
+# tamper_seen <regex>: a TAMPER line matches.
+tamper_seen() { seen "TAMPER .*$1" 1; }
+has_tamper_page() { tamper_pages | jq -e --arg k "$1" 'select(.evidence | map(startswith($k)) | any)' >/dev/null; }
+
+log "tamper: ptrace"
+sudo python3 -c 'import ctypes, sys, time
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.ptrace(0x4206, int(sys.argv[1]), None, None) != 0:  # PTRACE_SEIZE
+    sys.exit("ptrace seize: errno %d" % ctypes.get_errno())
+time.sleep(float(sys.argv[2]))' "$upid" 4 &
+tracer=$!
+wait_for "TAMPER raised=ptraced:self" "$TAMPER_WINDOW_S" tamper_seen "raised=ptraced:self"
+wait "$tracer" || fail "the ptrace helper failed"
+wait_for "TAMPER cleared=ptraced:self" "$TAMPER_WINDOW_S" tamper_seen "cleared=ptraced:self"
+wait_for "a tamper page for ptraced" 15 has_tamper_page "ptraced:self"
+echo "tamper ptrace: $(grep -m1 'TAMPER raised=ptraced' "$work/watch.log" | cut -d' ' -f4-)"
+
+log "tamper: unit file edited"
+unit_file=/etc/systemd/system/portwarden-agent.service
+echo "# e2e tamper" | sudo tee -a "$unit_file" >/dev/null
+wait_for "TAMPER raised=unit_changed" "$TAMPER_WINDOW_S" tamper_seen "raised=unit_changed:$unit_file"
+sudo install -m 0644 deploy/portwarden-agent.service "$unit_file"
+sudo systemctl daemon-reload # the file's mtime moved
+wait_for "TAMPER cleared=unit_changed" "$TAMPER_WINDOW_S" tamper_seen "cleared=unit_changed:$unit_file"
+wait_for "a tamper page for unit_changed" 15 has_tamper_page "unit_changed:$unit_file"
+echo "tamper unit: $(grep -m1 'TAMPER raised=unit_changed' "$work/watch.log" | cut -d' ' -f4-)"
+
+log "tamper: executable replaced on disk"
+sudo cp /usr/bin/portwarden-agent /usr/bin/portwarden-agent.e2e
+echo x | sudo tee -a /usr/bin/portwarden-agent.e2e >/dev/null
+sudo mv /usr/bin/portwarden-agent.e2e /usr/bin/portwarden-agent
+wait_for "TAMPER raised=binary_replaced" "$TAMPER_WINDOW_S" tamper_seen "raised=binary_replaced:/usr/bin/portwarden-agent"
+sudo install -m 0755 "$work/portwarden-agent" /usr/bin/portwarden-agent
+wait_for "TAMPER cleared=binary_replaced" "$TAMPER_WINDOW_S" tamper_seen "cleared=binary_replaced:/usr/bin/portwarden-agent"
+wait_for "a tamper page for binary_replaced" 15 has_tamper_page "binary_replaced:/usr/bin/portwarden-agent"
+echo "tamper executable: $(grep -m1 'TAMPER raised=binary_replaced' "$work/watch.log" | cut -d' ' -f4-)"
+
+log "tamper: the agent's cgroup connect links detached from outside"
+cg_links=$(sudo sh -c "cat /proc/$upid/fdinfo/* 2>/dev/null" | awk '/^link_type:/ {t = $2} /^link_id:/ && t == "cgroup" {print $2}' | sort -un)
+[ -n "$cg_links" ] || fail "the unit's agent holds no cgroup links (is the e2e nginx running?)"
+for id in $cg_links; do sudo bpftool link detach id "$id"; done
+wait_for "TAMPER raised=probe_detached" "$TAMPER_WINDOW_S" tamper_seen "raised=.*probe_detached:on_connect"
+wait_for "a tamper page for probe_detached" 15 has_tamper_page "probe_detached:on_connect"
+echo "tamper detach: links $(echo $cg_links) -> $(grep -m1 'TAMPER raised=.*probe_detached' "$work/watch.log" | cut -d' ' -f4- | cut -c1-200)"
+[ "$(tamper_pages | jq -c 'select(.evidence | map(startswith("ptraced:")) | any)' | wc -l)" -eq 1 ] ||
+	fail "ptraced paged more than once: $(tamper_pages)"
+echo "tamper pages: $(tamper_pages | jq -r '.evidence[]' | cut -d: -f1 | sort | uniq -c | tr '\n' ' ')"
+sudo systemctl stop portwarden-agent
 
 log "ok"

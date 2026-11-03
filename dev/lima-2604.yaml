@@ -1,0 +1,26 @@
+# Kernel matrix leg: Ubuntu 26.04 LTS ("resolute", kernel 7.0). Created by `make matrix`
+# as the Lima instance portwarden-2604 (remove it with `limactl delete -f portwarden-2604`).
+# The dated release directory is pinned by digest; Ubuntu prunes dated directories after
+# some months, so the unpinned release/ image follows as a fallback.
+minimumLimaVersion: 2.0.0
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/resolute/release-20261016/ubuntu-26.04-server-cloudimg-arm64.img"
+    arch: aarch64
+    digest: "sha256:8eb876c2ccc4b6ff89e4a65d511815923b285e04503ba465809bf587f763da24"
+  - location: "https://cloud-images.ubuntu.com/releases/resolute/release-20261016/ubuntu-26.04-server-cloudimg-amd64.img"
+    arch: x86_64
+    digest: "sha256:5645d0318ad21f643ebb1ac4567514620e9893380b07b0201fda163baa5b7eb5"
+  - location: "https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-arm64.img"
+    arch: aarch64
+  - location: "https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img"
+    arch: x86_64
+cpus: 4
+memory: 4GiB
+disk: 30GiB
+mounts:
+  # mountPoint defaults to the host path, so `cd <repo>` works in `limactl shell`.
+  # CI overrides the location with --set (dev/matrix.sh).
+  - location: "{{.Home}}/projects/portwarden"
+    writable: true
+# Provisioning is run by dev/matrix.sh from the checkout under test (dev/provision.sh),
+# not here: the mount is the main checkout, which may hold an older script.

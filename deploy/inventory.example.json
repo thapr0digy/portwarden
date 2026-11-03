@@ -8,8 +8,10 @@
   "listen": "127.0.0.1:8740",
   "token_file": "/run/credentials/portwarden-inventory.service/token",
   "silent_after": "90s",
+  "reprobe": "24h",
   "cloud": {
     "aws": true,
-    "refresh": "10m"
+    "refresh": "10m",
+    "regions": ["eu-west-1", "us-east-1"]
   }
 }

@@ -4,6 +4,7 @@
     "nkey_file": "/run/credentials/portwarden-alerter.service/nats.nk",
     "ca_file": "/etc/portwarden/nats-ca.pem"
   },
+  "postgres_dsn_file": "/run/credentials/portwarden-alerter.service/dsn",
   "rules": {
     "page_level": "host_firewall_open",
     "page_on_confirmed": true,

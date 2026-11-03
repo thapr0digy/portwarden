@@ -9,6 +9,8 @@ Type=simple
 # /run/credentials/portwarden-alerter.service/); the config file names those paths.
 LoadCredential=nats.nk:/etc/portwarden/nats/alerter.nk
 LoadCredential=webhook.secret:/etc/portwarden/alerter.webhook-secret
+LoadCredential=dsn:/etc/portwarden/alerter.dsn
+# One instance only: it recreates its heartbeat consumer at start.
 ExecStart=/usr/local/bin/portwarden-alerter --config /etc/portwarden/alerter.json
 DynamicUser=yes
 NoNewPrivileges=yes

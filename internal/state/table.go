@@ -28,8 +28,11 @@ type Change struct {
 // Listener is a currently open listener and the processes holding its sockets. The
 // table leaves Exposure empty; the agent fills it in.
 type Listener struct {
-	Key      model.ListenerKey
-	Procs    []model.Process
+	Key   model.ListenerKey
+	Procs []model.Process
+	// V6Only is the sockets' IPV6_V6ONLY flag: On when every socket of the key is
+	// v6-only, Off when any is dual-stack, otherwise Unknown.
+	V6Only   model.V6Only
 	Exposure model.Exposure
 	// BehindProxy lists the proxy routes ending at the listener; the agent fills it in.
 	BehindProxy []model.ProxyRef
@@ -68,6 +71,13 @@ type Table struct {
 	// has several (a socket-activated sshd is held by systemd and by sshd).
 	coOwners map[uint64][]model.Process
 	pending  map[model.ListenerKey]pendingClose
+	// flags holds each open or pending listener's IPV6_V6ONLY flag as last reported;
+	// flagMoved is set when a mutation changed an open listener's flag without any
+	// listener-level Change (a dual-stack SO_REUSEPORT socket joining a v6-only key, a
+	// reopen inside the close grace with another flag): its exposure must be judged
+	// again. TakeRejudge reads and clears it.
+	flags     map[model.ListenerKey]model.V6Only
+	flagMoved bool
 }
 
 // New returns an empty table. A listener that loses its last socket closes
@@ -79,7 +89,34 @@ func New(closeGrace time.Duration) *Table {
 		byKey:      make(map[model.ListenerKey]map[uint64]struct{}),
 		coOwners:   make(map[uint64][]model.Process),
 		pending:    make(map[model.ListenerKey]pendingClose),
+		flags:      make(map[model.ListenerKey]model.V6Only),
 	}
+}
+
+// TakeRejudge reports whether an open listener's IPV6_V6ONLY flag changed since the
+// last call without a Change saying so, and clears it. The caller judges exposure
+// again: the flag decides whether a [::] listener takes IPv4.
+func (t *Table) TakeRejudge() bool {
+	moved := t.flagMoved
+	t.flagMoved = false
+	return moved
+}
+
+// noteFlag records an open listener's current flag, raising flagMoved when it differs
+// from the one last recorded (kept through a pending close). A listener that is not
+// open keeps its record while pending and loses it once closed.
+func (t *Table) noteFlag(k model.ListenerKey) {
+	if _, open := t.byKey[k]; !open {
+		if _, pending := t.pending[k]; !pending {
+			delete(t.flags, k)
+		}
+		return
+	}
+	cur := t.v6OnlyOf(k)
+	if prev, ok := t.flags[k]; ok && prev != cur {
+		t.flagMoved = true
+	}
+	t.flags[k] = cur
 }
 
 // Apply records an observation and returns the listener-level changes it causes.
@@ -91,8 +128,16 @@ func New(closeGrace time.Duration) *Table {
 func (t *Table) Apply(o model.Observation) []Change {
 	switch o.Kind {
 	case model.Opened:
+		key := o.Key
+		if stored, live := t.sockets[o.Cookie]; live {
+			key = stored.Key
+		}
+		defer t.noteFlag(key)
 		return t.open(o)
 	case model.Closed:
+		if stored, live := t.sockets[o.Cookie]; live {
+			defer t.noteFlag(stored.Key)
+		}
 		return t.close(o)
 	}
 	return nil
@@ -103,6 +148,10 @@ func (t *Table) open(o model.Observation) []Change {
 		// The socket stays under its stored key even if re-observed under another.
 		before := t.procsOf(stored.Key)
 		// A baseline taken in a race can miss the owner that the kernel event carries.
+		if stored.V6Only == model.V6OnlyUnknown && o.V6Only != model.V6OnlyUnknown {
+			stored.V6Only = o.V6Only
+			t.sockets[o.Cookie] = stored
+		}
 		if stored.Proc.IsZero() {
 			stored.Proc = o.Proc
 			t.sockets[o.Cookie] = stored
@@ -197,6 +246,7 @@ func (t *Table) Expire(now time.Time) []Change {
 			continue
 		}
 		delete(t.pending, key)
+		delete(t.flags, key)
 		out = append(out, Change{Kind: model.Closed, Key: key, Procs: p.procs, At: p.at, Source: p.source})
 	}
 	sortChanges(out)
@@ -287,6 +337,10 @@ func (t *Table) Reconcile(dump []model.Observation, touched map[uint64]struct{},
 	var out []Change
 	for key, was := range wasOpen {
 		_, now := t.byKey[key]
+		if was && !now {
+			delete(t.pending, key) // closed at once below: no grace, no flag kept
+		}
+		t.noteFlag(key)
 		switch {
 		case was && now:
 			out = append(out, t.ownerDelta(key, before[key], at, model.SourceReconcile)...)
@@ -331,6 +385,26 @@ func (t *Table) procsOf(k model.ListenerKey) []model.Process {
 	return procs
 }
 
+// v6OnlyOf combines the IPV6_V6ONLY flags of a key's sockets: one dual-stack socket
+// takes IPv4 for the key, and an unread one leaves it unknown.
+func (t *Table) v6OnlyOf(key model.ListenerKey) model.V6Only {
+	on, unknown := false, false
+	for cookie := range t.byKey[key] {
+		switch t.sockets[cookie].V6Only {
+		case model.V6OnlyOff:
+			return model.V6OnlyOff
+		case model.V6OnlyOn:
+			on = true
+		default:
+			unknown = true
+		}
+	}
+	if on && !unknown {
+		return model.V6OnlyOn
+	}
+	return model.V6OnlyUnknown
+}
+
 // sameProcs reports whether two holder sets have the same owners. Only identity
 // fields count: a change of UID, Comm or Cmdline alone is stored silently and
 // shows in snapshots and later events.
@@ -344,7 +418,7 @@ func sameProcs(a, b []model.Process) bool {
 func (t *Table) Snapshot() []Listener {
 	out := make([]Listener, 0, len(t.byKey))
 	for key := range t.byKey {
-		out = append(out, Listener{Key: key, Procs: t.procsOf(key)})
+		out = append(out, Listener{Key: key, Procs: t.procsOf(key), V6Only: t.v6OnlyOf(key)})
 	}
 	slices.SortFunc(out, func(a, b Listener) int { return strings.Compare(a.Key.String(), b.Key.String()) })
 	return out

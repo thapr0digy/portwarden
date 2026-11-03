@@ -38,6 +38,10 @@ func writeExpr(b *strings.Builder, e Expr) {
 		b.WriteString("vmap key{")
 		writeMatch(b, x.Key)
 		fmt.Fprintf(b, "} unknown=%q elems=%d", x.Unknown, len(x.Elems))
+		// Written only when set, so rulesets without numgen maps keep their fingerprint.
+		if x.Pick {
+			fmt.Fprintf(b, " pick=%t all=%t", x.Pick, x.PickAll)
+		}
 		for _, el := range x.Elems {
 			b.WriteString(" elem{")
 			writeMatch(b, el.Match)
@@ -55,6 +59,10 @@ func writeExpr(b *strings.Builder, e Expr) {
 		fmt.Fprintf(b, "mark clear=%d xor=%d unknown=%t", x.Clear, x.Xor, x.Unknown)
 	case NAT:
 		fmt.Fprintf(b, "nat kind=%d addr=%s port=%d unknown=%q", int(x.Kind), addr(x.Addr), x.Port, x.Unknown)
+		// Range fields only when set, so single-target rulesets keep their fingerprint.
+		if x.AddrHi.IsValid() || x.PortHi != 0 || x.Random {
+			fmt.Fprintf(b, " addr_hi=%s port_hi=%d random=%t", addr(x.AddrHi), x.PortHi, x.Random)
+		}
 	case Verdict:
 		writeVerdict(b, x)
 	default:

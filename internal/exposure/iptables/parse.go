@@ -754,14 +754,19 @@ func (p *ruleParser) hasTargetOption(name string) bool {
 
 func (p *ruleParser) natTarget(name string) (firewall.NAT, error) {
 	opts := p.targetOptions()
+	_, random := opts["--random"]
+	_, fully := opts["--random-fully"]
 	if name == "REDIRECT" {
 		n := firewall.NAT{Kind: firewall.NATRedirect}
 		if v, ok := opts["--to-ports"]; ok {
-			r, err := portRanges(v, "-")
-			if err != nil || len(r) != 1 || r[0].Lo != r[0].Hi {
+			lo, hi, err := natPorts(v)
+			if err != nil {
 				return firewall.NAT{Kind: firewall.NATRedirect, Unknown: "REDIRECT --to-ports " + v}, nil
 			}
-			n.Port = r[0].Lo
+			n.Port = lo
+			if hi != lo {
+				n.PortHi, n.Random = hi, random || fully
+			}
 		}
 		return n, nil
 	}
@@ -769,23 +774,77 @@ func (p *ruleParser) natTarget(name string) (firewall.NAT, error) {
 	if !ok {
 		return firewall.NAT{Kind: firewall.NATDnat, Unknown: "DNAT without --to-destination"}, nil
 	}
-	addr, port, err := natDestination(v)
+	d, err := natDestination(v)
 	if err != nil {
 		return firewall.NAT{Kind: firewall.NATDnat, Unknown: "DNAT --to-destination " + v}, nil
 	}
-	return firewall.NAT{Kind: firewall.NATDnat, Addr: addr, Port: port}, nil
+	n := firewall.NAT{Kind: firewall.NATDnat, Addr: d.lo, Port: d.port}
+	if d.hi != d.lo {
+		n.AddrHi = d.hi
+	}
+	if d.portHi != d.port {
+		n.PortHi, n.Random = d.portHi, random || fully
+	}
+	return n, nil
 }
 
-// natDestination parses "a.b.c.d", "a.b.c.d:port", "[v6]:port" or "v6"; address and
-// port ranges are not followed.
-func natDestination(v string) (netip.Addr, uint16, error) {
-	if ap, err := netip.ParseAddrPort(v); err == nil {
-		return ap.Addr().Unmap(), ap.Port(), nil
+// destination is a DNAT target: an address or address range, and an optional port or
+// port range (port 0: unchanged).
+type destination struct {
+	lo, hi       netip.Addr
+	port, portHi uint16
+}
+
+// natDestination parses iptables' `ipaddr[-ipaddr][:port[-port]]`, IPv6 addresses in
+// brackets when a port follows ("[2001:db8::1]-[2001:db8::5]:80-90"), bare otherwise.
+func natDestination(v string) (destination, error) {
+	var d destination
+	addrs, ports := v, ""
+	switch {
+	case strings.HasPrefix(v, "["):
+		end := strings.LastIndex(v, "]")
+		if end < 0 {
+			return d, fmt.Errorf("unsupported destination %q", v)
+		}
+		addrs, ports = v[:end+1], v[end+1:]
+		if ports != "" {
+			p, ok := strings.CutPrefix(ports, ":")
+			if !ok {
+				return d, fmt.Errorf("unsupported destination %q", v)
+			}
+			ports = p
+		}
+	case strings.Count(v, ":") == 1:
+		addrs, ports, _ = strings.Cut(v, ":")
 	}
-	if a, err := netip.ParseAddr(strings.Trim(v, "[]")); err == nil {
-		return a.Unmap(), 0, nil
+	loS, hiS, isRange := strings.Cut(addrs, "-")
+	lo, err := netip.ParseAddr(strings.Trim(loS, "[]"))
+	if err != nil {
+		return d, fmt.Errorf("unsupported destination %q", v)
 	}
-	return netip.Addr{}, 0, fmt.Errorf("unsupported destination %q", v)
+	d.lo, d.hi = lo.Unmap(), lo.Unmap()
+	if isRange {
+		hi, err := netip.ParseAddr(strings.Trim(hiS, "[]"))
+		if err != nil || hi.Unmap().BitLen() != d.lo.BitLen() || hi.Unmap().Compare(d.lo) < 0 {
+			return d, fmt.Errorf("unsupported destination %q", v)
+		}
+		d.hi = hi.Unmap()
+	}
+	if ports != "" {
+		if d.port, d.portHi, err = natPorts(ports); err != nil {
+			return d, err
+		}
+	}
+	return d, nil
+}
+
+// natPorts parses "port" or "lo-hi" (1..65535).
+func natPorts(v string) (uint16, uint16, error) {
+	r, err := portRanges(v, "-")
+	if err != nil || len(r) != 1 || r[0].Lo == 0 || r[0].Hi < r[0].Lo {
+		return 0, 0, fmt.Errorf("unsupported ports %q", v)
+	}
+	return r[0].Lo, r[0].Hi, nil
 }
 
 func (p *ruleParser) markTarget() (firewall.Mark, error) {

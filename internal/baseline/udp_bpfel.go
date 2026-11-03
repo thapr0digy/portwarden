@@ -19,7 +19,8 @@ type udpUdpSocket struct {
 	Family uint16
 	Port   uint16
 	Addr   [16]uint8
-	_      [4]byte
+	V6only uint8
+	_      [3]byte
 }
 
 // Names of all BPF objects in the ELF.

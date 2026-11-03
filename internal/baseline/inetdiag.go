@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net/netip"
 	"syscall"
+
+	"github.com/thapr0digy/portwarden/internal/model"
 )
 
 // Netlink and inet_diag values, checked against the 6.8 headers (linux/netlink.h,
@@ -43,6 +45,13 @@ const (
 	msgSrcOffset    = 8  // __be32 idiag_src[4]
 	msgCookieOffset = 44 // __u32 idiag_cookie[2]
 	msgInodeOffset  = 68 // __u32 idiag_inode
+
+	// Attributes after struct inet_diag_msg: struct rtattr (len, type: u16 each), the
+	// payload, padded to 4. The kernel adds INET_DIAG_SKV6ONLY (a u8) to every AF_INET6
+	// reply (inet_diag_msg_attrs_fill), unrequested.
+	rtaHdrLen        = 4
+	rtaAlignTo       = 4
+	inetDiagSKV6Only = 11 // INET_DIAG_SKV6ONLY in linux/inet_diag.h
 )
 
 // errDumpInterrupted means the kernel flagged the dump NLM_F_DUMP_INTR: the socket
@@ -56,6 +65,9 @@ type diagSocket struct {
 	Addr   netip.Addr
 	Port   uint16
 	Inode  uint32
+	// V6Only is the IPV6_V6ONLY flag of an AF_INET6 socket (Unknown for AF_INET, or
+	// when the reply lacks the attribute).
+	V6Only model.V6Only
 }
 
 // buildDumpRequest returns a SOCK_DIAG_BY_FAMILY dump request for TCP sockets of the
@@ -160,8 +172,30 @@ func decodeDiagMsg(m []byte) (diagSocket, error) {
 		s.Addr = netip.AddrFrom4([4]byte(m[msgSrcOffset:]))
 	case afInet6:
 		s.Addr = netip.AddrFrom16([16]byte(m[msgSrcOffset:]))
+		s.V6Only = skV6Only(m[sizeofInetDiagMsg:])
 	default:
 		return diagSocket{}, fmt.Errorf("inet_diag_msg with unknown family %d", s.Family)
 	}
 	return s, nil
+}
+
+// skV6Only finds INET_DIAG_SKV6ONLY among a reply's attributes; Unknown when it is
+// missing or malformed (the listener is then judged for IPv4 too).
+func skV6Only(attrs []byte) model.V6Only {
+	for len(attrs) >= rtaHdrLen {
+		n := int(binary.NativeEndian.Uint16(attrs[0:]))
+		typ := binary.NativeEndian.Uint16(attrs[2:])
+		if n < rtaHdrLen || n > len(attrs) {
+			return model.V6OnlyUnknown
+		}
+		if typ == inetDiagSKV6Only && n >= rtaHdrLen+1 {
+			if attrs[rtaHdrLen] != 0 {
+				return model.V6OnlyOn
+			}
+			return model.V6OnlyOff
+		}
+		next := (n + rtaAlignTo - 1) &^ (rtaAlignTo - 1)
+		attrs = attrs[min(next, len(attrs)):]
+	}
+	return model.V6OnlyUnknown
 }

@@ -39,6 +39,7 @@ struct owner {
 	__u32 netns;
 	__u16 family;
 	__u8 proto; // IPPROTO_TCP (an MPTCP listener's subflow too) or IPPROTO_UDP
+	__u8 v6only; // see v6only_of; in what was padding, so the layout is unchanged
 	__u16 port; // host byte order
 	__u8 addr[16];
 	char comm[16];
@@ -47,7 +48,19 @@ struct owner {
 // Puts struct owner in the object's BTF, so bpf2go can generate it for the layout test.
 const struct owner *unused_owner __attribute__((unused));
 
-// Copies the socket's netns, family, bound port and bound address into rec.
+// IPV6_V6ONLY as the model encodes it (model.V6Only): 0 not read (an IPv4 socket),
+// 1 dual-stack, 2 v6-only. Fixed once the socket is bound.
+static __always_inline __u8 v6only_of(struct sock *sk)
+{
+	if (sk->__sk_common.skc_family != AF_INET6)
+		return 0;
+	// A kernel without the field (CO-RE relocation would fail): not read.
+	if (!bpf_core_field_exists(sk->__sk_common.skc_ipv6only))
+		return 0;
+	return BPF_CORE_READ_BITFIELD(&sk->__sk_common, skc_ipv6only) ? 2 : 1;
+}
+
+// Copies the socket's netns, family, bound port, bound address and IPV6_V6ONLY into rec.
 static __always_inline void fill_key(struct owner *rec, struct sock *sk)
 {
 	int i;
@@ -55,6 +68,7 @@ static __always_inline void fill_key(struct owner *rec, struct sock *sk)
 	rec->netns = sk->__sk_common.skc_net.net->ns.inum;
 	rec->family = sk->__sk_common.skc_family;
 	rec->port = sk->__sk_common.skc_num;
+	rec->v6only = v6only_of(sk);
 	if (rec->family == AF_INET6) {
 		for (i = 0; i < 16; i++)
 			rec->addr[i] = sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr8[i];

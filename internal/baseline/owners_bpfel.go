@@ -22,7 +22,7 @@ type ownersOwner struct {
 	Netns    uint32
 	Family   uint16
 	Proto    uint8
-	_        [1]byte
+	V6only   uint8
 	Port     uint16
 	Addr     [16]uint8
 	Comm     [16]int8

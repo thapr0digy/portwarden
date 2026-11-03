@@ -7,6 +7,8 @@ import (
 	"os"
 	"syscall"
 	"testing"
+
+	"github.com/thapr0digy/portwarden/internal/model"
 )
 
 func TestBuildDumpRequestAsksListenOnly(t *testing.T) {
@@ -58,7 +60,9 @@ func TestParseDumpFixture(t *testing.T) {
 	}
 	want := []diagSocket{
 		{Cookie: 0x22f1, Family: afInet, Addr: netip.MustParseAddr("127.0.0.1"), Port: 8080, Inode: 48251},
-		{Cookie: 0x22f2, Family: afInet6, Addr: netip.MustParseAddr("::1"), Port: 9090, Inode: 48252},
+		// Binding a specific (not v4-mapped) IPv6 address sets IPV6_V6ONLY in the
+		// kernel (__inet6_bind); the reply carries it as INET_DIAG_SKV6ONLY.
+		{Cookie: 0x22f2, Family: afInet6, Addr: netip.MustParseAddr("::1"), Port: 9090, Inode: 48252, V6Only: model.V6OnlyOn},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d sockets, want %d: %+v", len(got), len(want), got)
@@ -109,5 +113,45 @@ func TestParseDumpReportsNetlinkError(t *testing.T) {
 	var got syscall.Errno
 	if !errors.As(err, &got) || got != 2 {
 		t.Fatalf("err = %v, want errno 2", err)
+	}
+}
+
+// rta builds one netlink attribute, padded to 4 bytes.
+func rta(typ uint16, payload ...byte) []byte {
+	b := make([]byte, 4, 4+len(payload)+3)
+	binary.NativeEndian.PutUint16(b[0:], uint16(4+len(payload)))
+	binary.NativeEndian.PutUint16(b[2:], typ)
+	b = append(b, payload...)
+	for len(b)%4 != 0 {
+		b = append(b, 0)
+	}
+	return b
+}
+
+func TestSKV6OnlyAttribute(t *testing.T) {
+	cat := func(parts ...[]byte) []byte {
+		var out []byte
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name  string
+		attrs []byte
+		want  model.V6Only
+	}{
+		{"v6-only", rta(inetDiagSKV6Only, 1), model.V6OnlyOn},
+		{"dual-stack", rta(inetDiagSKV6Only, 0), model.V6OnlyOff},
+		{"after other attributes", cat(rta(1, 1, 2, 3, 4, 5), rta(5, 6), rta(inetDiagSKV6Only, 1)), model.V6OnlyOn},
+		{"missing", rta(5, 6), model.V6OnlyUnknown},
+		{"none", nil, model.V6OnlyUnknown},
+		{"empty payload", rta(inetDiagSKV6Only), model.V6OnlyUnknown},
+		{"length past the end", []byte{40, 0, inetDiagSKV6Only, 0, 1}, model.V6OnlyUnknown},
+		{"length below the header", []byte{2, 0, inetDiagSKV6Only, 0, 1}, model.V6OnlyUnknown},
+	} {
+		if got := skV6Only(c.attrs); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
 	}
 }

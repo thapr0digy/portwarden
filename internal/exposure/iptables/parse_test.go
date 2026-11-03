@@ -1,6 +1,7 @@
 package iptables
 
 import (
+	"fmt"
 	"net/netip"
 	"os"
 	"slices"
@@ -221,19 +222,61 @@ func TestLegacyWarning(t *testing.T) {
 
 func TestNATDestination(t *testing.T) {
 	for in, want := range map[string]string{
-		"172.17.0.2:80":     "172.17.0.2:80",
-		"172.17.0.2":        "172.17.0.2:0",
-		"[fd00::2]:8080":    "[fd00::2]:8080",
-		"fd00::2":           "[fd00::2]:0",
-		"10.0.0.1-10.0.0.3": "",
+		"172.17.0.2:80":               "172.17.0.2-172.17.0.2:80-80",
+		"172.17.0.2":                  "172.17.0.2-172.17.0.2:0-0",
+		"[fd00::2]:8080":              "fd00::2-fd00::2:8080-8080",
+		"fd00::2":                     "fd00::2-fd00::2:0-0",
+		"10.0.0.1-10.0.0.3":           "10.0.0.1-10.0.0.3:0-0",
+		"10.0.0.1-10.0.0.3:8000-8100": "10.0.0.1-10.0.0.3:8000-8100",
+		"10.0.0.5:30000-30999":        "10.0.0.5-10.0.0.5:30000-30999",
+		"[fd00::2]-[fd00::9]:80-90":   "fd00::2-fd00::9:80-90",
+		"fd00::2-fd00::9":             "fd00::2-fd00::9:0-0",
+		"10.0.0.3-10.0.0.1":           "", // reversed
+		"10.0.0.1-fd00::2":            "", // mixed families
+		"10.0.0.1:90-80":              "",
+		"10.0.0.1:0":                  "",
+		":80":                         "",
+		"[fd00::2]x":                  "",
 	} {
-		a, p, err := natDestination(in)
+		d, err := natDestination(in)
 		got := ""
 		if err == nil {
-			got = netip.AddrPortFrom(a, p).String()
+			got = fmt.Sprintf("%s-%s:%d-%d", d.lo, d.hi, d.port, d.portHi)
 		}
 		if got != want {
 			t.Errorf("%s: %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestNATTargetRanges(t *testing.T) {
+	for _, c := range []struct {
+		args string
+		want firewall.NAT
+	}{
+		{"-j DNAT --to-destination 10.0.0.1-10.0.0.3:8000-8100", firewall.NAT{Kind: firewall.NATDnat,
+			Addr: netip.MustParseAddr("10.0.0.1"), AddrHi: netip.MustParseAddr("10.0.0.3"), Port: 8000, PortHi: 8100}},
+		{"-j DNAT --to-destination 10.0.0.5:30000-30999 --random-fully", firewall.NAT{Kind: firewall.NATDnat,
+			Addr: netip.MustParseAddr("10.0.0.5"), Port: 30000, PortHi: 30999, Random: true}},
+		{"-j DNAT --to-destination 10.0.0.5:80 --random", firewall.NAT{Kind: firewall.NATDnat,
+			Addr: netip.MustParseAddr("10.0.0.5"), Port: 80}},
+		{"-j REDIRECT --to-ports 9000-9100", firewall.NAT{Kind: firewall.NATRedirect, Port: 9000, PortHi: 9100}},
+		{"-j REDIRECT --to-ports 9000", firewall.NAT{Kind: firewall.NATRedirect, Port: 9000}},
+		{"-j REDIRECT --to-ports 9100-9000", firewall.NAT{Kind: firewall.NATRedirect, Unknown: "REDIRECT --to-ports 9100-9000"}},
+	} {
+		dump := "*nat\n:PREROUTING ACCEPT [0:0]\n-A PREROUTING -p tcp " + c.args + "\nCOMMIT\n"
+		rs, err := Parse([]byte(dump), firewall.FamilyIP)
+		if err != nil {
+			t.Fatalf("%s: %v", c.args, err)
+		}
+		var got firewall.Expr
+		for _, ch := range rs.Chains {
+			for _, r := range ch.Rules {
+				got = r.Exprs[len(r.Exprs)-1]
+			}
+		}
+		if got != firewall.Expr(c.want) {
+			t.Errorf("%s:\n got  %+v\n want %+v", c.args, got, c.want)
 		}
 	}
 }

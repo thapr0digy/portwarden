@@ -167,6 +167,11 @@ type VMap struct {
 	// Unknown is set for a map the model cannot read (a concatenated key, a missing
 	// map): the packet may get any verdict from it or fall through.
 	Unknown string
+	// Pick marks a map keyed by a number generator (`numgen random mod N vmap {…}`):
+	// the packet takes exactly one element, any of them, so every element's verdict is
+	// a path. PickAll says the elements cover every value the generator yields; when it
+	// is false the packet may also fall through. Element matches are ignored.
+	Pick, PickAll bool
 }
 
 // VMapElem is one element of a verdict map: the values of Key that select Verdict.
@@ -195,10 +200,18 @@ const (
 )
 
 // NAT is a nat statement. In a NAT chain it ends the chain's evaluation for the packet.
+//
+// A target can be a range: Addr..AddrHi and Port..PortHi (AddrHi invalid and PortHi 0
+// for a single address or port). The kernel picks one address of the range per
+// connection, and keeps the packet's own port when it lies inside the port range,
+// unless Random (random, random-fully) is set; otherwise it picks a port of the range.
 type NAT struct {
-	Kind NATKind
-	Addr netip.Addr
-	Port uint16
+	Kind   NATKind
+	Addr   netip.Addr
+	AddrHi netip.Addr
+	Port   uint16
+	PortHi uint16
+	Random bool
 	// Unknown is set when the target cannot be read (a map lookup, an xt DNAT blob):
 	// the packet's destination becomes unknown.
 	Unknown string

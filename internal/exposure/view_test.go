@@ -303,8 +303,30 @@ func TestJudgeContainerNotProvablyLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := NewView("start", hostNS, fw, nil, vmIfs(), ctrAddrs)
+	// An empty kube-proxy nftables table maps nothing (M9: the mode is simulated).
 	checkJudge(t, v, []state.Listener{lst(ctrNS, "tcp", "0.0.0.0", 8080, ctrProc)}, map[string]want{
-		"4026532426/tcp/0.0.0.0:8080": {model.ExposureBound, []string{"fw:undetermined netns mapping (kube-proxy nftables mode)"}},
+		"4026532426/tcp/0.0.0.0:8080": {model.ExposureLocal, []string{"netns: no host port mapping"}},
+	})
+
+	// kube-proxy nftables with a LoadBalancer IP (not the host's) in service-ips: a
+	// packet to the host never takes that element, so pods stay undetermined.
+	lbNft := `{"nftables":[{"table":{"family":"ip","name":"kube-proxy"}},
+	 {"map":{"family":"ip","table":"kube-proxy","name":"service-ips","type":["ipv4_addr","inet_proto","inet_service"],"map":"verdict",
+	   "elem":[[{"concat":["203.0.113.10","tcp",443]},{"goto":{"target":"external-LBHASH00-default/lb/tcp/https"}}]]}},
+	 {"chain":{"family":"ip","table":"kube-proxy","name":"nat-prerouting","type":"nat","hook":"prerouting","prio":-100,"policy":"accept"}},
+	 {"chain":{"family":"ip","table":"kube-proxy","name":"services"}},
+	 {"chain":{"family":"ip","table":"kube-proxy","name":"external-LBHASH00-default/lb/tcp/https"}},
+	 {"rule":{"family":"ip","table":"kube-proxy","chain":"nat-prerouting","expr":[{"jump":{"target":"services"}}]}},
+	 {"rule":{"family":"ip","table":"kube-proxy","chain":"services","expr":[{"vmap":{"key":{"concat":[{"payload":{"protocol":"ip","field":"daddr"}},{"meta":{"key":"l4proto"}},{"payload":{"protocol":"th","field":"dport"}}]},"data":"@service-ips"}}]}},
+	 {"rule":{"family":"ip","table":"kube-proxy","chain":"external-LBHASH00-default/lb/tcp/https","expr":[{"dnat":{"addr":"172.17.0.2","port":8080}}]}}]}`
+	fw, err = Merge(MergeInput{NFT: []byte(lbNft)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v = NewView("start", hostNS, fw, nil, vmIfs(), ctrAddrs)
+	checkJudge(t, v, []state.Listener{lst(ctrNS, "tcp", "0.0.0.0", 8080, ctrProc)}, map[string]want{
+		"4026532426/tcp/0.0.0.0:8080": {model.ExposureBound, []string{
+			"nat: dnat target 172.17.0.2:8080 (path not judged)", "fw:undetermined netns mapping (kube-proxy LoadBalancer/external IPs)"}},
 	})
 
 	// A DNAT keyed on an address that is not the host's (a LoadBalancer or elastic IP),

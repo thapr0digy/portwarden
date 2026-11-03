@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -431,14 +432,17 @@ func xtExpr(typ, name string) firewall.Expr {
 	return nil
 }
 
+// natStmt reads a dnat or redirect statement: an address or address range
+// ({"range": [lo, hi]}), a port or port range, and the random/fully-random flags.
 func natStmt(kind string, body json.RawMessage) firewall.Expr {
 	n := firewall.NAT{Kind: firewall.NATDnat}
 	if kind == "redirect" {
 		n.Kind = firewall.NATRedirect
 	}
 	var s struct {
-		Addr json.RawMessage `json:"addr"`
-		Port json.RawMessage `json:"port"`
+		Addr  json.RawMessage `json:"addr"`
+		Port  json.RawMessage `json:"port"`
+		Flags json.RawMessage `json:"flags"`
 	}
 	if len(body) > 0 && string(body) != "null" {
 		if err := json.Unmarshal(body, &s); err != nil {
@@ -447,26 +451,61 @@ func natStmt(kind string, body json.RawMessage) firewall.Expr {
 		}
 	}
 	if len(s.Addr) > 0 {
-		var a string
-		addr, err := netip.ParseAddr(strings.Trim(string(s.Addr), `"`))
-		if json.Unmarshal(s.Addr, &a) != nil || err != nil {
+		lo, hi, ok := natRange(s.Addr, addr)
+		if !ok || lo.BitLen() != hi.BitLen() || hi.Compare(lo) < 0 {
 			n.Unknown = kind + " target"
 			return n
 		}
-		n.Addr = addr
+		n.Addr = lo
+		if hi != lo {
+			n.AddrHi = hi
+		}
 	}
 	if len(s.Port) > 0 {
-		var port int
-		if json.Unmarshal(s.Port, &port) != nil || port <= 0 || port > math.MaxUint16 {
+		lo, hi, ok := natRange(s.Port, port)
+		if !ok || lo == 0 || hi < lo {
 			n.Unknown = kind + " port"
 			return n
 		}
-		n.Port = uint16(port)
+		n.Port = lo
+		if hi != lo {
+			n.PortHi = hi
+			n.Random = natRandom(s.Flags)
+		}
 	}
 	if n.Kind == firewall.NATDnat && !n.Addr.IsValid() {
 		n.Unknown = kind + " target"
 	}
 	return n
+}
+
+// natRange reads a scalar or {"range": [lo, hi]} with read.
+func natRange[T any](raw json.RawMessage, read func(json.RawMessage) (T, bool)) (lo, hi T, ok bool) {
+	var r struct {
+		Range []json.RawMessage `json:"range"`
+	}
+	if json.Unmarshal(raw, &r) == nil && r.Range != nil {
+		if len(r.Range) != 2 {
+			return lo, hi, false
+		}
+		lo, ok1 := read(r.Range[0])
+		hi, ok2 := read(r.Range[1])
+		return lo, hi, ok1 && ok2
+	}
+	lo, ok = read(raw)
+	return lo, lo, ok
+}
+
+// natRandom reports a random or fully-random flag (a string or a list of them).
+func natRandom(raw json.RawMessage) bool {
+	var list []string
+	var one string
+	if json.Unmarshal(raw, &one) == nil {
+		list = []string{one}
+	} else if json.Unmarshal(raw, &list) != nil {
+		return false
+	}
+	return contains(list, "random") || contains(list, "fully-random")
 }
 
 // mangle handles `meta mark set …`; other mangles do not affect a match the model makes.
@@ -931,6 +970,9 @@ func (p *parser) vmap(c ctx, body json.RawMessage) (firewall.Expr, error) {
 	if err := json.Unmarshal(body, &v); err != nil {
 		return nil, err
 	}
+	if ng, ok := numgenKey(v.Key); ok {
+		return p.numgenMap(c, ng, v.Data), nil
+	}
 	keys, desc, ok := vmapKeys(v.Key)
 	if !ok {
 		return firewall.VMap{Unknown: "vmap on " + desc}, nil
@@ -1017,4 +1059,66 @@ func vmapKeys(raw json.RawMessage) ([]firewall.Match, string, bool) {
 		return nil, desc, false
 	}
 	return []firewall.Match{m}, desc, true
+}
+
+type numgen struct {
+	Mode   string `json:"mode"`
+	Mod    int    `json:"mod"`
+	Offset int    `json:"offset"`
+}
+
+// numgenKey decodes a `numgen random|inc mod N [offset O]` key.
+func numgenKey(raw json.RawMessage) (numgen, bool) {
+	var k struct {
+		Numgen *numgen `json:"numgen"`
+	}
+	if json.Unmarshal(raw, &k) != nil || k.Numgen == nil {
+		return numgen{}, false
+	}
+	return *k.Numgen, true
+}
+
+// numgenMap reads `numgen … vmap { 0 : goto a, 1 : goto b }` (kube-proxy's endpoint
+// choice): the packet takes exactly one element whose value the generator can yield.
+func (p *parser) numgenMap(c ctx, ng numgen, data json.RawMessage) firewall.Expr {
+	const maxMod = 1 << 16
+	if ng.Mod <= 0 || ng.Mod > maxMod || ng.Offset < 0 {
+		return firewall.VMap{Unknown: "vmap on numgen mod " + strconv.Itoa(ng.Mod)}
+	}
+	var obj struct {
+		Set []json.RawMessage `json:"set"`
+	}
+	if json.Unmarshal(data, &obj) != nil {
+		return firewall.VMap{Unknown: "vmap data"}
+	}
+	out := firewall.VMap{Key: firewall.Match{Field: firewall.FieldAlways}, Pick: true}
+	covered := make([]bool, ng.Mod)
+	for _, raw := range obj.Set {
+		var pair []json.RawMessage
+		var val int
+		if json.Unmarshal(raw, &pair) != nil || len(pair) != 2 || json.Unmarshal(pair[0], &val) != nil {
+			return firewall.VMap{Unknown: "vmap numgen element"}
+		}
+		var verdictObj map[string]json.RawMessage
+		if json.Unmarshal(pair[1], &verdictObj) != nil || len(verdictObj) != 1 {
+			return firewall.VMap{Unknown: "vmap verdict"}
+		}
+		var verdict firewall.Verdict
+		for kind, vb := range verdictObj {
+			e, _, err := p.expr(c, kind, vb)
+			vv, isVerdict := e.(firewall.Verdict)
+			if err != nil || !isVerdict {
+				return firewall.VMap{Unknown: "vmap verdict " + kind}
+			}
+			verdict = vv
+		}
+		i := val - ng.Offset
+		if i < 0 || i >= ng.Mod {
+			continue // never generated
+		}
+		covered[i] = true
+		out.Elems = append(out.Elems, firewall.VMapElem{Match: firewall.Match{Field: firewall.FieldAlways}, Verdict: verdict})
+	}
+	out.PickAll = !slices.Contains(covered, false)
+	return out
 }

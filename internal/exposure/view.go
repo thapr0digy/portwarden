@@ -46,7 +46,7 @@ type View struct {
 	// natMaps are the host-port-to-elsewhere DNATs found by simulating packets.
 	natMaps []Mapping
 	// natTargets are every DNAT target in a NAT table, whatever leads to it.
-	natTargets []netip.AddrPort
+	natTargets []natTarget
 	// opaque names NAT mechanisms the simulation cannot follow (kube-proxy nftables or
 	// IPVS mode, Cilium, Swarm ingress, LoadBalancer IPs, DNATs without a port match):
 	// with any of them, an unmapped container listener is undetermined, not local.
@@ -59,10 +59,63 @@ type View struct {
 }
 
 type packetKey struct {
-	proto string
-	addr  netip.Addr
-	iface string
-	port  uint16
+	proto          string
+	addr           netip.Addr
+	iface          string
+	port, portHigh uint16
+}
+
+// natTarget is a DNAT target: an address or address range and a port or port range
+// (port 0: the packet's own).
+type natTarget struct {
+	lo, hi       netip.Addr
+	port, portHi uint16
+}
+
+func (t natTarget) String() string { return targetText(t.lo, t.hi, t.port, t.portHi) }
+
+// covers reports whether a listener's address and port can be the target; with
+// anyAddr the listener's addresses are unknown and only the port counts.
+func (t natTarget) covers(addrs []netip.Addr, anyAddr bool, port uint16) bool {
+	if t.port != 0 && (port < t.port || port > max(t.port, t.portHi)) {
+		return false
+	}
+	return anyAddr || slices.ContainsFunc(addrs, func(a netip.Addr) bool { return inAddrRange(a, t.lo, t.hi) })
+}
+
+func inAddrRange(a, lo, hi netip.Addr) bool {
+	if !hi.IsValid() {
+		hi = lo
+	}
+	return a.BitLen() == lo.BitLen() && lo.Compare(a) <= 0 && a.Compare(hi) <= 0
+}
+
+// targetText renders a destination: "172.17.0.2:80" (port 0 printed, as an AddrPort
+// does), "10.0.0.1-10.0.0.5:8000-8100", "[2001:db8::1]-[2001:db8::5]:80".
+func targetText(lo, hi netip.Addr, port, portHi uint16) string {
+	if (!hi.IsValid() || hi == lo) && portHi <= port {
+		return netip.AddrPortFrom(lo, port).String()
+	}
+	a := lo.String()
+	if lo.Is6() {
+		a = "[" + a + "]"
+	}
+	if hi.IsValid() && hi != lo {
+		if hi.Is6() {
+			a += "-[" + hi.String() + "]"
+		} else {
+			a += "-" + hi.String()
+		}
+	}
+	return a + ":" + portText(port, portHi)
+}
+
+// portText renders "80" or "8000-8100".
+func portText(lo, hi uint16) string {
+	if hi <= lo {
+		return strconv.Itoa(int(lo))
+	}
+	return strconv.Itoa(int(lo)) + "-" + strconv.Itoa(int(hi))
 }
 
 // Mapping points a host port at another address (a container's): a DNAT rule or a
@@ -70,8 +123,17 @@ type packetKey struct {
 type Mapping struct {
 	Proto string
 	// Host is the host side; an unspecified address means every address of its family.
-	Host   netip.AddrPort
-	Target netip.AddrPort
+	// HostPortHi, when above Host's port, makes it the ports Host.Port()..HostPortHi.
+	Host       netip.AddrPort
+	HostPortHi uint16
+	// Target is where it leads; TargetAddrHi (valid) and TargetPortHi (above Target's
+	// port) make it a range, of which each connection gets one address and port.
+	Target       netip.AddrPort
+	TargetAddrHi netip.Addr
+	TargetPortHi uint16
+	// PortKept: each host port leads to the same port at the target (a port-preserving
+	// DNAT of a port range).
+	PortKept bool
 	// Evidence: "nat: dnat tcp/18080 -> 172.17.0.2:80" or
 	// "docker-proxy: 0.0.0.0:18080->172.17.0.2:80".
 	Evidence string
@@ -113,7 +175,8 @@ func (v *View) init() {
 			_, ok := netif.Owner(v.ifs, a)
 			return ok
 		},
-		Route: func(a netip.Addr) (string, bool) { return netif.Route(v.ifs, a) },
+		Route:    func(a netip.Addr) (string, bool) { return netif.Route(v.ifs, a) },
+		AddrCuts: addrCuts(v.ifs),
 	}
 	if v.fw != nil {
 		v.natMaps = v.findNATMappings()
@@ -137,6 +200,31 @@ func (v *View) init() {
 	}
 	slices.Sort(v.opaque)
 	v.opaque = slices.Compact(v.opaque)
+}
+
+// addrCuts lists where the host's answers to "is it local" and "which interface routes
+// it" can change along the address space: around each host address, at the ends of each
+// connected prefix, and around the loopback ranges.
+func addrCuts(ifs []netif.Interface) []netip.Addr {
+	var cuts []netip.Addr
+	add := func(lo, hi netip.Addr) {
+		cuts = append(cuts, lo)
+		if n := hi.Next(); n.IsValid() {
+			cuts = append(cuts, n)
+		}
+	}
+	add(netip.MustParseAddr("127.0.0.0"), netip.MustParseAddr("127.255.255.255"))
+	add(netip.IPv6Loopback(), netip.IPv6Loopback())
+	for _, i := range ifs {
+		for _, p := range i.Prefixes {
+			add(p.Addr().Unmap(), p.Addr().Unmap())
+			if m := p.Masked(); m.IsValid() {
+				add(m.Addr(), firewall.LastAddr(m))
+			}
+		}
+	}
+	slices.SortFunc(cuts, netip.Addr.Compare)
+	return slices.Compact(cuts)
 }
 
 // Conditions lists what this view could not read, for the host block; empty when the
@@ -305,7 +393,13 @@ func errText(err error) string {
 }
 
 func (v *View) evaluate(proto string, c candidate, port uint16) firewall.Result {
-	k := packetKey{proto, c.addr, c.iface, port}
+	return v.evaluateRange(proto, c, port, port)
+}
+
+// evaluateRange simulates one packet standing for every port lo..hi (see
+// firewall.Packet.DPortHi).
+func (v *View) evaluateRange(proto string, c candidate, lo, hi uint16) firewall.Result {
+	k := packetKey{proto, c.addr, c.iface, lo, hi}
 	if r, ok := v.results[k]; ok {
 		return r
 	}
@@ -313,7 +407,7 @@ func (v *View) evaluate(proto string, c candidate, port uint16) firewall.Result 
 	if c.addr.Is6() {
 		fam = firewall.FamilyIP6
 	}
-	r := v.fw.Rules.Evaluate(firewall.Packet{Family: fam, Proto: proto, DAddr: c.addr, DPort: port, IIf: c.iface}, v.env)
+	r := v.fw.Rules.Evaluate(firewall.Packet{Family: fam, Proto: proto, DAddr: c.addr, DPort: lo, DPortHi: hi, IIf: c.iface}, v.env)
 	v.results[k] = r
 	return r
 }
@@ -322,8 +416,8 @@ func (v *View) evaluate(proto string, c candidate, port uint16) firewall.Result 
 func natEvidence(proto string, port uint16, r firewall.Result) []string {
 	var out []string
 	for _, o := range r.Outcomes {
-		if o.Forwarded || o.DPort != port {
-			out = append(out, fmt.Sprintf("nat: dnat %s/%d -> %s", proto, port, netip.AddrPortFrom(o.DAddr, o.DPort)))
+		if o.Forwarded || o.DPort != port || o.DPortHi != 0 {
+			out = append(out, fmt.Sprintf("nat: dnat %s/%d -> %s", proto, port, targetText(o.DAddr, o.DAddrHi, o.DPort, o.DPortHi)))
 		}
 	}
 	slices.Sort(out)
@@ -398,17 +492,19 @@ func (v *View) judgeNetns(l state.Listener, maps []Mapping) model.Exposure {
 			}
 		}
 	}
-	targets := func(t netip.AddrPort) bool {
-		// Addresses unknown: any target on the listener's port may be it.
-		return t.Port() == k.Port && (addrErr != nil || slices.Contains(addrs, t.Addr()))
-	}
 	var best model.Exposure
 	found := false
 	for _, m := range maps {
-		if m.Proto != k.Proto || !targets(m.Target) {
+		// Addresses unknown: any target on the listener's port may be it.
+		t := natTarget{m.Target.Addr(), m.TargetAddrHi, m.Target.Port(), m.TargetPortHi}
+		if m.Proto != k.Proto || !t.covers(addrs, addrErr != nil, k.Port) {
 			continue
 		}
-		e := v.judgeHostPort(m.Proto, m.Host.Addr(), m.Host.Port())
+		hostPort := m.Host.Port()
+		if m.PortKept {
+			hostPort = k.Port // each host port of the range leads to the same port
+		}
+		e := v.judgeHostPort(m.Proto, m.Host.Addr(), hostPort)
 		e.Evidence = append([]string{m.Evidence}, e.Evidence...)
 		if !found || e.Level > best.Level {
 			best, found = e, true
@@ -435,7 +531,7 @@ func (v *View) judgeNetns(l state.Listener, maps []Mapping) model.Exposure {
 		why = append(why, unreadable)
 	}
 	for _, t := range v.natTargets {
-		if (t.Port() == 0 || t.Port() == k.Port) && (addrErr != nil || slices.Contains(addrs, t.Addr())) {
+		if t.covers(addrs, addrErr != nil, k.Port) {
 			why = append(why, "nat: dnat target "+t.String()+" (path not judged)")
 		}
 	}
@@ -474,15 +570,13 @@ func (v *View) netnsAddrs(netns uint32, procs []model.Process) ([]netip.Addr, er
 
 // scanNAT lists every DNAT target in the NAT tables and the NAT mechanisms the packet
 // simulation cannot follow.
-func (v *View) scanNAT() (targets []netip.AddrPort, opaque []string) {
+func (v *View) scanNAT() (targets []natTarget, opaque []string) {
 	natTable := map[string]bool{}
 	for _, c := range v.fw.Rules.Chains {
 		if c.Type == firewall.TypeNAT {
 			natTable[c.Origin+" "+c.Family.String()+" "+c.Table] = true
 		}
 		switch {
-		case c.Origin == "nft" && c.Table == "kube-proxy":
-			opaque = append(opaque, "kube-proxy nftables mode")
 		case strings.HasPrefix(c.Name, "CILIUM_") || c.Table == "cilium":
 			opaque = append(opaque, "Cilium")
 		case c.Name == "DOCKER-INGRESS":
@@ -508,12 +602,19 @@ func (v *View) scanNAT() (targets []netip.AddrPort, opaque []string) {
 					if x.Unknown != "" {
 						opaque = append(opaque, "unreadable NAT rule ("+x.Unknown+")")
 					}
+					if v.kubeExternalElems(x) {
+						opaque = append(opaque, "kube-proxy LoadBalancer/external IPs")
+					}
 				case firewall.NAT:
 					switch {
 					case x.Unknown != "":
 						opaque = append(opaque, "unreadable NAT rule ("+x.Unknown+")")
 					case x.Kind == firewall.NATDnat:
-						targets = append(targets, netip.AddrPortFrom(x.Addr, x.Port))
+						hi := x.AddrHi
+						if !hi.IsValid() {
+							hi = x.Addr
+						}
+						targets = append(targets, natTarget{x.Addr, hi, x.Port, max(x.Port, x.PortHi)})
 						if !hasDPort && (hasForeignDAddr || c.Hook != firewall.HookNone) {
 							opaque = append(opaque, "DNAT without a port match")
 						}
@@ -526,8 +627,30 @@ func (v *View) scanNAT() (targets []netip.AddrPort, opaque []string) {
 			}
 		}
 	}
-	slices.SortFunc(targets, netip.AddrPort.Compare)
+	slices.SortFunc(targets, func(a, b natTarget) int {
+		return cmp.Or(a.lo.Compare(b.lo), a.hi.Compare(b.hi), cmp.Compare(a.port, b.port), cmp.Compare(a.portHi, b.portHi))
+	})
 	return slices.Compact(targets), opaque
+}
+
+// kubeExternalElems reports a kube-proxy nftables map (service-ips, firewall-ips)
+// element keyed on an address that is not the host's whose verdict leads to an
+// external- or firewall- chain: a LoadBalancer or external IP, which a packet to the
+// host's own addresses never takes (an external IP that is a host address is
+// simulated like any other element).
+func (v *View) kubeExternalElems(x firewall.VMap) bool {
+	for _, el := range x.Elems {
+		t := el.Verdict.Target
+		if !strings.HasPrefix(t, "external-") && !strings.HasPrefix(t, "firewall-") {
+			continue
+		}
+		for _, m := range append([]firewall.Match{el.Match}, el.And...) {
+			if m.Field == firewall.FieldDAddr && !v.anyLocal(m.Pfx) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // anyLocal reports whether a prefix list covers one of the host's addresses.
@@ -597,23 +720,43 @@ func ParseDockerProxy(cmdline []string) (Mapping, bool) {
 	return Mapping{Proto: proto, Host: host, Target: target, Evidence: fmt.Sprintf("docker-proxy: %s->%s", host, target)}, true
 }
 
-// natPortLimit bounds how many ports one dport range in a NAT table contributes.
+// natPortLimit is the widest dport range in a NAT table that is simulated port by
+// port; a wider one is simulated as one packet standing for the whole interval
+// (firewall.Packet.DPortHi), whose outcomes say which parts of it go where.
 const natPortLimit = 64
 
 // findNATMappings simulates a packet from the outside to every (protocol, port) a NAT
-// table matches on, at every external address, and keeps each forwarded outcome.
+// table matches on, in a rule or in a verdict map's keys (kube-proxy's nftables mode
+// keeps its node ports in maps), at every external address, and keeps each forwarded
+// outcome.
 func (v *View) findNATMappings() []Mapping {
 	type pp struct {
-		proto string
-		port  uint16
+		proto  string
+		lo, hi uint16
 	}
 	seen := map[pp]bool{}
 	var ports []pp
-	add := func(proto string, port uint16) {
+	add := func(proto string, lo, hi uint16) {
 		for _, p := range []string{"tcp", "udp"} {
-			if (proto == "" || proto == p) && !seen[pp{p, port}] {
-				seen[pp{p, port}] = true
-				ports = append(ports, pp{p, port})
+			if (proto == "" || proto == p) && !seen[pp{p, lo, hi}] {
+				seen[pp{p, lo, hi}] = true
+				ports = append(ports, pp{p, lo, hi})
+			}
+		}
+	}
+	addMatch := func(m firewall.Match) {
+		if m.Field != firewall.FieldDPort || m.Op != firewall.OpEq {
+			return
+		}
+		for _, pr := range m.Ports {
+			switch {
+			case pr.Lo > pr.Hi:
+			case int(pr.Hi)-int(pr.Lo) >= natPortLimit:
+				add(m.Proto, pr.Lo, pr.Hi)
+			default:
+				for p := int(pr.Lo); p <= int(pr.Hi); p++ {
+					add(m.Proto, uint16(p), uint16(p))
+				}
 			}
 		}
 	}
@@ -634,16 +777,15 @@ func (v *View) findNATMappings() []Mapping {
 		}
 		for _, r := range c.Rules {
 			for _, x := range r.Exprs {
-				m, ok := x.(firewall.Match)
-				if !ok || m.Field != firewall.FieldDPort || m.Op != firewall.OpEq {
-					continue
-				}
-				for _, pr := range m.Ports {
-					if int(pr.Hi)-int(pr.Lo) >= natPortLimit {
-						continue
-					}
-					for p := int(pr.Lo); p <= int(pr.Hi); p++ {
-						add(m.Proto, uint16(p))
+				switch x := x.(type) {
+				case firewall.Match:
+					addMatch(x)
+				case firewall.VMap:
+					for _, el := range x.Elems {
+						addMatch(el.Match)
+						for _, m := range el.And {
+							addMatch(m)
+						}
 					}
 				}
 			}
@@ -653,17 +795,32 @@ func (v *View) findNATMappings() []Mapping {
 	cands := v.external(true, true)
 	for _, p := range ports {
 		for _, c := range cands {
-			r := v.evaluate(p.proto, c, p.port)
+			r := v.evaluateRange(p.proto, c, p.lo, p.hi)
 			for _, o := range r.Outcomes {
 				if !o.Forwarded {
 					continue
 				}
-				host := netip.AddrPortFrom(c.addr, p.port)
-				target := netip.AddrPortFrom(o.DAddr, o.DPort)
-				out = append(out, Mapping{Proto: p.proto, Host: host, Target: target,
-					Evidence: fmt.Sprintf("nat: dnat %s/%d -> %s", p.proto, p.port, target)})
+				out = append(out, natMapping(p.proto, c.addr, p.lo, o))
 			}
 		}
 	}
 	return slices.CompactFunc(out, func(a, b Mapping) bool { return a == b })
+}
+
+// natMapping turns a forwarded outcome of a packet to host:port into a mapping.
+func natMapping(proto string, host netip.Addr, port uint16, o firewall.Outcome) Mapping {
+	lo, hi := port, port
+	if o.Ranged {
+		lo, hi = o.OrigPort, o.OrigPortHi
+	}
+	m := Mapping{
+		Proto: proto, Host: netip.AddrPortFrom(host, lo),
+		Target: netip.AddrPortFrom(o.DAddr, o.DPort), TargetAddrHi: o.DAddrHi, TargetPortHi: o.DPortHi,
+		PortKept: o.Ranged && o.PortKept && hi > lo,
+	}
+	if hi > lo {
+		m.HostPortHi = hi
+	}
+	m.Evidence = fmt.Sprintf("nat: dnat %s/%s -> %s", proto, portText(lo, hi), targetText(o.DAddr, o.DAddrHi, o.DPort, o.DPortHi))
+	return m
 }

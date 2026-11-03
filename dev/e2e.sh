@@ -36,7 +36,14 @@
 #      silent in the inventory and pages host_silent. Before that (M7), an nft rule for a
 #      port nothing listens on changes the inventory's firewall_fingerprint and moves its
 #      firewall_changed_at, with no exposure event and no page; an agent restart with
-#      the same rules then leaves both unchanged.
+#      the same rules then leaves both unchanged. M8: a listener started with secret
+#      arguments (--password=, --api-key, PGPASSWORD=, URL userinfo) reaches the inventory
+#      with them masked as ***; /v1/hosts?limit=1 gives an X-Next-Cursor that leads to the
+#      other host; a second fake host (e2eghost) stopped and forgotten with
+#      `portwarden-inventory forget-host` leaves the API (404), the alerter forgets it,
+#      and no host_silent page comes for it, also after an alerter restart (its heartbeat
+#      consumer replays the ghost's last heartbeat); when it sends again it is a new host
+#      (new first_seen, no host_recovered page). The host API carries a tamper status.
 #  11. hardened unit and tamper (M6): until here the agent ran with --tamper-interval 1s and
 #      must have raised no tamper signal. Then the deploy/ unit itself (as the .deb installs
 #      it, with a runtime drop-in for the e2e NATS) runs the agent as portwarden-agent under
@@ -80,6 +87,7 @@ RECHECK_S=10
 M5_OPEN_PORT=8092
 M5_FW_PORT=8091
 M7_UNUSED_PORT=8089 # nothing listens here: a rule for it moves no listener's exposure
+M8_SECRET_PORT=8088 # a loopback listener started with secret arguments (M8 redaction)
 UNIT_PORT=8090
 TAMPER_WINDOW_S=10
 UNIT_DROPIN_DIR=/run/systemd/system/portwarden-agent.service.d
@@ -263,6 +271,7 @@ nats_setup() {
 	done
 	"$work/portwarden-natsauth" mint --dir "$work/users" --role host --host "$host_id" >/dev/null
 	"$work/portwarden-natsauth" mint --dir "$work/users" --role host --host e2eother >/dev/null # dev/fakehost
+	"$work/portwarden-natsauth" mint --dir "$work/users" --role host --host e2eghost >/dev/null # dev/fakehost, forgotten (M8)
 	"$work/portwarden-natsauth" render --dir "$work/users" --out "$work/users.conf" >/dev/null
 	cat >"$work/nats.conf" <<CONF
 listen: 0.0.0.0:$NATS_PORT
@@ -717,7 +726,8 @@ pids+=($!)
 "$work/fakehost" --nats-url "$nats_url" --nats-nkey "$work/users/host-e2eother.nk" --host e2eother >>"$work/fakehost.log" 2>&1 &
 pids+=($!)
 "$work/portwarden-alerter" --config "$work/alerter.json" >>"$work/alerter.log" 2>&1 &
-pids+=($!)
+alerter_pid=$!
+pids+=($alerter_pid)
 sudo ip netns exec "$M5_NETNS" "$work/portwarden-verifier" --config "$work/verifier.json" >>"$work/verifier.log" 2>&1 &
 pids+=($!)
 api() { curl -sf --max-time 5 -H "Authorization: Bearer $api_token" "http://127.0.0.1:$INV_PORT$1"; }
@@ -773,6 +783,28 @@ seen_in "$work/alerter.log" '"msg":"alert suppressed".*"rule":"dedupe"' 1 || fai
 echo "alerter: one page for :$M5_OPEN_PORT ($(jq -r "select(.listener.port == $M5_OPEN_PORT) | .kind + \" \" + .summary" "$work/hook.jsonl")), none for :$M5_FW_PORT"
 ! grep -q "bad signature" "$work/hook.log" || fail "the webhook saw a bad signature"
 
+log "cmdline redaction (M8): secret arguments are masked before the agent publishes them"
+# Loopback, so it pages nothing; argv: python3 -c <script> <port> <secret arguments...>.
+python3 -c 'import socket, sys, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.listen()
+time.sleep(3600)' "$M8_SECRET_PORT" --password=e2e-hunter2 --api-key e2e-k3y PGPASSWORD=e2e-pg-pw "postgres://app:e2e-url-pw@db/x" >/dev/null 2>&1 &
+pids+=($!)
+secret_cmdline() { api "/v1/listeners?host=$host_id&proto=tcp&port=$M8_SECRET_PORT" | jq -c '.[0].processes[0].cmdline // empty'; }
+has_secret_listener() { [ -n "$(secret_cmdline)" ]; }
+wait_for "the inventory to hold :$M8_SECRET_PORT" "$INV_WINDOW_S" has_secret_listener
+cmdline=$(secret_cmdline)
+for secret in e2e-hunter2 e2e-k3y e2e-pg-pw e2e-url-pw; do
+	! grep -qF -- "$secret" <<<"$cmdline" || fail "secret $secret published in the cmdline: $cmdline"
+	! natscli stream get ASM_EVENTS --last-for "asm.$host_id.listener.opened" 2>/dev/null | grep -aqF -- "$secret" ||
+		fail "secret $secret is in the stream's last listener.opened"
+done
+jq -e '.[4] == "--password=***" and .[5] == "--api-key" and .[6] == "***" and .[7] == "PGPASSWORD=***" and .[8] == "postgres://app:***@db/x"' \
+	<<<"$cmdline" >/dev/null || fail "cmdline not masked as expected: $cmdline"
+echo "redaction: :$M8_SECRET_PORT published as $(jq -c '.[3:]' <<<"$cmdline")"
+
 log "firewall fingerprint: a rule that moves no listener changes the inventory's fingerprint, and nothing else"
 inv_fw() { api "/v1/hosts/$host_id" | jq -r '"\(.firewall_fingerprint // "null") \(.firewall_changed_at // "null")"'; }
 read -r fw_before fw_changed_before <<<"$(inv_fw)"
@@ -820,12 +852,66 @@ wait_for "host_silent page" $((SILENT_AFTER_S + 15)) silent_page
 echo "silence: inventory silent and host_silent paged $((($(now_ns) - t0) / 1000000)) ms after the agent stopped"
 ! grep -q '^GAP ' "$work/watch.log" || fail "portwarden-watch reported a GAP"
 
+log "API paging (M8): limit=1 gives a next cursor that leads to another host"
+page_headers=$(curl -sf --max-time 5 -D - -o "$work/hosts-page1.json" -H "Authorization: Bearer $api_token" "http://127.0.0.1:$INV_PORT/v1/hosts?limit=1")
+next_cursor=$(awk 'tolower($1) == "x-next-cursor:" {print $2}' <<<"$page_headers" | tr -d '\r')
+[ -n "$next_cursor" ] || fail "no X-Next-Cursor for /v1/hosts?limit=1 with several hosts: $page_headers"
+first_host=$(jq -r '.[0].id' "$work/hosts-page1.json")
+second_host=$(api "/v1/hosts?limit=1&cursor=$next_cursor" | jq -r '.[0].id')
+[ -n "$second_host" ] && [ "$second_host" != null ] && [ "$second_host" != "$first_host" ] || fail "paging: $first_host, then '$second_host'"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $api_token" "http://127.0.0.1:$INV_PORT/v1/hosts?cursor=bogus")
+[ "$code" = 400 ] || fail "a bad cursor answered $code"
+echo "paging: /v1/hosts?limit=1 -> $first_host, its cursor -> $second_host; a bad cursor is 400"
+
+log "forget a host (M8): a decommissioned host stops paging host_silent and comes back as new"
+ghost=e2eghost
+start_ghost() {
+	"$work/fakehost" --nats-url "$nats_url" --nats-nkey "$work/users/host-$ghost.nk" --host "$ghost" >>"$work/fakehost-ghost.log" 2>&1 &
+	ghost_pid=$!
+	pids+=($ghost_pid)
+}
+stop_ghost() { kill "$ghost_pid" 2>/dev/null || true; wait "$ghost_pid" 2>/dev/null || true; }
+ghost_heard() { api "/v1/hosts/$ghost" 2>/dev/null | jq -e '.last_heartbeat != null' >/dev/null 2>&1; }
+ghost_code() { curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $api_token" "http://127.0.0.1:$INV_PORT/v1/hosts/$ghost"; }
+ghost_pages() { jq -c "select(.host == \"$ghost\")" "$work/hook.jsonl"; }
+start_ghost
+wait_for "the inventory to hold $ghost" 15 ghost_heard
+ghost_first_seen=$(api "/v1/hosts/$ghost" | jq -r .first_seen)
+stop_ghost
+forget_out=$("$work/portwarden-inventory" forget-host --config "$work/inventory.json" "$ghost") || fail "forget-host failed: $forget_out"
+jq -e '.host == "e2eghost" and .existed == true and .stream_seq > 0' <<<"$forget_out" >/dev/null || fail "forget-host answered $forget_out"
+[ "$(ghost_code)" = 404 ] || fail "the forgotten host is still in the API ($(ghost_code))"
+wait_for "the alerter to forget $ghost" 10 seen_in "$work/alerter.log" "\"msg\":\"host forgotten\".*\"host\":\"$ghost\"" 1
+# A restarted alerter replays every host's last heartbeat, the ghost's included: the
+# forget watermark must keep it from seeding liveness.
+kill "$alerter_pid"
+wait "$alerter_pid" 2>/dev/null || true
+"$work/portwarden-alerter" --config "$work/alerter.json" >>"$work/alerter.log" 2>&1 &
+alerter_pid=$!
+pids+=($alerter_pid)
+wait_for "the restarted alerter consuming" 20 seen_in "$work/alerter.log" '"msg":"alerter running"' 2
+sleep $((2 * SILENT_AFTER_S + 4)) # the restart's grace (one silent_after), then a silent_after, with margin
+[ -z "$(ghost_pages)" ] || fail "the forgotten host paged: $(ghost_pages)"
+[ "$(ghost_code)" = 404 ] || fail "the forgotten host came back without sending ($(ghost_code))"
+start_ghost
+wait_for "$ghost back as a new host" 15 ghost_heard
+[ "$(api "/v1/hosts/$ghost" | jq -r .first_seen)" != "$ghost_first_seen" ] || fail "the returning host kept its old first_seen"
+sleep 2
+[ -z "$(ghost_pages)" ] || fail "the returning host paged: $(ghost_pages)"
+stop_ghost
+"$work/portwarden-inventory" forget-host --config "$work/inventory.json" "$ghost" >/dev/null || fail "the second forget-host failed"
+echo "forget: $ghost gone from the API and the alerter, no page across an alerter restart and $((2 * SILENT_AFTER_S + 4)) s; back as a new host"
+
 log "tamper: no signal from a healthy agent (checks every 1 s during steps 1-10)"
 ! seen " TAMPER " 1 || fail "a healthy agent raised tamper signals: $(grep ' TAMPER ' "$work/watch.log" | head -3)"
 seen "HEARTBEAT .* tamper=ok" 1 || fail "heartbeats carry no tamper status"
 tamper_pages() { jq -c "select(.kind == \"tamper\" and .host == \"$host_id\")" "$work/hook.jsonl"; }
 [ -z "$(tamper_pages)" ] || fail "tamper pages for a healthy agent: $(tamper_pages)"
 echo "tamper: $(count_in "$work/watch.log" "HEARTBEAT .* tamper=ok") heartbeats with tamper=ok, no TAMPER event, no tamper page"
+inv_tamper=$(api "/v1/hosts/$host_id" | jq -c '{tamper, tamper_at}')
+jq -e '.tamper.flags == [] and (.tamper.checks | length) > 0 and .tamper_at != null' <<<"$inv_tamper" >/dev/null ||
+	fail "the inventory holds no tamper status for the host: $inv_tamper"
+echo "tamper: the inventory holds the host's status (no flags, checks $(jq -c .tamper.checks <<<"$inv_tamper"))"
 
 log "hardened unit: deploy/portwarden-agent.service runs the agent as portwarden-agent"
 id portwarden-agent >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin portwarden-agent

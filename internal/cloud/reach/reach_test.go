@@ -3,6 +3,7 @@ package reach
 import (
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -61,6 +62,8 @@ func TestPolicyUserRule(t *testing.T) {
 		{"documentation ranges are not the internet", MustParse("203.0.113.0/24", "2001:db8::/32"), false},
 		{"v6 anywhere", MustParse("::/0"), true},
 		{"global v6 /64", MustParse("2a00:1450:4001::/64"), true},
+		{"nat64 well-known prefix maps public ipv4", MustParse("64:ff9b::/96"), true},
+		{"nat64 local-use prefix", MustParse("64:ff9b:1::/48"), false},
 		{"nothing", Set{}, false},
 	}
 	for _, c := range cases {
@@ -91,14 +94,35 @@ func TestDescribe(t *testing.T) {
 	if got := p.Describe(MustParse("1.0.0.0/32", "1.0.0.2/32", "1.0.0.4/32"), 2); got != "1.0.0.0/32, 1.0.0.2/32, +1 more" {
 		t.Errorf("capped: %q", got)
 	}
+	// vpn_cidrs carving part of /0 out is said, not hidden behind "0.0.0.0/0".
+	vpn := NewPolicy([]netip.Prefix{netip.MustParsePrefix("81.2.69.160/28")})
+	if got := vpn.Describe(vpn.Exposed(MustParse("0.0.0.0/0")), 4); got != "0.0.0.0/0 except vpn_cidrs 81.2.69.160/28" {
+		t.Errorf("v4 anywhere less the vpn: %q", got)
+	}
+	if got := vpn.Describe(vpn.Exposed(MustParse("::/0")), 4); got != "::/0" {
+		t.Errorf("v6 anywhere, the vpn is v4 only: %q", got)
+	}
 }
 
 func TestParseVPN(t *testing.T) {
-	ps, err := ParseVPN([]string{" 81.2.69.161/28 ", "2a00::/16"})
+	ps, err := ParseVPN([]string{" 81.2.69.161/28 ", "2a00::/16", "10.0.0.0/8"}, false)
 	if err != nil || ps[0].String() != "81.2.69.160/28" {
 		t.Fatalf("%v %v", ps, err)
 	}
-	if _, err := ParseVPN([]string{"not-a-cidr"}); err == nil {
+	if _, err := ParseVPN([]string{"not-a-cidr"}, false); err == nil {
 		t.Fatal("bad cidr accepted")
+	}
+	for _, c := range []string{"0.0.0.0/0", "::/0"} {
+		if _, err := ParseVPN([]string{c}, true); err == nil {
+			t.Errorf("%s accepted even with allow_broad", c)
+		}
+	}
+	for _, c := range []string{"81.0.0.0/7", "2a00::/15"} {
+		if _, err := ParseVPN([]string{c}, false); err == nil || !strings.Contains(err.Error(), "allow_broad") {
+			t.Errorf("%s accepted without allow_broad: %v", c, err)
+		}
+		if _, err := ParseVPN([]string{c}, true); err != nil {
+			t.Errorf("%s refused with allow_broad: %v", c, err)
+		}
 	}
 }

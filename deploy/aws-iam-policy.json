@@ -9,6 +9,7 @@
         "ec2:DescribeSecurityGroups",
         "ec2:DescribeNetworkAcls",
         "ec2:DescribeRouteTables",
+        "ec2:GetManagedPrefixListEntries",
         "elasticloadbalancing:DescribeLoadBalancers",
         "elasticloadbalancing:DescribeListeners",
         "elasticloadbalancing:DescribeRules",

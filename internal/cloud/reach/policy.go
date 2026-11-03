@@ -33,7 +33,10 @@ func Anywhere(f Family) string {
 
 // notGlobal is every range that is never reached from the internet: the IANA
 // special-purpose registries' ranges that are not globally reachable (RFC 6890 and its
-// updates). IPv6 outside 2000::/3 (global unicast) is not public.
+// updates). This goes beyond the user's list (RFC 1918, CGNAT, ULA): documentation,
+// benchmarking, 0.0.0.0/8, 240.0.0.0/4, multicast, and IPv6 outside 2000::/3 (global
+// unicast). The NAT64 well-known prefix 64:ff9b::/96 maps public IPv4 addresses, so it
+// counts as the internet.
 var notGlobal = MustParse(
 	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
 	"192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
@@ -41,7 +44,14 @@ var notGlobal = MustParse(
 ).Union(MustParse(
 	"::/3", "4000::/2", "8000::/1", // everything but 2000::/3 (ULA, link-local, multicast, loopback …)
 	"2001:db8::/32", "2001:2::/48", "2001:10::/28",
-))
+).Subtract(MustParse("64:ff9b::/96")))
+
+// Broadest VPN ranges accepted without allow_broad: a /8 (IPv4) or /16 (IPv6). A /0 is
+// never accepted: it would make the whole internet "the VPN".
+const (
+	broadestV4 = 8
+	broadestV6 = 16
+)
 
 // Policy is the reach rule with the operator's VPN ranges. The zero Policy has none.
 type Policy struct{ vpn Set }
@@ -52,15 +62,31 @@ func NewPolicy(vpn []netip.Prefix) Policy { return Policy{vpn: Prefixes(vpn...)}
 
 func (p Policy) trusted() Set { return p.vpn.Union(notGlobal) }
 
-// ParseVPN parses the config's vpn_cidrs.
-func ParseVPN(cidrs []string) ([]netip.Prefix, error) {
+// VPN returns the operator's VPN ranges (for the start-up log).
+func (p Policy) VPN() []netip.Prefix { return p.vpn.CIDRs() }
+
+// ParseVPN parses the config's vpn_cidrs. A /0 is refused; a range wider than /8 (IPv4)
+// or /16 (IPv6) is refused unless allowBroad: a mistyped mask would otherwise hide
+// a large part of the internet.
+func ParseVPN(cidrs []string, allowBroad bool) ([]netip.Prefix, error) {
 	out := make([]netip.Prefix, 0, len(cidrs))
 	for _, c := range cidrs {
 		p, err := netip.ParsePrefix(strings.TrimSpace(c))
 		if err != nil {
 			return nil, fmt.Errorf("vpn_cidrs: %q: %w", c, err)
 		}
-		out = append(out, p.Masked())
+		p = p.Masked()
+		if p.Bits() == 0 {
+			return nil, fmt.Errorf("vpn_cidrs: %q: a /0 would count the whole internet as the VPN", c)
+		}
+		broadest := broadestV4
+		if !p.Addr().Is4() {
+			broadest = broadestV6
+		}
+		if p.Bits() < broadest && !allowBroad {
+			return nil, fmt.Errorf("vpn_cidrs: %q is wider than /%d (set cloud.allow_broad to accept it)", c, broadest)
+		}
+		out = append(out, p)
 	}
 	return out, nil
 }
@@ -76,15 +102,25 @@ func (p Policy) Exposed(allowed Set) Set {
 }
 
 // Describe names a set of internet addresses for evidence: "0.0.0.0/0" or "::/0" when it
-// is all of the family's internet, otherwise its prefixes, at most max of them
-// ("+N more" after).
+// is all of the family's internet ("0.0.0.0/0 except vpn_cidrs …" when the VPN ranges
+// carve some of it out), otherwise its prefixes, at most max of them ("+N more" after).
 func (p Policy) Describe(s Set, max int) string {
 	for _, f := range []Family{V4, V6} {
-		if in := p.Internet(f); !in.IsEmpty() && s.Equal(in) {
+		public := All(f).Subtract(notGlobal)
+		if s.Equal(public) {
 			return Anywhere(f)
 		}
+		if carved := public.Intersect(p.vpn); !carved.IsEmpty() && s.Equal(public.Subtract(carved)) {
+			return Anywhere(f) + " except vpn_cidrs " + list(carved.CIDRs(), max)
+		}
 	}
-	cidrs := s.CIDRs()
+	if s.IsEmpty() {
+		return "nowhere"
+	}
+	return list(s.CIDRs(), max)
+}
+
+func list(cidrs []netip.Prefix, max int) string {
 	parts := make([]string, 0, min(len(cidrs), max)+1)
 	for i, c := range cidrs {
 		if i == max {
@@ -92,9 +128,6 @@ func (p Policy) Describe(s Set, max int) string {
 			break
 		}
 		parts = append(parts, c.String())
-	}
-	if len(parts) == 0 {
-		return "nowhere"
 	}
 	return strings.Join(parts, ", ")
 }

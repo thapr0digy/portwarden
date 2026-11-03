@@ -45,8 +45,17 @@ type HostData struct {
 	RouteTables []ec2types.RouteTable
 	RoutesErr   string
 	LBs         RegionLBs
+	// PrefixLists are the managed prefix lists the security groups name, by id; a list
+	// missing here, or with Err set, was not read (rules naming it are undetermined).
+	PrefixLists map[string]PrefixList
 	// Policy is the reach rule (the operator's VPN ranges).
 	Policy reach.Policy
+}
+
+// PrefixList is a managed prefix list's entries, or why they could not be read.
+type PrefixList struct {
+	CIDRs []string
+	Err   string
 }
 
 // RegionLBs is the region's internet-facing load balancers.
@@ -89,7 +98,7 @@ func Evaluate(d HostData, ports []cloud.Port) []cloud.Verdict {
 func evaluatePort(d HostData, p cloud.Port) cloud.Verdict {
 	v := cloud.Verdict{Key: p.Key, Complete: true}
 	direct, directWhy := directPath(d, p)
-	lb := lbPaths(d, p)
+	lb, lbMaybe := lbPaths(d, p)
 	undecided := false
 	switch {
 	case direct == open && p.AgentLevel >= cloud.LevelHostFirewallOpen:
@@ -103,10 +112,14 @@ func evaluatePort(d HostData, p cloud.Port) cloud.Verdict {
 	default:
 		v.Evidence = append(v.Evidence, directWhy...)
 	}
-	if len(lb) > 0 && p.AgentLevel >= cloud.LevelBound {
+	switch {
+	case len(lb) > 0 && p.AgentLevel >= cloud.LevelBound:
 		v.Open = true
 		v.Evidence = append(v.Evidence, lb...)
-	} else if len(lb) == 0 {
+	case len(lbMaybe) > 0 && p.AgentLevel >= cloud.LevelBound:
+		undecided = true
+		v.Evidence = append(v.Evidence, lbMaybe...)
+	case len(lb) == 0 && len(lbMaybe) == 0:
 		v.Evidence = append(v.Evidence, fmt.Sprintf("cloud: no internet-facing load balancer forwards to %s:%d", deref(d.Instance.InstanceId), p.Port))
 	}
 	if undecided && !v.Open {
@@ -265,12 +278,12 @@ func parsePrefix(cidr string) (netip.Prefix, error) {
 	return p.Masked(), err
 }
 
-// lbPaths returns one evidence line per internet-facing load balancer path to the port.
-func lbPaths(d HostData, p cloud.Port) []string {
+// lbPaths returns one evidence line per internet-facing load balancer path to the port,
+// and one per path whose security groups only unread sources might open (undetermined).
+func lbPaths(d HostData, p cloud.Port) (out, maybe []string) {
 	inst := d.Instance
 	id := deref(inst.InstanceId)
 	privIPs := instancePrivateIPs(inst)
-	var out []string
 	for _, lb := range d.LBs.V2 {
 		if lb.LB.Scheme != elbv2types.LoadBalancerSchemeEnumInternetFacing {
 			continue
@@ -297,17 +310,17 @@ func lbPaths(d HostData, p cloud.Port) []string {
 					if tport != p.Port {
 						continue
 					}
+					res := open
 					if len(lb.LB.SecurityGroups) > 0 {
-						if !sgExposes(d, lb.LB.SecurityGroups, lbFrontProto(l.Listener.Protocol), lport) {
-							continue
-						}
+						res = sgExposes(d, lb.LB.SecurityGroups, lbFrontProto(l.Listener.Protocol), lport)
 					}
 					health := ""
 					if t.TargetHealth != nil && t.TargetHealth.State != "" {
 						health = " (" + string(t.TargetHealth.State) + ")"
 					}
-					out = append(out, fmt.Sprintf("cloud: lb %s (internet-facing) listener %s:%d -> tg %s -> %s:%d%s",
-						deref(lb.LB.LoadBalancerName), l.Listener.Protocol, lport, deref(tg.TG.TargetGroupName), tid, tport, health))
+					line := fmt.Sprintf("lb %s (internet-facing) listener %s:%d -> tg %s -> %s:%d%s",
+						deref(lb.LB.LoadBalancerName), l.Listener.Protocol, lport, deref(tg.TG.TargetGroupName), tid, tport, health)
+					out, maybe = addLBPath(out, maybe, res, line)
 				}
 			}
 		}
@@ -321,16 +334,25 @@ func lbPaths(d HostData, p cloud.Port) []string {
 			if l == nil || int(deref32(l.InstancePort)) != p.Port || p.Proto != "tcp" {
 				continue
 			}
+			res := open
 			if len(lb.SecurityGroups) > 0 {
-				if !sgExposes(d, lb.SecurityGroups, "tcp", int(l.LoadBalancerPort)) {
-					continue
-				}
+				res = sgExposes(d, lb.SecurityGroups, "tcp", int(l.LoadBalancerPort))
 			}
-			out = append(out, fmt.Sprintf("cloud: classic elb %s (internet-facing) listener %s:%d -> %s:%d",
+			out, maybe = addLBPath(out, maybe, res, fmt.Sprintf("classic elb %s (internet-facing) listener %s:%d -> %s:%d",
 				deref(lb.LoadBalancerName), deref(l.Protocol), l.LoadBalancerPort, id, p.Port))
 		}
 	}
-	return out
+	return out, maybe
+}
+
+func addLBPath(out, maybe []string, res outcome, line string) ([]string, []string) {
+	switch res {
+	case open:
+		out = append(out, "cloud: "+line)
+	case undetermined:
+		maybe = append(maybe, cloud.UndeterminedEvidence+" ("+line+": its security groups allow the port only from sources not read)")
+	}
+	return out, maybe
 }
 
 func forwardTargets(actions []elbv2types.Action) []string {

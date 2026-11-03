@@ -21,6 +21,7 @@ func instance(public bool) ec2types.Instance {
 	inst := ec2types.Instance{
 		InstanceId:       awssdk.String(instanceID),
 		SubnetId:         awssdk.String("subnet-1"),
+		VpcId:            awssdk.String("vpc-1"),
 		PrivateIpAddress: awssdk.String("10.0.1.5"),
 		SecurityGroups:   []ec2types.GroupIdentifier{{GroupId: awssdk.String("sg-web")}},
 	}
@@ -112,6 +113,8 @@ func route(dest, target string) ec2types.Route {
 		r.NetworkInterfaceId = awssdk.String(target)
 	case strings.HasPrefix(target, "tgw-"):
 		r.TransitGatewayId = awssdk.String(target)
+	case strings.HasPrefix(target, "pcx-"):
+		r.VpcPeeringConnectionId = awssdk.String(target)
 	default:
 		r.GatewayId = awssdk.String(target) // igw-, vpce-, local, vgw-
 	}
@@ -209,19 +212,18 @@ func TestDirectPath(t *testing.T) {
 				entry(100, "-1", 0, 0, "0.0.0.0/0", true),
 			}}}},
 			port(443, 3), false, "acl-6 rule 10 denies tcp/443 from"},
-		{"nacl outbound blocks tcp replies", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
+		{"nacl outbound lets no reply out on any port", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
 			"sg-web": sg("sg-web", perm("tcp", 443, 443, "0.0.0.0/0"))},
 			NACLs: map[string]ec2types.NetworkAcl{"subnet-1": {NetworkAclId: awssdk.String("acl-7"), Entries: []ec2types.NetworkAclEntry{
 				entry(100, "-1", 0, 0, "0.0.0.0/0", true),
-				egressPorts(100, "6", 0, 1023, "0.0.0.0/0", true),
+				egressPorts(100, "17", 0, 65535, "0.0.0.0/0", true),
 				egress(32767, "0.0.0.0/0", false),
 			}}}},
-			port(443, 3), false, "acl-7 outbound rules let no reply from tcp/443 reach the internet's ephemeral ports (1024-65535)"},
-		{"nacl outbound allows some ephemeral ports", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
+			port(443, 3), false, "acl-7 outbound rules let no reply from tcp/443 out to the internet on any port (1-65535)"},
+		{"nacl outbound allows every ephemeral port", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
 			"sg-web": sg("sg-web", perm("tcp", 443, 443, "0.0.0.0/0"))},
 			NACLs: map[string]ec2types.NetworkAcl{"subnet-1": {NetworkAclId: awssdk.String("acl-8"), Entries: []ec2types.NetworkAclEntry{
 				entry(100, "-1", 0, 0, "0.0.0.0/0", true),
-				egressPorts(90, "6", 1024, 32767, "0.0.0.0/0", false),
 				egressPorts(100, "6", 1024, 65535, "0.0.0.0/0", true),
 				egress(32767, "0.0.0.0/0", false),
 			}}}},
@@ -243,7 +245,16 @@ func TestDirectPath(t *testing.T) {
 		{"no route to an internet gateway", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
 			"sg-web": sg("sg-web", perm("tcp", 443, 443, "0.0.0.0/0"))}, NACLs: defaultNACL(),
 			RouteTables: []ec2types.RouteTable{routeTable("rtb-priv", "subnet-1", route("10.0.0.0/16", "local"), route("0.0.0.0/0", "nat-1"))}},
-			port(443, 3), false, "rtb-priv has no route to an internet gateway"},
+			port(443, 3), false, "rtb-priv has no route to an internet gateway for the addresses allowed in (0.0.0.0/0)"},
+		// The user's rule in the evidence: the closed line names the ranges that got that far.
+		{"no route, evidence names the allowed range", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
+			"sg-web": sg("sg-web", perm("tcp", 22, 22, "81.2.69.160/32"))}, NACLs: defaultNACL(),
+			RouteTables: []ec2types.RouteTable{routeTable("rtb-priv", "subnet-1", route("0.0.0.0/0", "nat-1"))}},
+			port(22, 3), false, "rtb-priv has no route to an internet gateway for the addresses allowed in (81.2.69.160/32)"},
+		{"peering route is not the internet", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
+			"sg-web": sg("sg-web", perm("tcp", 443, 443, "0.0.0.0/0"))}, NACLs: defaultNACL(),
+			RouteTables: []ec2types.RouteTable{routeTable("rtb-priv", "subnet-1", route("0.0.0.0/0", "pcx-1"))}},
+			port(443, 3), false, "rtb-priv has no route"},
 		{"explicit association beats the main table", HostData{Instance: instance(true), SecurityGroups: map[string]ec2types.SecurityGroup{
 			"sg-web": sg("sg-web", perm("tcp", 443, 443, "0.0.0.0/0"))}, NACLs: defaultNACL(),
 			RouteTables: append(publicRoutes(), routeTable("rtb-priv", "subnet-1", route("10.0.0.0/16", "local")))},
@@ -327,14 +338,66 @@ func TestDirectPathUndetermined(t *testing.T) {
 		{"prefix-list route to an igw", func(d *HostData) {
 			d.RouteTables = []ec2types.RouteTable{routeTable("rtb-1", "subnet-1", route("10.0.0.0/16", "local"),
 				ec2types.Route{DestinationPrefixListId: awssdk.String("pl-1"), GatewayId: awssdk.String("igw-1"), State: ec2types.RouteStateActive})}
-		}, "rtb-1 routes a prefix list to igw-1"},
+		}, "rtb-1 routes prefix list pl-1 to igw-1"},
+		// Blocker 1 (m533): a CIDR default route must not hide a prefix-list route to an igw.
+		{"prefix-list route to an igw beside a default route to nat", func(d *HostData) {
+			d.SecurityGroups["sg-web"] = sg("sg-web", perm("tcp", 443, 443, "81.2.69.160/28"))
+			d.RouteTables = []ec2types.RouteTable{routeTable("rtb-1", "subnet-1", route("0.0.0.0/0", "nat-1"),
+				ec2types.Route{DestinationPrefixListId: awssdk.String("pl-office"), GatewayId: awssdk.String("igw-1"), State: ec2types.RouteStateActive})}
+		}, "rtb-1 routes prefix list pl-office to igw-1"},
+		{"prefix-list route to an appliance beside a default route to nat", func(d *HostData) {
+			d.RouteTables = []ec2types.RouteTable{routeTable("rtb-1", "subnet-1", route("0.0.0.0/0", "nat-1"),
+				ec2types.Route{DestinationPrefixListId: awssdk.String("pl-office"), NetworkInterfaceId: awssdk.String("eni-fw"), State: ec2types.RouteStateActive})}
+		}, "prefix list pl-office to eni-fw"},
+		// Should-fix 4: a VPN gateway or an unknown gateway may forward to the internet.
+		{"default route to a vpn gateway", func(d *HostData) {
+			d.RouteTables = []ec2types.RouteTable{routeTable("rtb-1", "subnet-1", route("0.0.0.0/0", "vgw-1"))}
+		}, "to vgw-1"},
+		{"default route to an unknown gateway", func(d *HostData) {
+			d.RouteTables = []ec2types.RouteTable{routeTable("rtb-1", "subnet-1", route("0.0.0.0/0", "xgw-1"))}
+		}, "to xgw-1"},
+		{"route destination that does not parse", func(d *HostData) {
+			d.RouteTables = []ec2types.RouteTable{routeTable("rtb-1", "subnet-1", route("0.0.0.0/0", "nat-1"), route("bogus", "igw-1"))}
+		}, `routes "bogus" to igw-1, which does not parse`},
+		// Should-fix 3: replies allowed only to some client ports are undetermined.
+		{"nacl outbound allows only low client ports", func(d *HostData) {
+			d.NACLs = map[string]ec2types.NetworkAcl{"subnet-1": {NetworkAclId: awssdk.String("acl-7"), Entries: []ec2types.NetworkAclEntry{
+				entry(100, "-1", 0, 0, "0.0.0.0/0", true),
+				egressPorts(100, "6", 0, 1023, "0.0.0.0/0", true),
+				egress(32767, "0.0.0.0/0", false)}}}
+		}, "acl-7 outbound rules let replies from tcp/443 out to 0.0.0.0/0 on some client ports only"},
+		{"nacl outbound allows part of the ephemeral range", func(d *HostData) {
+			d.NACLs = map[string]ec2types.NetworkAcl{"subnet-1": {NetworkAclId: awssdk.String("acl-8"), Entries: []ec2types.NetworkAclEntry{
+				entry(100, "-1", 0, 0, "0.0.0.0/0", true),
+				egressPorts(90, "6", 1024, 32767, "0.0.0.0/0", false),
+				egressPorts(100, "6", 1024, 65535, "0.0.0.0/0", true),
+				egress(32767, "0.0.0.0/0", false)}}}
+		}, "on some client ports only"},
+		// Nits: a CIDR that does not parse, an association not associated, no VPC id.
+		{"sg range that does not parse", func(d *HostData) {
+			d.SecurityGroups["sg-web"] = sg("sg-web", perm("tcp", 443, 443, "10.0.0.0/8", "not-a-cidr"))
+		}, `allows tcp/443 from sources not judged ("not-a-cidr" does not parse)`},
+		{"nacl entry that does not parse", func(d *HostData) {
+			d.NACLs = map[string]ec2types.NetworkAcl{"subnet-1": {NetworkAclId: awssdk.String("acl-x"), Entries: []ec2types.NetworkAclEntry{
+				entry(50, "-1", 0, 0, "bogus", false), entry(100, "-1", 0, 0, "0.0.0.0/0", true)}}}
+		}, `acl-x inbound: rule 50: "bogus" does not parse`},
+		{"explicit association being removed falls back to the main table", func(d *HostData) {
+			gone := routeTable("rtb-old", "subnet-1", route("0.0.0.0/0", "igw-1"))
+			gone.Associations[0].AssociationState = &ec2types.RouteTableAssociationState{State: ec2types.RouteTableAssociationStateCodeDisassociating}
+			d.RouteTables = []ec2types.RouteTable{gone, routeTable("rtb-main", "", route("0.0.0.0/0", "vpce-1"))}
+		}, "rtb-main routes 0.0.0.0/0 to vpce-1"},
+		{"no vpc id: the main table cannot be found", func(d *HostData) {
+			d.Instance.VpcId = nil
+		}, "no route table associated with subnet-1 and no VPC id"},
+		// The undetermined line keeps the security-group and ACL evidence.
+		{"undetermined keeps sg and acl evidence", func(d *HostData) { d.RoutesErr = "denied" }, "cloud: sg-web (web) allows tcp/443 from 0.0.0.0/0\ncloud: acl-1 rule 100 allows tcp/443 from 0.0.0.0/0\ncloud:undetermined"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := base()
 			tt.mod(&d)
 			v := Evaluate(withAWSDefaults(d), []cloud.Port{port(443, 3)})[0]
-			if v.Open || v.Complete || !strings.Contains(strings.Join(v.Evidence, "\n"), tt.evidence) {
+			if v.Open || v.Complete || !strings.Contains(strings.Join(v.Evidence, "\n"), strings.ReplaceAll(tt.evidence, `\n`, "\n")) {
 				t.Fatalf("open=%v complete=%v evidence=%q", v.Open, v.Complete, v.Evidence)
 			}
 		})
@@ -433,7 +496,7 @@ func TestClassicELB(t *testing.T) {
 // Each interface is judged with its own subnet's ACL: a private interface in a denying
 // subnet does not hide the public one.
 func TestPerInterface(t *testing.T) {
-	inst := ec2types.Instance{InstanceId: awssdk.String(instanceID), SubnetId: awssdk.String("subnet-a"),
+	inst := ec2types.Instance{InstanceId: awssdk.String(instanceID), SubnetId: awssdk.String("subnet-a"), VpcId: awssdk.String("vpc-1"),
 		NetworkInterfaces: []ec2types.InstanceNetworkInterface{
 			{NetworkInterfaceId: awssdk.String("eni-a"), SubnetId: awssdk.String("subnet-a"),
 				Association: &ec2types.InstanceNetworkInterfaceAssociation{PublicIp: awssdk.String("54.1.2.3")},
@@ -466,5 +529,77 @@ func TestNACLFamiliesSeparate(t *testing.T) {
 	d.SecurityGroups["sg-web"] = sg("sg-web", perm("tcp", 22, 22, "::/0"))
 	if v := Evaluate(d, []cloud.Port{port(22, 3)})[0]; v.Open {
 		t.Fatalf("::/0 opened an ipv4-only instance: %+v", v)
+	}
+}
+
+func plPerm(proto string, from, to int32, lists ...string) ec2types.IpPermission {
+	p := perm(proto, from, to)
+	for _, l := range lists {
+		p.PrefixListIds = append(p.PrefixListIds, ec2types.PrefixListId{PrefixListId: awssdk.String(l)})
+	}
+	return p
+}
+
+// Blocker 2 (m533): security-group rules naming a managed prefix list are judged by its
+// entries under the reach rule; a list not read is undetermined, never closed.
+func TestSecurityGroupPrefixLists(t *testing.T) {
+	base := func() HostData {
+		return HostData{Instance: instance(true), NACLs: defaultNACL(), SecurityGroups: map[string]ec2types.SecurityGroup{
+			"sg-web": sg("sg-web", plPerm("tcp", 22, 22, "pl-office"))}}
+	}
+	tests := []struct {
+		name           string
+		lists          map[string]PrefixList
+		policy         reach.Policy
+		open, complete bool
+		evidence       string
+	}{
+		{"public office ranges are the internet", map[string]PrefixList{"pl-office": {CIDRs: []string{"81.2.69.160/28", "10.0.0.0/8"}}},
+			reach.Policy{}, true, true, "cloud: sg-web (web) allows tcp/22 from 81.2.69.160/28"},
+		{"office ranges listed in vpn_cidrs", map[string]PrefixList{"pl-office": {CIDRs: []string{"81.2.69.160/28"}}},
+			reach.NewPolicy([]netip.Prefix{netip.MustParsePrefix("81.2.69.160/28")}), false, true, "allowed only from private or VPN ranges"},
+		{"private-only list", map[string]PrefixList{"pl-office": {CIDRs: []string{"10.0.0.0/8"}}},
+			reach.Policy{}, false, true, "no security group allows tcp/22"},
+		{"list not readable", map[string]PrefixList{"pl-office": {Err: "UnauthorizedOperation"}},
+			reach.Policy{}, false, false, "prefix list pl-office not read: UnauthorizedOperation"},
+		{"aws-managed list not read", nil, reach.Policy{}, false, false, "prefix list pl-office not read"},
+		{"entry that does not parse", map[string]PrefixList{"pl-office": {CIDRs: []string{"bogus"}}},
+			reach.Policy{}, false, false, `"bogus" (in pl-office) does not parse`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := base()
+			d.PrefixLists, d.Policy = tt.lists, tt.policy
+			v := Evaluate(withAWSDefaults(d), []cloud.Port{port(22, 3)})[0]
+			if v.Open != tt.open || v.Complete != tt.complete || !strings.Contains(strings.Join(v.Evidence, "\n"), tt.evidence) {
+				t.Fatalf("open=%v complete=%v evidence=%q", v.Open, v.Complete, v.Evidence)
+			}
+		})
+	}
+	// An unread list beside a route table without an igw route is still closed: nothing
+	// it could hold gets back out.
+	d := base()
+	d.RouteTables = []ec2types.RouteTable{routeTable("rtb-priv", "subnet-1", route("0.0.0.0/0", "nat-1"))}
+	if v := Evaluate(withAWSDefaults(d), []cloud.Port{port(22, 3)})[0]; v.Open || !v.Complete {
+		t.Fatalf("unread list, no igw route: %+v", v)
+	}
+}
+
+// Load-balancer security groups: IPv6 sources count, and an unread prefix list leaves
+// the path undetermined.
+func TestLoadBalancerSecurityGroups(t *testing.T) {
+	d := v2Data(elbv2types.LoadBalancerSchemeEnumInternetFacing, instanceID, 8080, []string{"sg-alb"})
+	d.SecurityGroups["sg-alb"] = sg("sg-alb", perm("tcp", 443, 443, "10.0.0.0/8", "::/0"))
+	if v := Evaluate(d, []cloud.Port{port(8080, 2)})[0]; !v.Open {
+		t.Fatalf("ipv6-open lb: %+v", v)
+	}
+	d.SecurityGroups["sg-alb"] = sg("sg-alb", plPerm("tcp", 443, 443, "pl-cdn"))
+	v := Evaluate(d, []cloud.Port{port(8080, 2)})[0]
+	if v.Open || v.Complete || !strings.Contains(strings.Join(v.Evidence, "\n"), "cloud:undetermined (lb web-alb") {
+		t.Fatalf("lb with an unread prefix list: %+v", v)
+	}
+	d.PrefixLists = map[string]PrefixList{"pl-cdn": {CIDRs: []string{"130.176.0.0/16"}}}
+	if v := Evaluate(d, []cloud.Port{port(8080, 2)})[0]; !v.Open || !v.Complete {
+		t.Fatalf("lb with a read public prefix list: %+v", v)
 	}
 }

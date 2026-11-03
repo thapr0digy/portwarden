@@ -44,6 +44,8 @@ var responses = map[string]string{
         <ipRanges><item><cidrIp>203.0.113.0/24</cidrIp></item></ipRanges></item>
       <item><ipProtocol>tcp</ipProtocol><fromPort>8080</fromPort><toPort>8080</toPort>
         <groups><item><groupId>sg-alb</groupId></item></groups></item>
+      <item><ipProtocol>tcp</ipProtocol><fromPort>3389</fromPort><toPort>3389</toPort>
+        <prefixListIds><item><prefixListId>pl-office</prefixListId><description>office</description></item></prefixListIds></item>
     </ipPermissions>
   </item>
   <item><groupId>sg-alb</groupId><groupName>alb</groupName>
@@ -82,6 +84,13 @@ var responses = map[string]string{
   </item>
 </routeTableSet>
 </DescribeRouteTablesResponse>`,
+	"ec2:GetManagedPrefixListEntries": `<GetManagedPrefixListEntriesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+<requestId>r3c</requestId>
+<entrySet>
+  <item><cidr>81.2.69.160/28</cidr><description>office</description></item>
+  <item><cidr>10.20.0.0/16</cidr></item>
+</entrySet>
+</GetManagedPrefixListEntriesResponse>`,
 	"elbv2:DescribeLoadBalancers": `<DescribeLoadBalancersResponse xmlns="http://elasticloadbalancing.amazonaws.com/doc/2015-12-01/">
 <DescribeLoadBalancersResult><LoadBalancers>
   <member><LoadBalancerArn>arn:lb/web</LoadBalancerArn><LoadBalancerName>web-alb</LoadBalancerName><Scheme>internet-facing</Scheme>
@@ -139,6 +148,9 @@ type fakeAWS struct {
 	routes  string // the vpc-id filter value seen
 	// failRoutes answers DescribeRouteTables with UnauthorizedOperation (an M5 IAM policy).
 	failRoutes bool
+	// failPrefixLists does the same for GetManagedPrefixListEntries.
+	failPrefixLists bool
+	prefixList      string // the PrefixListId seen
 }
 
 func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -157,8 +169,11 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if action == "DescribeRouteTables" {
 		f.routes = r.Form.Get("Filter.1.Name") + "=" + r.Form.Get("Filter.1.Value.1")
 	}
+	if action == "GetManagedPrefixListEntries" {
+		f.prefixList = r.Form.Get("PrefixListId")
+	}
 	f.mu.Unlock()
-	if f.failRoutes && action == "DescribeRouteTables" {
+	if (f.failRoutes && action == "DescribeRouteTables") || (f.failPrefixLists && action == "GetManagedPrefixListEntries") {
 		w.WriteHeader(403)
 		_, _ = w.Write([]byte(`<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>not authorized</Message></Error></Errors><RequestID>x</RequestID></Response>`))
 		return
@@ -194,6 +209,7 @@ func TestProviderAgainstRecordedAPI(t *testing.T) {
 		{Key: "b", Proto: "tcp", Addr: "0.0.0.0", Port: 22, AgentLevel: 3},
 		{Key: "c", Proto: "tcp", Addr: "0.0.0.0", Port: 8080, AgentLevel: 2},
 		{Key: "d", Proto: "udp", Addr: "0.0.0.0", Port: 53, AgentLevel: 3},
+		{Key: "e", Proto: "tcp", Addr: "0.0.0.0", Port: 3389, AgentLevel: 3},
 	}
 	vs, err := p.Evaluate(context.Background(), host, ports)
 	if err != nil {
@@ -203,6 +219,7 @@ func TestProviderAgainstRecordedAPI(t *testing.T) {
 		"a": "cloud: sg-web (web) allows tcp/443 from 0.0.0.0/0",
 		"b": "cloud: classic elb legacy (internet-facing) listener TCP:2222 -> i-0abc:22",
 		"c": "cloud: lb web-alb (internet-facing) listener HTTP:80 -> tg web-tg -> i-0abc:8080 (healthy)",
+		"e": "cloud: sg-web (web) allows tcp/3389 from 81.2.69.160/28",
 	}
 	for _, v := range vs {
 		ev := strings.Join(v.Evidence, "\n")
@@ -220,9 +237,12 @@ func TestProviderAgainstRecordedAPI(t *testing.T) {
 	if fake.routes != "vpc-id=vpc-1" {
 		t.Errorf("route table filter %q", fake.routes)
 	}
+	if fake.prefixList != "pl-office" {
+		t.Errorf("prefix list read %q", fake.prefixList)
+	}
 	for _, c := range fake.calls {
 		action := c[strings.Index(c, ":")+1:]
-		if !strings.HasPrefix(action, "Describe") {
+		if !strings.HasPrefix(action, "Describe") && action != "GetManagedPrefixListEntries" {
 			t.Errorf("non-read-only call %s", c)
 		}
 	}
@@ -309,5 +329,28 @@ func TestHostIdentityValidated(t *testing.T) {
 		if _, err := p.Evaluate(context.Background(), h, nil); err == nil {
 			t.Errorf("%+v accepted", h)
 		}
+	}
+}
+
+// A prefix list that cannot be read (customer- or AWS-managed) does not fail the host: the
+// rule naming it is undetermined, the others are judged as usual.
+func TestPrefixListUnreadableIsUndetermined(t *testing.T) {
+	fake := &fakeAWS{failPrefixLists: true}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	cfg := awssdk.Config{Region: "eu-west-1", Credentials: credentials.NewStaticCredentialsProvider("AKIDTEST", "x", ""),
+		Retryer: func() awssdk.Retryer { return awssdk.NopRetryer{} }}
+	p := NewWithConfig(cfg, Options{Endpoint: srv.URL})
+	vs, err := p.Evaluate(context.Background(), cloud.Host{InstanceID: "i-0abc", Region: "eu-west-1"},
+		[]cloud.Port{{Key: "e", Proto: "tcp", Addr: "0.0.0.0", Port: 3389, AgentLevel: 3}, {Key: "a", Proto: "tcp", Addr: "0.0.0.0", Port: 443, AgentLevel: 3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := strings.Join(vs[0].Evidence, "\n")
+	if vs[0].Open || vs[0].Complete || !strings.Contains(ev, "prefix list pl-office not read") || !strings.Contains(ev, "UnauthorizedOperation") {
+		t.Fatalf("%+v", vs[0])
+	}
+	if !vs[1].Open || !vs[1].Complete {
+		t.Fatalf("other rules: %+v", vs[1])
 	}
 }

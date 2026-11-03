@@ -126,15 +126,25 @@ type CloudConfig struct {
 	// every source address a cloud rule allows as the internet unless it is private
 	// (RFC 1918, CGNAT, ULA and the other special-purpose ranges) or listed here.
 	VPNCIDRs []string `json:"vpn_cidrs"`
+	// AllowBroad accepts vpn_cidrs wider than /8 (IPv4) or /16 (IPv6); a /0 is never
+	// accepted.
+	AllowBroad bool `json:"allow_broad"`
 }
 
-// policy parses vpn_cidrs into the reach rule; a bad range is refused at start.
+// policy parses vpn_cidrs into the reach rule; a bad, /0 or (without allow_broad) too
+// broad range is refused at start, and the accepted ranges are logged.
 func (c CloudConfig) policy() (reach.Policy, error) {
-	vpn, err := reach.ParseVPN(c.VPNCIDRs)
+	vpn, err := reach.ParseVPN(c.VPNCIDRs, c.AllowBroad)
 	if err != nil {
 		return reach.Policy{}, fmt.Errorf("cloud.%w", err)
 	}
-	return reach.NewPolicy(vpn), nil
+	pol := reach.NewPolicy(vpn)
+	ranges := make([]string, 0, len(vpn))
+	for _, p := range pol.VPN() {
+		ranges = append(ranges, p.String())
+	}
+	slog.Info("cloud: reach rule: sources outside private ranges and vpn_cidrs count as the internet", "vpn_cidrs", ranges, "allow_broad", c.AllowBroad)
+	return pol, nil
 }
 
 func main() {

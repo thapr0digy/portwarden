@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -18,21 +19,21 @@ import (
 // PublishFunc sends one backend event.
 type PublishFunc func(ctx context.Context, subject, id string, msg proto.Message) error
 
-// Limits bound the checker's traffic.
+// Limits bound the checker's traffic and memory.
 type Limits struct {
 	// GlobalPerSecond probes per second in total (burst the same).
 	GlobalPerSecond float64
 	// PerHostPerMinute probes per minute per host (burst the same).
 	PerHostPerMinute float64
-	// Concurrency is the number of listeners probed at once.
+	// Concurrency is the number of workers (listeners probed at once).
 	Concurrency int
-	// Reprobe: a listener seen again (in a snapshot) is re-probed only after this long.
-	Reprobe time.Duration
-	// MinGap: an exposure change re-probes a listener at most this often.
+	// Queue is how many listeners may wait for a worker; more are dropped and counted.
+	Queue int
+	// MinGap: one listener is probed at most this often.
 	MinGap time.Duration
 }
 
-// Verifier schedules probes for listeners from exposure events and snapshots.
+// Verifier runs probe requests on a fixed worker pool.
 type Verifier struct {
 	Scope   Scope
 	Prober  Probe
@@ -42,20 +43,30 @@ type Verifier struct {
 	Limits  Limits
 	Now     func() time.Time
 
-	global  *rate.Limiter
-	sem     chan struct{}
-	mu      sync.Mutex
-	perHost map[string]*rate.Limiter
-	last    map[string]time.Time // host/key -> last probe start
-	busy    map[string]bool
-	wg      sync.WaitGroup
+	// Dropped counts requests refused because the queue was full.
+	Dropped atomic.Uint64
+
+	global    *rate.Limiter
+	queue     chan job
+	mu        sync.Mutex
+	perHost   map[string]*rate.Limiter
+	last      map[string]time.Time // host/key -> last accepted request
+	busy      map[string]bool
+	lastPrune time.Time
+	pending   sync.WaitGroup
+}
+
+type job struct {
+	host    string
+	l       *asmv1.Listener
+	targets []Target
 }
 
 // Probe runs one probe (Prober.Probe; a stub in tests).
 type Probe func(ctx context.Context, t Target) Result
 
-// New returns a verifier with limits defaulted (5/s global, 30/min per host, 16 at once,
-// reprobe 24 h, min gap 30 s).
+// New returns a verifier with limits defaulted (5/s global, 30/min per host, 16 workers,
+// queue 1000, min gap 30 s). Start runs the workers.
 func New(scope Scope, probe Probe, publish PublishFunc, runID, checker string, l Limits) *Verifier {
 	if l.GlobalPerSecond <= 0 {
 		l.GlobalPerSecond = 5
@@ -66,32 +77,39 @@ func New(scope Scope, probe Probe, publish PublishFunc, runID, checker string, l
 	if l.Concurrency <= 0 {
 		l.Concurrency = 16
 	}
-	if l.Reprobe <= 0 {
-		l.Reprobe = 24 * time.Hour
+	if l.Queue <= 0 {
+		l.Queue = 1000
 	}
 	if l.MinGap <= 0 {
 		l.MinGap = 30 * time.Second
 	}
 	return &Verifier{Scope: scope, Prober: probe, Publish: publish, RunID: runID, Checker: checker, Limits: l,
 		global:  rate.NewLimiter(rate.Limit(l.GlobalPerSecond), max(1, int(l.GlobalPerSecond))),
-		sem:     make(chan struct{}, l.Concurrency),
+		queue:   make(chan job, l.Queue),
 		perHost: map[string]*rate.Limiter{}, last: map[string]time.Time{}, busy: map[string]bool{}}
 }
 
-// Exposure schedules a probe for an exposure.changed event (agent or cloud).
-func (v *Verifier) Exposure(ctx context.Context, host string, ev *asmv1.ExposureEvent) {
-	v.schedule(ctx, host, ev.GetListener(), int(ev.GetExposure().GetLevel()), ev.GetExposure().GetEvidence(), ev.GetHost(), v.Limits.MinGap)
-}
-
-// Snapshot schedules probes for a snapshot's listeners not probed within Reprobe.
-func (v *Verifier) Snapshot(ctx context.Context, host string, s *asmv1.Snapshot) {
-	for _, l := range s.GetListeners() {
-		v.schedule(ctx, host, l.GetListener(), int(l.GetExposure().GetLevel()), l.GetExposure().GetEvidence(), s.GetHost(), v.Limits.Reprobe)
+// Start runs Concurrency workers until ctx ends; the returned func waits for them.
+func (v *Verifier) Start(ctx context.Context) (wait func()) {
+	var wg sync.WaitGroup
+	for range v.Limits.Concurrency {
+		wg.Go(func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case j := <-v.queue:
+					v.probeListener(ctx, j)
+					v.done(j)
+				}
+			}
+		})
 	}
+	return wg.Wait
 }
 
-// Wait waits for the probes in flight (tests, shutdown).
-func (v *Verifier) Wait() { v.wg.Wait() }
+// Wait waits until every accepted request has been handled (tests).
+func (v *Verifier) Wait() { v.pending.Wait() }
 
 func (v *Verifier) now() time.Time {
 	if v.Now != nil {
@@ -100,48 +118,87 @@ func (v *Verifier) now() time.Time {
 	return time.Now()
 }
 
-func (v *Verifier) schedule(ctx context.Context, host string, l *asmv1.Listener, lvl int, evidence []string, h *asmv1.HostInfo, gap time.Duration) {
-	targets, why := v.Scope.Targets(host, l, lvl, evidence, h)
-	key := host + "/" + l.GetKey()
+// Request queues a probe request. It never blocks: a listener probed within MinGap or
+// still queued is skipped, and a full queue drops the request (counted).
+func (v *Verifier) Request(host string, r *asmv1.ProbeRequest) {
+	targets, why := v.Scope.Targets(host, r)
+	l := r.GetListener()
 	if len(targets) == 0 {
-		slog.Debug("not probing", "host", host, "listener", l.GetKey(), "why", why)
+		slog.Info("not probing", "host", host, "listener", l.GetKey(), "why", why)
 		return
 	}
+	key := host + "/" + l.GetKey()
+	now := v.now()
 	v.mu.Lock()
-	if v.busy[key] || (!v.last[key].IsZero() && v.now().Sub(v.last[key]) < gap) {
+	v.pruneLocked(now)
+	if v.busy[key] || (!v.last[key].IsZero() && now.Sub(v.last[key]) < v.Limits.MinGap) {
 		v.mu.Unlock()
 		return
 	}
-	v.busy[key], v.last[key] = true, v.now()
+	v.busy[key], v.last[key] = true, now
+	v.pending.Add(1)
+	v.mu.Unlock()
+	select {
+	case v.queue <- job{host: host, l: l, targets: targets}:
+	default:
+		n := v.Dropped.Add(1)
+		if n == 1 || n%100 == 0 {
+			slog.Warn("probe queue full; request dropped", "host", host, "listener", l.GetKey(), "dropped_total", n)
+		}
+		v.mu.Lock()
+		delete(v.last, key) // let the next request for it through
+		v.mu.Unlock()
+		v.done(job{host: host, l: l})
+	}
+}
+
+func (v *Verifier) done(j job) {
+	v.mu.Lock()
+	delete(v.busy, j.host+"/"+j.l.GetKey())
+	v.mu.Unlock()
+	v.pending.Done()
+}
+
+// pruneLocked forgets min-gap entries and per-host limiters not used for an hour, so
+// memory stays bounded by recent activity.
+func (v *Verifier) pruneLocked(now time.Time) {
+	if now.Sub(v.lastPrune) < time.Minute {
+		return
+	}
+	v.lastPrune = now
+	horizon := max(time.Hour, v.Limits.MinGap)
+	hosts := map[string]bool{}
+	for k, at := range v.last {
+		if now.Sub(at) > horizon && !v.busy[k] {
+			delete(v.last, k)
+			continue
+		}
+		hosts[k[:strings.IndexByte(k, '/')]] = true
+	}
+	for h := range v.perHost {
+		if !hosts[h] {
+			delete(v.perHost, h)
+		}
+	}
+}
+
+func (v *Verifier) hostLimiter(host string) *rate.Limiter {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	lim, ok := v.perHost[host]
 	if !ok {
 		lim = rate.NewLimiter(rate.Limit(v.Limits.PerHostPerMinute/60), max(1, int(v.Limits.PerHostPerMinute)))
 		v.perHost[host] = lim
 	}
-	v.mu.Unlock()
-	v.wg.Add(1)
-	go func() {
-		defer v.wg.Done()
-		defer func() {
-			v.mu.Lock()
-			delete(v.busy, key)
-			v.mu.Unlock()
-		}()
-		select {
-		case v.sem <- struct{}{}:
-		case <-ctx.Done():
-			return
-		}
-		defer func() { <-v.sem }()
-		v.probeListener(ctx, host, l, targets, lim)
-	}()
+	return lim
 }
 
 // probeListener probes every target of one listener and publishes one result: the first
 // confirmed target, else a no_response one, else the first unreachable one.
-func (v *Verifier) probeListener(ctx context.Context, host string, l *asmv1.Listener, targets []Target, lim *rate.Limiter) {
+func (v *Verifier) probeListener(ctx context.Context, j job) {
+	lim := v.hostLimiter(j.host)
 	var results []Result
-	for _, t := range targets {
+	for _, t := range j.targets {
 		if err := v.global.Wait(ctx); err != nil {
 			return
 		}
@@ -172,9 +229,9 @@ func (v *Verifier) probeListener(ctx context.Context, host string, l *asmv1.List
 	}
 	id := bus.NewEventID()
 	ev := &asmv1.ExposureConfirmation{
-		EventId: id, HostId: host, RunId: v.RunID, ObservedAt: timestamppb.New(v.now()), Listener: l,
+		EventId: id, HostId: j.host, RunId: v.RunID, ObservedAt: timestamppb.New(v.now()), Listener: j.l,
 		Result: best.Result, Target: best.Target.String(), Probe: best.Probe, Banner: best.Banner, Detail: detail,
-		RttMs: uint32(best.RTT.Milliseconds()), Checker: v.Checker, Origin: "verifier",
+		RttMs: uint32(best.RTT.Milliseconds()), Checker: v.Checker, Origin: bus.OriginVerifier,
 	}
 	if best.Result == ResultConfirmed {
 		evd := "probe: " + best.Probe + " " + best.Target.String() + " connected"
@@ -183,19 +240,12 @@ func (v *Verifier) probeListener(ctx context.Context, host string, l *asmv1.List
 		}
 		ev.Exposure = &asmv1.Exposure{Level: asmv1.ExposureLevel_EXPOSURE_CONFIRMED, Evidence: []string{evd}}
 	}
-	slog.Info("probed", "host", host, "listener", l.GetKey(), "target", ev.GetTarget(), "result", ev.GetResult(),
+	slog.Info("probed", "host", j.host, "listener", j.l.GetKey(), "target", ev.GetTarget(), "result", ev.GetResult(),
 		"probe", ev.GetProbe(), "detail", ev.GetDetail())
-	if err := v.Publish(ctx, bus.Subject(host, bus.KindExposureConfirmed), id, ev); err != nil {
-		slog.Warn("publish probe result failed", "host", host, "listener", l.GetKey(), "err", err)
+	if err := v.Publish(ctx, bus.VerifierSubject(j.host), id, ev); err != nil {
+		slog.Warn("publish probe result failed", "host", j.host, "listener", j.l.GetKey(), "err", err)
 		v.mu.Lock()
-		delete(v.last, host+"/"+l.GetKey()) // let the next event retry it
+		delete(v.last, j.host+"/"+j.l.GetKey()) // let the next request retry it
 		v.mu.Unlock()
 	}
-}
-
-// Forget drops a closed listener's probe history.
-func (v *Verifier) Forget(host, key string) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	delete(v.last, host+"/"+key)
 }

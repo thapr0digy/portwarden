@@ -69,7 +69,7 @@ func (p *Prober) tcp(ctx context.Context, t Target) Result {
 	n, _ := conn.Read(buf)
 	if n == 0 && p.HTTPPorts[t.Port] {
 		r.Probe = "http-head"
-		req := fmt.Sprintf("HEAD / HTTP/1.0\r\nHost: %s\r\nUser-Agent: %s\r\nConnection: close\r\n\r\n", t.Addr, p.UserAgent)
+		req := fmt.Sprintf("HEAD / HTTP/1.0\r\nHost: %s\r\nUser-Agent: %s\r\nConnection: close\r\n\r\n", hostHeader(t), p.UserAgent)
 		_ = conn.SetDeadline(time.Now().Add(p.BannerWait))
 		if _, err := conn.Write([]byte(req)); err == nil {
 			line, _ := bufio.NewReaderSize(conn, p.MaxBanner).ReadSlice('\n')
@@ -192,4 +192,12 @@ func Sanitize(b []byte) string {
 		}
 	}
 	return s.String()
+}
+
+// hostHeader is the Host header value: an IPv6 address in brackets.
+func hostHeader(t Target) string {
+	if t.Addr.Is6() {
+		return "[" + t.Addr.String() + "]"
+	}
+	return t.Addr.String()
 }

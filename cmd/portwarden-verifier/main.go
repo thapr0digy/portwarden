@@ -1,7 +1,8 @@
 // portwarden-verifier is the outside checker: run it on a machine outside the servers'
 // networks (fixed source addresses with a clear reverse DNS name, design §9). It probes
-// level ≥ bound listeners on inventory addresses inside its allowlist and publishes
-// asm.<host>.exposure.confirmed. See README "Backend".
+// what the inventory requests (pwb.probe.<host>.request, built from stored state), on
+// addresses inside its allowlist (non-public ones only when listed for the host), and
+// publishes pwb.verifier.<host>.exposure. See README "Backend".
 package main
 
 import (
@@ -40,6 +41,7 @@ type Config struct {
 		GlobalPerSecond  float64 `json:"global_per_second"`
 		PerHostPerMinute float64 `json:"per_host_per_minute"`
 		Concurrency      int     `json:"concurrency"`
+		Queue            int     `json:"queue"`
 	} `json:"rate"`
 	Timeouts struct {
 		Connect svc.Duration `json:"connect"`
@@ -47,7 +49,6 @@ type Config struct {
 	} `json:"timeouts"`
 	HTTPPorts []uint16     `json:"http_ports"`
 	UserAgent string       `json:"user_agent"`
-	Reprobe   svc.Duration `json:"reprobe"`
 	MinGap    svc.Duration `json:"min_gap"`
 }
 
@@ -98,40 +99,32 @@ func run(path string) error {
 	pub := bus.NewPublisher(js, "verifier")
 	v := verifier.New(scope, prober.Probe, pub.Publish, pub.RunID, cfg.Checker, verifier.Limits{
 		GlobalPerSecond: cfg.Rate.GlobalPerSecond, PerHostPerMinute: cfg.Rate.PerHostPerMinute, Concurrency: cfg.Rate.Concurrency,
-		Reprobe: cfg.Reprobe.D(24 * time.Hour), MinGap: cfg.MinGap.D(30 * time.Second),
+		Queue: cfg.Rate.Queue, MinGap: cfg.MinGap.D(30 * time.Second),
 	})
-	defer v.Wait()
+	wait := v.Start(ctx)
+	defer wait()
 
 	c, err := bus.Durable(ctx, js, natsauth.ConsumerVerifier, bus.DurableOptions{
-		Filters:    []string{"asm.*." + bus.KindExposureChanged, "asm.*." + bus.KindSnapshot, "asm.*." + bus.KindClosed},
+		Filters:    []string{"pwb.probe.*." + bus.KindProbeRequest},
 		DeliverNew: true,
 	})
 	if err != nil {
 		return err
 	}
 	slog.Info("verifier running", "checker", cfg.Checker, "allow", cfg.AllowCIDRs, "limits", fmt.Sprintf("%+v", v.Limits))
-	return svc.Consume(ctx, c, func(ctx context.Context, m jetstream.Msg) error {
-		host, kind, ok := bus.ParseSubject(m.Subject())
-		if !ok {
+	return svc.Consume(ctx, c, func(_ context.Context, m jetstream.Msg) error {
+		p, ok := bus.Parse(m.Subject())
+		if !ok || p.Origin != bus.OriginProbe {
 			return nil
 		}
-		switch kind {
-		case bus.KindExposureChanged:
-			var ev asmv1.ExposureEvent
-			if proto.Unmarshal(m.Data(), &ev) == nil && (ev.GetHostId() == "" || ev.GetHostId() == host) {
-				v.Exposure(ctx, host, &ev)
-			}
-		case bus.KindSnapshot:
-			var s asmv1.Snapshot
-			if proto.Unmarshal(m.Data(), &s) == nil && (s.GetHostId() == "" || s.GetHostId() == host) {
-				v.Snapshot(ctx, host, &s)
-			}
-		case bus.KindClosed:
-			var ev asmv1.ListenerEvent
-			if proto.Unmarshal(m.Data(), &ev) == nil {
-				v.Forget(host, ev.GetListener().GetKey())
-			}
+		var r asmv1.ProbeRequest
+		if err := proto.Unmarshal(m.Data(), &r); err != nil {
+			return svc.Permanent(err)
 		}
+		if r.GetHostId() != "" && r.GetHostId() != p.Host {
+			return svc.Permanent(fmt.Errorf("request host_id %q differs from the subject's", r.GetHostId()))
+		}
+		v.Request(p.Host, &r)
 		return nil
 	}, svc.ConsumeOptions{})
 }

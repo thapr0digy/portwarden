@@ -109,9 +109,12 @@ func (r *ProbeRequester) now() time.Time {
 
 var dnatRe = regexp.MustCompile(`^nat: dnat (tcp|udp)/(\d+) -> `)
 
+// agentEvidenceV6Only is the agent's evidence for a v6-only [::] listener.
+const agentEvidenceV6Only = "bind:any (IPv6 only)"
+
 // BuildProbeRequest turns stored state into a request: the bind address when it is a
 // specific non-loopback one, else the host's stored inbound candidates of the bind's
-// family (0.0.0.0: IPv4; ::, both); the listener's port, or a mapped container listener's
+// family (0.0.0.0: IPv4; ::, both, or IPv6 alone for a v6-only socket); the listener's port, or a mapped container listener's
 // host ports. At most MaxProbeAddresses and MaxProbePorts. Nil below level bound.
 func BuildProbeRequest(host string, in ProbeInput, reason string, now time.Time) *asmv1.ProbeRequest {
 	if in.Level < 2 {
@@ -124,9 +127,11 @@ func BuildProbeRequest(host string, in ProbeInput, reason string, now time.Time)
 	bind = bind.Unmap()
 	var addrs []string
 	if bind.IsUnspecified() {
+		// The agent marks a [::] socket with IPV6_V6ONLY (M9): it takes no IPv4.
+		v6only := bind.Is6() && slices.Contains(in.AgentEvidence, agentEvidenceV6Only)
 		for _, s := range in.InboundIPs {
 			a, err := netip.ParseAddr(s)
-			if err != nil || (bind.Is4() && !a.Unmap().Is4()) {
+			if err != nil || (bind.Is4() && !a.Unmap().Is4()) || (v6only && a.Unmap().Is4()) {
 				continue
 			}
 			if v := a.Unmap().String(); !slices.Contains(addrs, v) {

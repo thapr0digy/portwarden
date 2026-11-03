@@ -24,6 +24,10 @@ func TestBuildProbeRequest(t *testing.T) {
 	if r := BuildProbeRequest("h", in, "x", time.Now()); !slices.Contains(r.GetAddresses(), "2001:db8::1") {
 		t.Fatalf(":: must include IPv6: %v", r.GetAddresses())
 	}
+	in.AgentEvidence = []string{"bind:any (IPv6 only)", "nft: accept tcp/443 from 0/0 (eth0, inet f in)"}
+	if r := BuildProbeRequest("h", in, "x", time.Now()); !slices.Equal(r.GetAddresses(), []string{"2001:db8::1"}) {
+		t.Fatalf("a v6-only :: listener is probed over IPv6 only: %v", r.GetAddresses())
+	}
 	in.Addr, in.AgentEvidence = "0.0.0.0", nil
 	for i := range 10 {
 		in.AgentEvidence = append(in.AgentEvidence, fmt.Sprintf("nat: dnat tcp/%d -> 172.17.0.2:80", 18000+i))

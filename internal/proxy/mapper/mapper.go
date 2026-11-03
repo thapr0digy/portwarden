@@ -70,7 +70,7 @@ type tracked struct {
 	res     conf.Result
 	fp      string // fingerprint of res.Watch when res was read
 	pending string // a newer fingerprint waiting to settle
-	since   time.Time
+	stable  int    // polls that have seen pending unchanged since it appeared
 	// observed accumulates the counted destinations; raw is the last kernel count per
 	// destination, so a count that drops (entries evicted or reset) is not lost.
 	observed map[netip.AddrPort]proxy.Observed
@@ -307,7 +307,9 @@ func fingerprint(fsys conf.FS, paths []string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// checkConfigs re-reads a proxy whose files changed and then held still for Settle.
+// checkConfigs re-reads a proxy whose files changed and then held still for Settle,
+// counted in polls (a wall-clock comparison would miss by the ticker's jitter and wait
+// a whole extra poll).
 func (m *Mapper) checkConfigs(now time.Time) bool {
 	changed := false
 	for _, t := range m.proxies {
@@ -324,10 +326,13 @@ func (m *Mapper) checkConfigs(now time.Time) bool {
 		case cur == t.fp:
 			t.pending = ""
 		case cur != t.pending:
-			t.pending, t.since = cur, now
-		case now.Sub(t.since) >= m.cfg.Settle:
-			m.read(t, model.ProxyTriggerConfig, now)
-			changed = true
+			t.pending, t.stable = cur, 0
+		default:
+			t.stable++
+			if time.Duration(t.stable)*m.cfg.Poll >= m.cfg.Settle {
+				m.read(t, model.ProxyTriggerConfig, now)
+				changed = true
+			}
 		}
 	}
 	return changed

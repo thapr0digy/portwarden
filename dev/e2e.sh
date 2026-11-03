@@ -404,7 +404,8 @@ echo "proxy traffic: $(grep -m1 -E -- "$seen_line" "$work/watch.log" | cut -d' '
 nginx_conf "$BACKEND2_PORT"
 t0=$(now_ns)
 sudo /usr/sbin/nginx -c "$work/nginx/nginx.conf" -s reload
-reload_line=$(route_to config "$BACKEND2_PORT" "\\[config\\] \\(no listener\\)")
+# A recheck that comes due first re-reads it too (trigger=recheck).
+reload_line=$(route_to "(config|recheck)" "$BACKEND2_PORT" "\\[config\\] \\(no listener\\)")
 wait_for "proxy.routes after the reload" "$PROXY_WINDOW_S" seen "$reload_line" 1
 echo "proxy reload: $(((($(now_ns) - t0)) / 1000000)) ms ($(grep -m1 -E -- "$reload_line" "$work/watch.log" | cut -d' ' -f4-))"
 backend "$BACKEND2_PORT"

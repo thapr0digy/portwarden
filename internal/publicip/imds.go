@@ -74,7 +74,7 @@ const (
 )
 
 // NewClient returns a client that never uses a proxy (the metadata address is
-// link-local) and gives each request timeout.
+// link-local), never follows redirects, and gives each request timeout.
 func NewClient(base string, timeout time.Duration) *Client {
 	if base == "" {
 		base = defaultBase
@@ -88,7 +88,12 @@ func NewClient(base string, timeout time.Duration) *Client {
 		ResponseHeaderTimeout: timeout,
 		MaxIdleConns:          1,
 	}
-	return &Client{Base: strings.TrimRight(base, "/"), Timeout: timeout, http: &http.Client{Transport: tr, Timeout: timeout}}
+	return &Client{Base: strings.TrimRight(base, "/"), Timeout: timeout, http: &http.Client{
+		Transport: tr, Timeout: timeout,
+		// Never follow a redirect: it would carry the metadata headers (the IMDSv2
+		// token) to another host. A 3xx is an error.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
 }
 
 // errNotFound is a 404: the instance has no such value (no public IPv4, for one).

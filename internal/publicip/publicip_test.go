@@ -264,3 +264,23 @@ func TestCollectorConditions(t *testing.T) {
 		t.Fatalf("published %+v", got)
 	}
 }
+
+func TestNoRedirects(t *testing.T) {
+	var leaked bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Metadata") != "" || r.Header.Get("X-aws-ec2-metadata-token") != "" {
+			leaked = true
+		}
+		w.Write([]byte(`{"compute":{"vmId":"evil"}}`))
+	}))
+	t.Cleanup(other.Close)
+	c := fakeIMDS(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/x", http.StatusFound)
+	})
+	if _, err := c.Fetch(context.Background(), Azure); err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("a redirect must fail: %v", err)
+	}
+	if leaked {
+		t.Fatal("metadata headers followed a redirect")
+	}
+}

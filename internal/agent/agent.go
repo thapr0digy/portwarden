@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -294,6 +295,28 @@ func (l *loop) snapshot() {
 	l.sink.Snapshot(listeners)
 }
 
+// keepThroughFailedRead keeps a listener's last known level when the new judgement was
+// made without a full reading of the firewall or interfaces (e is Degraded): no level
+// flaps, no exposure change is raised for a read failure, and the evidence names the
+// failure. A listener with no earlier level takes the degraded judgement (bound).
+func keepThroughFailedRead(old model.Exposure, had bool, e model.Exposure) model.Exposure {
+	if !e.Degraded || !had || old.Level == model.ExposureUnknown {
+		return e
+	}
+	kept := model.Exposure{Level: old.Level, Degraded: true}
+	for _, ev := range old.Evidence {
+		if !strings.HasPrefix(ev, "fw:unreadable") && ev != "fw:undetermined read incomplete" {
+			kept.Evidence = append(kept.Evidence, ev)
+		}
+	}
+	for _, ev := range e.Evidence {
+		if strings.HasPrefix(ev, "fw:unreadable") {
+			kept.Evidence = append(kept.Evidence, ev)
+		}
+	}
+	return kept
+}
+
 const (
 	triggerOpened   = "opened"
 	triggerListener = "listener"
@@ -305,6 +328,10 @@ const (
 func (l *loop) rejudge(changes []state.Change, trigger string) {
 	listeners := l.table.Snapshot()
 	judged := l.judge.Judge(listeners)
+	for k, e := range judged {
+		old, had := l.levels[k]
+		judged[k] = keepThroughFailedRead(old, had, e)
+	}
 	now := time.Now()
 	openedAt := make(map[model.ListenerKey]time.Time)
 	for i, c := range changes {

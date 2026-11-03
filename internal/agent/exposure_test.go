@@ -200,3 +200,51 @@ func TestReconcileSnapshotCarriesExposure(t *testing.T) {
 	}
 	h.stop()
 }
+
+// degradedJudge rates every listener as a failed firewall read does.
+type degradedJudge struct{}
+
+func (degradedJudge) Trigger() string { return "firewall" }
+
+func (degradedJudge) Judge(ls []state.Listener) map[model.ListenerKey]model.Exposure {
+	out := map[model.ListenerKey]model.Exposure{}
+	for _, l := range ls {
+		out[l.Key] = model.Exposure{Level: model.ExposureBound, Degraded: true,
+			Evidence: []string{"bind:any", "fw:unreadable firewall (timed out)", "fw:undetermined read incomplete"}}
+	}
+	return out
+}
+
+func TestFailedReadKeepsLastLevelSilently(t *testing.T) {
+	judges := make(chan Judge)
+	open := map[uint16]model.ExposureLevel{22: model.ExposureHostFirewallOpen}
+	h := startWith(t, []model.Observation{obs(model.Opened, 1, 22, 10, model.SourceBaseline)}, nil,
+		Options{Judge: newJudge("start", open), Judges: judges, Recheck: time.Hour})
+	close(h.release)
+	h.snapshot()
+
+	judges <- degradedJudge{}
+	h.noExposures(50 * time.Millisecond)
+	// A listener first seen while the read fails is bound, undetermined.
+	h.send(obs(model.Opened, 2, 9000, 20, model.SourceEBPF))
+	ch := h.change()
+	if ch[0].Exposure.Level != model.ExposureBound || !ch[0].Exposure.Degraded {
+		t.Fatalf("new listener during a failed read: %+v", ch[0].Exposure)
+	}
+	ex := h.exposures()
+	if len(ex) != 1 || ex[0].Key != key(9000) {
+		t.Fatalf("only the new listener's first judgement: %+v", ex)
+	}
+	// The open listener kept its level, with the read failure in its evidence.
+	h.send(obs(model.Opened, 3, 22, 11, model.SourceEBPF)) // owner change on :22
+	oc := h.change()
+	if e := oc[0].Exposure; e.Level != model.ExposureHostFirewallOpen ||
+		!slices.Equal(e.Evidence, []string{"port:22 start", "fw:unreadable firewall (timed out)"}) {
+		t.Fatalf(":22 during a failed read: %+v", e)
+	}
+	h.noExposures(50 * time.Millisecond)
+
+	judges <- newJudge("firewall", open) // the read recovers; every level is unchanged
+	h.noExposures(100 * time.Millisecond)
+	h.stop()
+}

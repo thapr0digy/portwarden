@@ -51,8 +51,8 @@ vsh() { local vm=$1; shift; limactl shell "$vm" bash -lc "cd '$repo' && $*"; }
 run_full() {
 	local leg=$1 vm itest=FAIL e2e=FAIL
 	vm=$(vm_of "$leg")
-	vsh "$vm" dev/itest.sh >"$out/$leg/itest.log" 2>&1 && itest=ok
-	vsh "$vm" dev/e2e.sh >"$out/$leg/e2e.log" 2>&1 && e2e=ok
+	vsh "$vm" dev/itest.sh </dev/null >"$out/$leg/itest.log" 2>&1 && itest=ok
+	vsh "$vm" dev/e2e.sh </dev/null >"$out/$leg/e2e.log" 2>&1 && e2e=ok
 	echo "itest=$itest e2e=$e2e"
 }
 
@@ -74,7 +74,8 @@ run_cross() {
 		CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -tags "$tags" -o "$bin/$name.test" "$pkg" >>"$out/$leg/tests.log" 2>&1 ||
 			{ echo "BUILD FAIL $pkg" >>"$out/$leg/tests.log"; status=FAIL; continue; }
 		[ -f "$bin/$name.test" ] || continue
-		if limactl shell "$vm" bash -c "cd '$dir' && sudo '$bin/$name.test' -test.timeout 20m" >>"$out/$leg/tests.log" 2>&1; then
+		# </dev/null: limactl would otherwise read the package list off this loop's stdin.
+		if limactl shell "$vm" bash -c "cd '$dir' && sudo '$bin/$name.test' -test.timeout 20m" </dev/null >>"$out/$leg/tests.log" 2>&1; then
 			echo "ok   $pkg" >>"$out/$leg/tests.log"
 		else
 			echo "FAIL $pkg" >>"$out/$leg/tests.log"

@@ -14,12 +14,24 @@
 # left running for the next run: `limactl stop <vm>` or `limactl delete -f <vm>` removes
 # them. Logs go to .matrix/<leg>/. MATRIX_MOUNT (CI) mounts that directory instead of
 # ~/projects/portwarden; it must be this checkout or contain it.
+#
+# The repo under test is the checkout this script sits in: dev/vm-verify.sh runs the
+# matrix.sh of a copy of any checkout, placed where the VMs can see it. A host-wide lock
+# (dev/vmlock.sh) keeps other matrix runs, vm-verify and make itest/e2e out of the VMs
+# meanwhile, and each leg first waits until its VM runs no tests started by hand.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 repo=$PWD
 legs=${MATRIX_LEGS:-2404 2604 amd64}
 out="$repo/.matrix"
 mkdir -p "$out"
+# shellcheck source=dev/vmlock.sh
+. "$repo/dev/vmlock.sh"
+trap vmlock_release EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+VMLOCK_COMMAND=${VMLOCK_COMMAND:-"dev/matrix.sh ($legs) in $repo"}
+vmlock_acquire
 
 vm_of() { case $1 in 2404) echo portwarden ;; 2604) echo portwarden-2604 ;; amd64) echo portwarden-amd64 ;; *) return 1 ;; esac; }
 yaml_of() { case $1 in 2404) echo dev/lima.yaml ;; 2604) echo dev/lima-2604.yaml ;; amd64) echo dev/lima-amd64.yaml ;; esac; }
@@ -110,6 +122,13 @@ for leg in $legs; do
 	start=$(date +%s)
 	vm_up "$leg"
 	vm=$(vm_of "$leg")
+	if ! vmlock_wait_idle "$vm"; then
+		rc=1
+		line="$leg | - | FAIL (VM busy with tests started outside the lock) | $(($(date +%s) - start))s"
+		echo "matrix: $line"
+		summary+=("$line")
+		continue
+	fi
 	info=$(limactl shell "$vm" bash -c '. /etc/os-release; echo "$PRETTY_NAME $(uname -r) $(uname -m)"' 2>/dev/null)
 	echo "matrix: $leg: $info"
 	if [ "$leg" = amd64 ]; then

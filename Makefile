@@ -2,7 +2,7 @@
 VM := portwarden
 REPO := $(CURDIR)
 
-.PHONY: vm generate test itest e2e install-agent dist dist-check dist-lint lint-deploy matrix
+.PHONY: vm generate test itest e2e install-agent dist dist-check dist-lint lint-deploy matrix vm-verify dev-test
 
 # Re-runnable: starts the existing instance, or creates it from dev/lima.yaml.
 vm:
@@ -14,12 +14,17 @@ generate:
 test:
 	go test ./...
 
+# Host-only tests of the dev scripts: the VM lock and vm-verify's file list (dev/vmlock-test.sh).
+dev-test:
+	dev/vmlock-test.sh
+
 # Builds the test binaries as the VM user and runs only them as root (dev/itest.sh).
+# itest and e2e take the VM lock (dev/vmlock.sh) and wait until the VM runs no tests.
 itest:
-	limactl shell $(VM) bash -lc 'cd $(REPO) && dev/itest.sh'
+	dev/vmlock.sh run --vm $(VM) -- limactl shell $(VM) bash -lc 'cd $(REPO) && dev/itest.sh'
 
 e2e:
-	limactl shell $(VM) bash -lc 'cd $(REPO) && dev/e2e.sh'
+	dev/vmlock.sh run --vm $(VM) -- limactl shell $(VM) bash -lc 'cd $(REPO) && dev/e2e.sh'
 
 # Builds, installs and enables the portwarden-agent systemd unit in the VM (dev/install-agent.sh).
 install-agent:
@@ -46,3 +51,9 @@ lint-deploy:
 # (cross-compiled tests, the amd64 .deb). MATRIX_LEGS="2604" picks legs (dev/matrix.sh).
 matrix:
 	dev/matrix.sh
+
+# The kernel matrix for this checkout from anywhere (a Flowryn or other worktree the VMs do
+# not mount): copies it under ~/projects/portwarden/.vmverify/ and runs dev/matrix.sh
+# there (dev/vm-verify.sh). MATRIX_LEGS="2604" picks legs.
+vm-verify:
+	dev/vm-verify.sh --legs "$(or $(MATRIX_LEGS),2404 2604 amd64)"

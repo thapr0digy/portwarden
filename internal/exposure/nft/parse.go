@@ -331,8 +331,56 @@ func (p *parser) expr(c ctx, kind string, body json.RawMessage) (firewall.Expr, 
 	case "vmap":
 		v, err := p.vmap(c, body)
 		return v, false, err
-	case "limit", "quota", "synproxy":
-		return unknown(kind), false, nil
+	case "limit":
+		return limitStmt(body), false, nil
+	case "meter":
+		// meter <name> { <key> <stmt> }: per-key state. A fresh outside source has an
+		// empty entry, so a limit decides as for the first packet.
+		var m struct {
+			Stmt map[string]json.RawMessage `json:"stmt"`
+		}
+		if json.Unmarshal(body, &m) == nil && len(m.Stmt) == 1 {
+			if lim, ok := m.Stmt["limit"]; ok {
+				return limitStmt(lim), false, nil
+			}
+		}
+		return unknown("meter"), false, nil
+	case "set", "map":
+		// add/update @set { <key> [stmt] }: without a stateful statement it only
+		// records the packet; with a limit it decides as for a fresh source's entry.
+		var st struct {
+			Stmt []map[string]json.RawMessage `json:"stmt"`
+		}
+		if err := json.Unmarshal(body, &st); err != nil {
+			return unknown(kind + " statement"), false, nil
+		}
+		switch {
+		case len(st.Stmt) == 0:
+			return nil, false, nil
+		case len(st.Stmt) == 1 && len(st.Stmt[0]) == 1 && st.Stmt[0]["limit"] != nil:
+			return limitStmt(st.Stmt[0]["limit"]), false, nil
+		}
+		return unknown(kind + " statement"), false, nil
+	case "ct count":
+		// The first connection from a fresh outside source makes the count 1.
+		var cc struct {
+			Val int  `json:"val"`
+			Inv bool `json:"inv"`
+		}
+		if err := json.Unmarshal(body, &cc); err != nil {
+			return unknown("ct count"), false, nil
+		}
+		if (cc.Inv && 1 > cc.Val) || (!cc.Inv && 1 <= cc.Val) {
+			return nil, false, nil
+		}
+		return never(), false, nil
+	case "tproxy":
+		return firewall.Verdict{Kind: firewall.VerdictQueue}, false, nil
+	case "counter", "log", "notrack", "ct helper", "ct timeout", "ct expectation", "flow",
+		"dup", "fwd", "secmark", "synproxy":
+		// No bearing on whether a new inbound connection gets through. (synproxy
+		// answers the SYN itself and lets the connection through once it completes.)
+		return nil, false, nil
 	case "xt":
 		var x struct {
 			Type string `json:"type"`
@@ -343,10 +391,28 @@ func (p *parser) expr(c ctx, kind string, body json.RawMessage) (firewall.Expr, 
 		}
 		return xtExpr(x.Type, x.Name), true, nil
 	}
-	// Other statements (counter, log, set updates, meta/ct value changes, dup, fwd, …)
-	// neither match nor end evaluation for an inbound packet's verdict.
-	return nil, false, nil
+	// Anything else may stop the rule (a quota, a statement this parser does not know):
+	// the rule is "maybe", never silently unconditional.
+	return unknown(kind), false, nil
 }
+
+// limitStmt decides a limit for the first packet of a new connection: it is under any
+// rate, so "limit rate" holds (noted) and "limit rate over" does not.
+func limitStmt(body json.RawMessage) firewall.Expr {
+	var l struct {
+		Inv bool `json:"inv"`
+	}
+	if json.Unmarshal(body, &l) != nil {
+		return unknown("limit")
+	}
+	if l.Inv {
+		return never()
+	}
+	return firewall.Match{Field: firewall.FieldAlways, Note: "rate-limited"}
+}
+
+// never is a match nothing satisfies (an empty protocol set).
+func never() firewall.Match { return firewall.Match{Field: firewall.FieldL4Proto} }
 
 // xtExpr turns an xtables blob into what is known of it: a match is maybe, a DNAT or
 // REDIRECT target loses the destination, a MARK target the mark, REJECT drops.
@@ -490,6 +556,8 @@ func left(raw json.RawMessage) (m firewall.Match, desc string, ok bool) {
 				}
 			case pl.Protocol == "ip" && pl.Field == "protocol", pl.Protocol == "ip6" && pl.Field == "nexthdr":
 				m.Field = firewall.FieldL4Proto
+			case pl.Protocol == "tcp" && pl.Field == "flags":
+				m.Field, m.Mask = firewall.FieldTCPFlags, 0xff
 			default:
 				return m, desc, false
 			}
@@ -540,18 +608,32 @@ func left(raw json.RawMessage) (m firewall.Match, desc string, ok bool) {
 			m.Field = firewall.FieldDAddrType
 			return m, "fib daddr type", true
 		case "&":
-			// meta mark & mask
+			// meta mark & mask, tcp flags & (…)
 			var args []json.RawMessage
-			var mask uint32
-			if json.Unmarshal(body, &args) != nil || len(args) != 2 || json.Unmarshal(args[1], &mask) != nil {
+			if json.Unmarshal(body, &args) != nil || len(args) != 2 {
 				return m, "bitwise", false
 			}
-			var inner map[string]json.RawMessage
-			if json.Unmarshal(args[0], &inner) != nil || metaKey(inner["meta"]) != "mark" {
-				return m, "bitwise", false
+			inner, innerDesc, ok := left(args[0])
+			if !ok {
+				return m, "bitwise on " + innerDesc, false
 			}
-			m.Field, m.Mask = firewall.FieldMark, mask
-			return m, "meta mark", true
+			switch inner.Field {
+			case firewall.FieldMark:
+				var mask uint32
+				if json.Unmarshal(args[1], &mask) != nil {
+					return m, "bitwise", false
+				}
+				inner.Mask = mask
+				return inner, "meta mark", true
+			case firewall.FieldTCPFlags:
+				mask, ok := tcpFlagBits(args[1])
+				if !ok {
+					return m, "tcp flags mask", false
+				}
+				inner.Mask = mask
+				return inner, "tcp flags", true
+			}
+			return m, "bitwise on " + innerDesc, false
 		default:
 			return m, kind, false
 		}
@@ -586,6 +668,16 @@ func (p *parser) match(c ctx, body json.RawMessage) (firewall.Expr, error) {
 		return m, nil
 	default:
 		return unknown(desc + " " + mo.Op), nil
+	}
+	if m.Field == firewall.FieldTCPFlags {
+		bits, ok := tcpFlagBits(mo.Right)
+		if !ok {
+			return unknown("tcp flags value"), nil
+		}
+		m.Mark = bits
+		// "tcp flags syn" (op in) tests any of the bits; == and != compare under the mask.
+		m.Any = mo.Op == "in"
+		return m, nil
 	}
 	values, err := p.values(c, mo.Right)
 	if err != nil {
@@ -705,6 +797,41 @@ func (p *parser) elems(c ctx, raws []json.RawMessage) ([]value, error) {
 	return out, nil
 }
 
+var tcpFlagNames = map[string]uint32{
+	"fin": firewall.TCPFin, "syn": firewall.TCPSyn, "rst": firewall.TCPRst, "psh": firewall.TCPPsh,
+	"ack": firewall.TCPAck, "urg": firewall.TCPUrg, "ecn": firewall.TCPEcn, "cwr": firewall.TCPCwr,
+}
+
+// tcpFlagBits reads a flag name, a list of names, a number, or {"|": [...]}.
+func tcpFlagBits(raw json.RawMessage) (uint32, bool) {
+	var n uint32
+	if json.Unmarshal(raw, &n) == nil {
+		return n, true
+	}
+	var name string
+	if json.Unmarshal(raw, &name) == nil {
+		b, ok := tcpFlagNames[name]
+		return b, ok
+	}
+	var list []json.RawMessage
+	if json.Unmarshal(raw, &list) != nil {
+		var obj map[string][]json.RawMessage
+		if json.Unmarshal(raw, &obj) != nil || len(obj) != 1 || obj["|"] == nil {
+			return 0, false
+		}
+		list = obj["|"]
+	}
+	var bits uint32
+	for _, item := range list {
+		b, ok := tcpFlagBits(item)
+		if !ok {
+			return 0, false
+		}
+		bits |= b
+	}
+	return bits, true
+}
+
 // l4 protocol numbers the dumps may print instead of names.
 var protoNames = map[int]string{1: "icmp", 6: "tcp", 17: "udp", 58: "ipv6-icmp", 132: "sctp", 136: "udplite", 33: "dccp"}
 
@@ -804,16 +931,17 @@ func (p *parser) vmap(c ctx, body json.RawMessage) (firewall.Expr, error) {
 	if err := json.Unmarshal(body, &v); err != nil {
 		return nil, err
 	}
-	key, desc, ok := left(v.Key)
+	keys, desc, ok := vmapKeys(v.Key)
 	if !ok {
-		return unknown("vmap on " + desc), nil
+		return firewall.VMap{Unknown: "vmap on " + desc}, nil
 	}
+	key := keys[0]
 	var elems []json.RawMessage
 	var name string
 	if json.Unmarshal(v.Data, &name) == nil && strings.HasPrefix(name, "@") {
 		e, ok := p.maps[setKey{c.family, c.table, name[1:]}]
 		if !ok {
-			return unknown("vmap " + name + " not in dump"), nil
+			return firewall.VMap{Unknown: "vmap " + name + " not in dump"}, nil
 		}
 		elems = e
 	} else {
@@ -821,7 +949,7 @@ func (p *parser) vmap(c ctx, body json.RawMessage) (firewall.Expr, error) {
 			Set []json.RawMessage `json:"set"`
 		}
 		if json.Unmarshal(v.Data, &obj) != nil {
-			return unknown("vmap data"), nil
+			return firewall.VMap{Unknown: "vmap data"}, nil
 		}
 		elems = obj.Set
 	}
@@ -829,30 +957,64 @@ func (p *parser) vmap(c ctx, body json.RawMessage) (firewall.Expr, error) {
 	for _, raw := range elems {
 		var pair []json.RawMessage
 		if json.Unmarshal(raw, &pair) != nil || len(pair) != 2 {
-			return unknown("vmap element"), nil
+			return firewall.VMap{Unknown: "vmap element"}, nil
 		}
-		vs, err := p.elems(c, []json.RawMessage{pair[0]})
-		if err != nil {
-			return unknown("vmap key: " + err.Error()), nil
+		parts := []json.RawMessage{pair[0]}
+		if len(keys) > 1 {
+			var obj struct {
+				Concat []json.RawMessage `json:"concat"`
+			}
+			if json.Unmarshal(pair[0], &obj) != nil || len(obj.Concat) != len(keys) {
+				return firewall.VMap{Unknown: "vmap concatenated element"}, nil
+			}
+			parts = obj.Concat
 		}
-		m := key
-		if !fill(&m, vs) {
-			return unknown("vmap key value"), nil
+		var ms []firewall.Match
+		for i, part := range parts {
+			vs, err := p.elems(c, []json.RawMessage{part})
+			m := keys[i]
+			if err != nil || !fill(&m, vs) {
+				return firewall.VMap{Unknown: "vmap key value"}, nil
+			}
+			ms = append(ms, m)
 		}
 		var verdictObj map[string]json.RawMessage
 		if json.Unmarshal(pair[1], &verdictObj) != nil || len(verdictObj) != 1 {
-			return unknown("vmap verdict"), nil
+			return firewall.VMap{Unknown: "vmap verdict"}, nil
 		}
 		var verdict firewall.Verdict
 		for kind, vb := range verdictObj {
 			e, _, err := p.expr(c, kind, vb)
 			vv, isVerdict := e.(firewall.Verdict)
 			if err != nil || !isVerdict {
-				return unknown("vmap verdict " + kind), nil
+				return firewall.VMap{Unknown: "vmap verdict " + kind}, nil
 			}
 			verdict = vv
 		}
-		out.Elems = append(out.Elems, firewall.VMapElem{Match: m, Verdict: verdict})
+		out.Elems = append(out.Elems, firewall.VMapElem{Match: ms[0], And: ms[1:], Verdict: verdict})
 	}
 	return out, nil
+}
+
+// vmapKeys decodes a verdict map key: one field, or a concatenation of fields.
+func vmapKeys(raw json.RawMessage) ([]firewall.Match, string, bool) {
+	var obj struct {
+		Concat []json.RawMessage `json:"concat"`
+	}
+	if json.Unmarshal(raw, &obj) == nil && len(obj.Concat) > 0 {
+		var out []firewall.Match
+		for _, part := range obj.Concat {
+			m, desc, ok := left(part)
+			if !ok {
+				return nil, "concat with " + desc, false
+			}
+			out = append(out, m)
+		}
+		return out, "concat", true
+	}
+	m, desc, ok := left(raw)
+	if !ok {
+		return nil, desc, false
+	}
+	return []firewall.Match{m}, desc, true
 }

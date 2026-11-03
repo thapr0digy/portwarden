@@ -170,8 +170,11 @@ type VMap struct {
 }
 
 // VMapElem is one element of a verdict map: the values of Key that select Verdict.
+// And holds the further components of a concatenated key ("meta l4proto . th dport");
+// the element matches when Match and every one of And do.
 type VMapElem struct {
 	Match   Match // Key with this element's values
+	And     []Match
 	Verdict Verdict
 }
 

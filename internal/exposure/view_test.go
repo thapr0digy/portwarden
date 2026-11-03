@@ -221,7 +221,7 @@ func TestJudgeWithoutFirewallOrInterfaces(t *testing.T) {
 func TestJudgeNoFilterAndUndetermined(t *testing.T) {
 	native := `{"nftables":[{"table":{"family":"inet","name":"f"}},
 	 {"chain":{"family":"inet","table":"f","name":"in","type":"filter","hook":"input","prio":0,"policy":"drop"}},
-	 {"rule":{"family":"inet","table":"f","chain":"in","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":7000}},{"limit":{"rate":10,"per":"second"}},{"accept":null}]}}]}`
+	 {"rule":{"family":"inet","table":"f","chain":"in","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":7000}},{"quota":{"val":10,"val_unit":"mbytes"}},{"accept":null}]}}]}`
 	fw, err := Merge(MergeInput{NFT: []byte(native)})
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +231,7 @@ func TestJudgeNoFilterAndUndetermined(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkJudge(t, NewView("start", hostNS, fw, nil, vmIfs(), nil), []state.Listener{lst(hostNS, "tcp", "0.0.0.0", 7000)}, map[string]want{
-		"4026531840/tcp/0.0.0.0:7000": {model.ExposureBound, []string{"bind:any", "nft: undetermined tcp/7000 from 0/0 (eth0: limit)"}},
+		"4026531840/tcp/0.0.0.0:7000": {model.ExposureBound, []string{"bind:any", "nft: undetermined tcp/7000 from 0/0 (eth0: quota)"}},
 	})
 	checkJudge(t, NewView("start", hostNS, empty, nil, vmIfs(), nil), []state.Listener{lst(hostNS, "udp", "0.0.0.0", 5353)}, map[string]want{
 		"4026531840/udp/0.0.0.0:5353": {model.ExposureHostFirewallOpen, []string{"bind:any", "firewall: accept udp/5353 from 0/0 (eth0, no filter rules)"}},

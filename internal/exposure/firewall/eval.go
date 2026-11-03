@@ -403,7 +403,7 @@ func (e *evaluator) rule(c *Chain, r *Rule, s state, depth int) (terms []termina
 				for _, el := range x.Elems {
 					var unmatched []state
 					for _, ps := range pending {
-						switch m, why := el.Match.eval(ps.pkt, e.env); m {
+						switch m, why := el.eval(ps.pkt, e.env); m {
 						case yes:
 							t, n, rt := e.verdict(c, el.Verdict, ps, depth)
 							terms, next, returned = append(terms, t...), append(next, n...), append(returned, rt...)
@@ -536,6 +536,24 @@ func outcomeEqual(a, b Outcome) bool {
 	return a.Accept == b.Accept && a.Forwarded == b.Forwarded && a.DAddr == b.DAddr && a.DPort == b.DPort &&
 		a.Origin == b.Origin && a.Where == b.Where && a.Undecidable == b.Undecidable &&
 		slices.Equal(a.Maybe, b.Maybe) && slices.Equal(a.Notes, b.Notes)
+}
+
+// eval decides a verdict map element: every component must match.
+func (el VMapElem) eval(p pktState, env Env) (tri, string) {
+	result, reason := el.Match.eval(p, env)
+	for _, m := range el.And {
+		if result == no {
+			break
+		}
+		r, why := m.eval(p, env)
+		switch {
+		case r == no:
+			result, reason = no, ""
+		case r == maybe:
+			result, reason = maybe, why
+		}
+	}
+	return result, reason
 }
 
 // tri is a three-valued match result.

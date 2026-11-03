@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/thapr0digy/portwarden/internal/exposure/firewall"
@@ -76,17 +77,17 @@ func TestHostFirewallFixture(t *testing.T) {
 		{"tcp", 6379, firewall.Closed}, // only 10/8
 		{"tcp", 3306, firewall.Closed}, // saddr != 10/8 drop
 		{"udp", 51820, firewall.Open},
-		{"udp", 546, firewall.Closed},        // ip6 fe80::/10 only
-		{"tcp", 8000, firewall.Open},         // iifname "eth*"
-		{"tcp", 7000, firewall.Undetermined}, // limit
-		{"tcp", 7100, firewall.Open},         // th dport
-		{"udp", 7100, firewall.Open},         // th dport
-		{"udp", 7200, firewall.Open},         // l4proto udp + udp dport
-		{"tcp", 8200, firewall.Open},         // jump extra
-		{"tcp", 8300, firewall.Closed},       // return, then policy
-		{"udp", 8400, firewall.Open},         // goto extra_udp
-		{"tcp", 8100, firewall.Closed},       // reject
-		{"tcp", 12345, firewall.Closed},      // policy drop
+		{"udp", 546, firewall.Closed},   // ip6 fe80::/10 only
+		{"tcp", 8000, firewall.Open},    // iifname "eth*"
+		{"tcp", 7000, firewall.Open},    // limit: the first packet is under it
+		{"tcp", 7100, firewall.Open},    // th dport
+		{"udp", 7100, firewall.Open},    // th dport
+		{"udp", 7200, firewall.Open},    // l4proto udp + udp dport
+		{"tcp", 8200, firewall.Open},    // jump extra
+		{"tcp", 8300, firewall.Closed},  // return, then policy
+		{"udp", 8400, firewall.Open},    // goto extra_udp
+		{"tcp", 8100, firewall.Closed},  // reject
+		{"tcp", 12345, firewall.Closed}, // policy drop
 	}
 	for _, c := range cases {
 		if got := eval(rs, c.proto, c.port).Decision(); got != c.want {
@@ -205,7 +206,7 @@ func TestParseExpressions(t *testing.T) {
 	if rs.Chains[0].Prio != 0 {
 		t.Errorf("named priority: %d", rs.Chains[0].Prio)
 	}
-	for port, want := range map[uint16]firewall.Decision{1023: firewall.Open, 1024: firewall.Closed, 5000: firewall.Undetermined} {
+	for port, want := range map[uint16]firewall.Decision{1023: firewall.Open, 1024: firewall.Closed, 5000: firewall.Open} { // 5000: tcp flags syn
 		if got := eval(rs, "tcp", port).Decision(); got != want {
 			t.Errorf("tcp/%d: %v, want %v", port, got, want)
 		}
@@ -219,6 +220,68 @@ func TestFixturesExist(t *testing.T) {
 	for _, f := range []string{"testdata/host-firewall.nft", "testdata/host-firewall.json"} {
 		if _, err := os.Stat(filepath.Clean(f)); err != nil {
 			t.Error(err)
+		}
+	}
+}
+
+// review-constructs.json: testdata/review-constructs.nft loaded with `nft -f` on Ubuntu
+// 24.04 and dumped with `nft -j list table inet pwc1`: rate limits per source (meter,
+// set add with a limit), ct count, a concatenated vmap, the tcp-flags hardening rule, a
+// plain limit, a limit over, a source set and tcp flags syn. Its chain accepts by policy.
+func TestReviewConstructsNeverFalseDrop(t *testing.T) {
+	rs := load(t, "testdata/review-constructs.json")
+	cases := []struct {
+		port  uint16
+		want  firewall.Decision
+		notes []string
+	}{
+		{22, firewall.Open, nil}, // meter … limit rate over: a fresh source is under it
+		{23, firewall.Open, nil}, // add @m { ip saddr limit rate over }: same
+		{24, firewall.Open, nil}, // ct count over 10: the first connection is one
+		{25, firewall.Open, nil}, // meta l4proto . th dport vmap { tcp . 25 : accept }
+		{26, firewall.Open, []string{"rate-limited"}},
+		{27, firewall.Open, nil}, // limit rate over: the first packet is under it
+		{28, firewall.Open, nil}, // ip saddr @f2b: an outside source is not listed
+		{29, firewall.Open, nil}, // tcp flags syn
+		{30, firewall.Open, nil},
+	}
+	for _, c := range cases {
+		r := eval(rs, "tcp", c.port)
+		if got := r.Decision(); got != c.want {
+			t.Errorf("tcp/%d: got %v, want %v (%+v)", c.port, got, c.want, r.Outcomes)
+		}
+		if c.notes != nil && !slices.Equal(r.Notes(), c.notes) {
+			t.Errorf("tcp/%d notes %v, want %v", c.port, r.Notes(), c.notes)
+		}
+	}
+	// Under a drop policy only the vmap's element is open.
+	for _, ch := range rs.Chains {
+		ch.Policy = firewall.VerdictDrop
+	}
+	if got := eval(rs, "tcp", 25).Decision(); got != firewall.Open {
+		t.Errorf("tcp/25 under policy drop: %v", got)
+	}
+	if got := eval(rs, "tcp", 31).Decision(); got != firewall.Closed {
+		t.Errorf("tcp/31 under policy drop: %v", got)
+	}
+}
+
+func TestUnmodelledStatementIsMaybe(t *testing.T) {
+	doc := `{"nftables":[{"table":{"family":"inet","name":"t"}},
+	 {"chain":{"family":"inet","table":"t","name":"in","type":"filter","hook":"input","prio":0,"policy":"accept"}},
+	 {"rule":{"family":"inet","table":"t","chain":"in","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":22}},{"quota":{"val":10,"val_unit":"mbytes","inv":true}},{"drop":null}]}},
+	 {"rule":{"family":"inet","table":"t","chain":"in","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":23}},{"brand-new-statement":{"x":1}},{"drop":null}]}},
+	 {"rule":{"family":"inet","table":"t","chain":"in","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":24}},{"counter":{"packets":0,"bytes":0}},{"log":{"prefix":"x"}},{"drop":null}]}},
+	 {"rule":{"family":"inet","table":"t","chain":"in","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":25}},{"vmap":{"key":{"concat":[{"meta":{"key":"iiftype"}},{"payload":{"protocol":"th","field":"dport"}}]},"data":{"set":[[{"concat":["ether",25]},{"drop":null}]]}}}]}},
+	 {"rule":{"family":"inet","table":"t","chain":"in","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":26}},{"vmap":{"key":{"meta":{"key":"iifname"}},"data":"@missing"}}]}}]}`
+	rs, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for port, want := range map[uint16]firewall.Decision{22: firewall.Undetermined, 23: firewall.Undetermined, 24: firewall.Closed,
+		25: firewall.Undetermined, 26: firewall.Undetermined} {
+		if got := eval(rs, "tcp", port).Decision(); got != want {
+			t.Errorf("tcp/%d: %v, want %v", port, got, want)
 		}
 	}
 }

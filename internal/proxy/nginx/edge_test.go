@@ -48,7 +48,7 @@ http {
 `),
 	}
 	res := Load(fsys, "/etc/nginx/nginx.conf")
-	got := Render(res)
+	got := conf.Render(res)
 	for _, want := range []string{
 		"*:80 names= path=\"/\" proxy \"http://app.internal:9000\"\n    -> app.internal:9000 10.1.2.3:9000\n",
 		"-> example.com (unresolved: hostname example.com (no DNS lookups))",

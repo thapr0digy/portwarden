@@ -63,10 +63,17 @@ if command -v nginx >/dev/null; then
 fi
 
 if command -v apache2 >/dev/null; then
-	apache_dump='set -a; . /etc/apache2/envvars; set +a
+	apache_dump='set +u -a; . /etc/apache2/envvars; set +a
 		/usr/sbin/apache2 -d "$ROOTDIR" -S 2>&1 | grep -v AH00558 >"$CASE/apache2-S.txt"
 		/usr/sbin/apache2 -d "$ROOTDIR" -t -D DUMP_INCLUDES 2>&1 | grep -v AH00558 >"$CASE/apache2-includes.txt"'
 	copy_tree /etc/apache2 "$apache_td/ubuntu-default"
+	# Keep only what Apache reads: *-available files that nothing enables, and the
+	# mime_magic data, are left out of the fixture.
+	for f in "$apache_td"/ubuntu-default/root/etc/apache2/{mods,conf,sites}-available/*; do
+		enabled=${f/-available\//-enabled/}
+		[ -e "$enabled" ] || rm -- "$f"
+	done
+	rm -f -- "$apache_td/ubuntu-default/root/etc/apache2/magic"
 	CASE=$apache_td/ubuntu-default ROOTDIR=/etc/apache2 bash -c "$apache_dump"
 	for c in "$apache_td"/*/; do
 		ls -d "$c"root/etc/pw-* >/dev/null 2>&1 || continue

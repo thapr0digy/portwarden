@@ -1,0 +1,43 @@
+*:80,127.0.0.1:8081,[::1]:8082 names=main.local path="/global" proxy "http://127.0.0.1:6000/"
+    -> 127.0.0.1:6000 127.0.0.1:6000
+    note: main server: inherited by every virtual host
+    @ /etc/pw-apache/apache2.conf:21
+*:80 names=app.example.com,www.app.example.com path="/" proxy "http://127.0.0.1:8000/"
+    -> 127.0.0.1:8000 127.0.0.1:8000
+    @ /etc/pw-apache/sites-enabled/app.conf:8
+*:80 names=app.example.com,www.app.example.com path="/api" proxy "http://127.0.0.1:9000/"
+    -> 127.0.0.1:9000 127.0.0.1:9000
+    @ /etc/pw-apache/sites-enabled/app.conf:12
+*:80 names=app.example.com,www.app.example.com path="~ ^/(.*\\.php)$" fastcgi "fcgi://127.0.0.1:9001/var/www/app/$1"
+    -> 127.0.0.1:9001 127.0.0.1:9001
+    @ /etc/pw-apache/sites-enabled/app.conf:15
+*:80 names=app.example.com,www.app.example.com path="~ ^/old/(.*)$" proxy "http://127.0.0.1:8080/$1"
+    -> 127.0.0.1:8080 127.0.0.1:8080
+    @ /etc/pw-apache/sites-enabled/app.conf:18
+*:80 names=app.example.com,www.app.example.com path="/bal" proxy "balancer://cluster/" upstream=cluster
+    -> 127.0.0.1:8001 127.0.0.1:8001
+    -> 127.0.0.1:8002 127.0.0.1:8002
+    @ /etc/pw-apache/sites-enabled/app.conf:25
+*:80 names=app.example.com,www.app.example.com path="/ws" proxy "ws://127.0.0.1:8090/"
+    -> 127.0.0.1:8090 127.0.0.1:8090
+    @ /etc/pw-apache/sites-enabled/app.conf:26
+*:80 names=app.example.com,www.app.example.com path="/def" proxy "http://127.0.0.1:8070/"
+    -> 127.0.0.1:8070 127.0.0.1:8070
+    @ /etc/pw-apache/sites-enabled/app.conf:27
+*:80 names=app.example.com,www.app.example.com path="/sock" proxy "unix:/run/app.sock|http://localhost/"
+    -> unix:/run/app.sock unix=/run/app.sock
+    @ /etc/pw-apache/sites-enabled/app.conf:28
+*:80 names=app.example.com,www.app.example.com path="FilesMatch \\.php$" fastcgi "unix:/run/php/php8.3-fpm.sock|fcgi://localhost"
+    -> unix:/run/php/php8.3-fpm.sock unix=/run/php/php8.3-fpm.sock
+    @ /etc/pw-apache/sites-enabled/app.conf:31
+*:80 names=app.example.com,www.app.example.com path="/yes" proxy "http://127.0.0.1:9997/"
+    -> 127.0.0.1:9997 127.0.0.1:9997
+    @ /etc/pw-apache/sites-enabled/app.conf:41
+*:80 names=app.example.com,www.app.example.com path="/extra" proxy "http://127.0.0.1:6100/"
+    -> 127.0.0.1:6100 127.0.0.1:6100
+    @ /etc/pw-apache/snippets/extra.conf:1
+127.0.0.1:8081,[::1]:8082 names=internal.local path="/" proxy "http://localhost:7000/"
+    -> localhost:7000 127.0.0.1:7000 [::1]:7000
+    @ /etc/pw-apache/sites-enabled/app.conf:49
+*:80 names=static.example.com path="/" static "/var/www/static" root=/var/www/static
+    @ /etc/pw-apache/sites-enabled/static.conf:1

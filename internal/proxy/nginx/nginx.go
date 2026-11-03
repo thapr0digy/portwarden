@@ -382,7 +382,6 @@ func walk(block []*directive, f func(*directive)) {
 	}
 }
 
-
 func isDigits(s string) bool {
 	if s == "" {
 		return false
@@ -394,4 +393,3 @@ func isDigits(s string) bool {
 	}
 	return true
 }
-

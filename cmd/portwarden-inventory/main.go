@@ -30,6 +30,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/inventory/api"
 	"github.com/thapr0digy/portwarden/internal/inventory/pg"
 	"github.com/thapr0digy/portwarden/internal/natsauth"
+	"github.com/thapr0digy/portwarden/internal/version"
 )
 
 // Config is the JSON config file (--config).
@@ -64,6 +65,7 @@ type CloudConfig struct {
 }
 
 func main() {
+	version.HandleFlag()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	path := flag.String("config", "/etc/portwarden/inventory.json", "config file (JSON)")
 	flag.Parse()

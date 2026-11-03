@@ -20,6 +20,9 @@ const maxExeBytes = 64 << 20
 // ns links).
 type ProcFS struct {
 	Root string // "/proc"
+	// HostCgroup maps a /proc cgroup path to the host's when the agent runs in a private
+	// cgroup namespace (cgroupns.Translator.Host); nil is the identity.
+	HostCgroup func(string) string
 
 	mu    sync.Mutex
 	found map[binKey]scanResult
@@ -272,6 +275,9 @@ func (p *ProcFS) Cgroup(pid uint32) string {
 	}
 	for _, line := range strings.Split(string(b), "\n") {
 		if path, ok := strings.CutPrefix(line, "0::"); ok {
+			if p.HostCgroup != nil {
+				path = p.HostCgroup(path)
+			}
 			return path
 		}
 	}

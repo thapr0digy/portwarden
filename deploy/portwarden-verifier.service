@@ -1,5 +1,6 @@
 [Unit]
 Description=Portwarden outside checker (probes inventory addresses, publishes exposure.confirmed)
+Documentation=https://github.com/thapr0digy/portwarden
 Wants=network-online.target
 After=network-online.target
 
@@ -10,7 +11,7 @@ Type=simple
 # Secrets are passed as systemd credentials (readable only by this service, under
 # /run/credentials/portwarden-verifier.service/); the config file names those paths.
 LoadCredential=nats.nk:/etc/portwarden/nats/verifier.nk
-ExecStart=/usr/local/bin/portwarden-verifier --config /etc/portwarden/verifier.json
+ExecStart=/usr/bin/portwarden-verifier --config /etc/portwarden/verifier.json
 DynamicUser=yes
 NoNewPrivileges=yes
 CapabilityBoundingSet=
@@ -19,14 +20,28 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+PrivateUsers=yes
+PrivateIPC=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+ProtectKernelLogs=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+UMask=0077
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
+RemoveIPC=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
 Restart=always
 RestartSec=5s
 

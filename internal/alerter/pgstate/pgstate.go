@@ -137,6 +137,16 @@ func (t txState) SetPaged(ctx context.Context, key string, at time.Time) error {
 	return err
 }
 
+func (t txState) PagedKeys(ctx context.Context, prefix string) ([]string, error) {
+	// LIKE on the escaped prefix (it is data: a host id may hold % or _), served by the
+	// text_pattern_ops index of migration 0002.
+	rows, err := t.tx.Query(ctx, `SELECT key FROM alerter_dedupe WHERE key LIKE $1 ESCAPE '\' ORDER BY key`, likePrefix(clean(prefix)))
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
 func (t txState) ClearPaged(ctx context.Context, key string) error {
 	_, err := t.tx.Exec(ctx, "DELETE FROM alerter_dedupe WHERE key = $1", clean(key))
 	return err
@@ -254,4 +264,10 @@ func cleanValue(v any) any {
 		return out
 	}
 	return v
+}
+
+// likePrefix escapes a literal for LIKE (escape character backslash) and appends %.
+func likePrefix(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s) + "%"
 }

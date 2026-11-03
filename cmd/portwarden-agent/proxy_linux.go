@@ -22,8 +22,9 @@ import (
 // connect-counting probes are optional: when they cannot load, routes come from the
 // configs alone (and say so). It returns the probes to close at exit, or nil.
 func startProxyMapping(ctx context.Context, opts options, hostNetNS uint32, resolver *procinfo.Resolver,
-	agentOpts *agent.Options, log *slog.Logger) *probes.ProxyConns {
+	hostCgroup func(string) string, agentOpts *agent.Options, log *slog.Logger) *probes.ProxyConns {
 	procs := discover.NewProcFS("/proc")
+	procs.HostCgroup = hostCgroup
 	selfNS, _ := procs.SelfMountNS()
 	cfg := mapper.Config{
 		Procs: procs, SelfMountNS: selfNS, Enrich: resolver.Enrich,

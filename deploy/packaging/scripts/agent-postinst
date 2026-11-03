@@ -1,0 +1,47 @@
+#!/bin/sh
+# portwarden-agent postinst: the system user, then the unit the way debhelper's
+# dh_installsystemd does it: enabled on a fresh install, an administrator's disable or
+# mask kept on upgrade (deb-systemd-helper), started on install and restarted on upgrade
+# only when running (deb-systemd-invoke). Configure NATS in /etc/default/portwarden-agent;
+# until then the agent spools to /var/lib/portwarden.
+set -e
+
+UNIT=portwarden-agent.service
+
+if [ "$1" = configure ]; then
+	# Idempotent, and fine when a portwarden-agent group already exists (pre-seeded by
+	# configuration management or left by an earlier install).
+	getent group portwarden-agent >/dev/null || groupadd --system portwarden-agent
+	if ! getent passwd portwarden-agent >/dev/null; then
+		useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
+			--gid portwarden-agent portwarden-agent
+	fi
+fi
+
+if [ "$1" = configure ] || [ "$1" = abort-upgrade ] || [ "$1" = abort-deconfigure ] || [ "$1" = abort-remove ]; then
+	# Removes only a mask deb-systemd-helper itself set on package removal.
+	deb-systemd-helper unmask "$UNIT" >/dev/null || true
+	# was-enabled is true for a unit it has never seen, so a fresh install enables.
+	if deb-systemd-helper --quiet was-enabled "$UNIT"; then
+		deb-systemd-helper enable "$UNIT" >/dev/null || true
+	else
+		deb-systemd-helper update-state "$UNIT" >/dev/null || true
+	fi
+	if [ -d /run/systemd/system ]; then
+		systemctl --system daemon-reload >/dev/null || true
+		if [ -n "$2" ]; then
+			# Upgrade: restart onto the new binary only if it was running. Until it has,
+			# the running agent reports the replaced executable as "upgraded" (its prerm
+			# marker and dpkg's md5sums), which never pages.
+			deb-systemd-invoke try-restart "$UNIT" >/dev/null ||
+				echo "portwarden-agent: restart failed; see journalctl -u portwarden-agent" >&2
+		else
+			deb-systemd-invoke start "$UNIT" >/dev/null ||
+				echo "portwarden-agent: the service did not start; see journalctl -u portwarden-agent" >&2
+		fi
+	fi
+	# The upgrade is over (prerm wrote the marker); the restarted agent took a new
+	# baseline.
+	rm -f /run/portwarden-agent/upgrading
+fi
+exit 0

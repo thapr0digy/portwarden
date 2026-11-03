@@ -113,12 +113,32 @@ func parseMessage(subject string, data []byte) (parsed, error) {
 			body += fmt.Sprintf(" proxies=%d", n)
 		}
 		return parsed{header(s.GetTakenAt(), s.GetHostId(), s.GetSeq()) + " " + body, s.GetRunId(), s.GetSeq()}, nil
+	case "tamper":
+		var ev asmv1.TamperEvent
+		if err := proto.Unmarshal(data, &ev); err != nil {
+			return parsed{}, fmt.Errorf("decode %s: %w", subject, err)
+		}
+		body := "TAMPER raised=" + tamperFlags(ev.GetRaised(), "-") + " cleared=" + tamperFlags(ev.GetCleared(), "-") +
+			" now=" + tamperFlags(ev.GetStatus().GetFlags(), "ok")
+		var details []string
+		for _, f := range ev.GetRaised() {
+			if f.GetDetail() != "" {
+				details = append(details, f.GetDetail())
+			}
+		}
+		if len(details) > 0 {
+			body += " detail=" + strings.Join(details, "; ")
+		}
+		return parsed{header(ev.GetObservedAt(), ev.GetHostId(), ev.GetSeq()) + " " + body, ev.GetRunId(), ev.GetSeq()}, nil
 	case "heartbeat":
 		var h asmv1.Heartbeat
 		if err := proto.Unmarshal(data, &h); err != nil {
 			return parsed{}, fmt.Errorf("decode %s: %w", subject, err)
 		}
 		body := fmt.Sprintf("HEARTBEAT drops=%d/%d", h.GetRingbufDrops(), h.GetQueueDrops())
+		if st := h.GetTamper(); st != nil {
+			body += " tamper=" + tamperFlags(st.GetFlags(), "ok")
+		}
 		return parsed{header(h.GetAt(), h.GetHostId(), h.GetSeq()) + " " + body, h.GetRunId(), h.GetSeq()}, nil
 	}
 	return parsed{}, fmt.Errorf("unrecognised subject %q", subject)
@@ -363,4 +383,16 @@ func probeLine(ev *asmv1.ExposureConfirmation) string {
 		s += " detail=" + strconv.Quote(ev.GetDetail())
 	}
 	return s
+}
+
+// tamperFlags renders flags as "kind:subject,…", or none when there are none.
+func tamperFlags(flags []*asmv1.TamperFlag, none string) string {
+	if len(flags) == 0 {
+		return none
+	}
+	out := make([]string, 0, len(flags))
+	for _, f := range flags {
+		out = append(out, f.GetKind()+":"+f.GetSubject())
+	}
+	return strings.Join(out, ",")
 }

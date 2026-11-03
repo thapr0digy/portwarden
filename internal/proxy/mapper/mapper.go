@@ -259,6 +259,11 @@ func (m *Mapper) track() bool {
 	slices.Sort(pids)
 	key := fmt.Sprint(cgroups, pids)
 	if key == m.attached && m.trackErr == "" {
+		// Same set: SetCgroups again re-attaches a cgroup that was removed and created
+		// anew at the same path (a proxy restart that kept its pids' set unchanged here).
+		if err := m.cfg.Conns.SetCgroups(cgroups); err != nil {
+			slog.Warn("proxy connection tracking refresh", "error", err.Error())
+		}
 		return false
 	}
 	prev := m.trackErr

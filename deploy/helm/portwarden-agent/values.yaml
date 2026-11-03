@@ -1,0 +1,54 @@
+# Image built from deploy/Dockerfile after `make dist`.
+image:
+  repository: ghcr.io/thapr0digy/portwarden-agent
+  tag: ""          # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+
+nats:
+  url: tls://nats.example:4222
+  # The Secret with the NATS credentials. credentialType:
+  #   nkey-dir (default): one key per node, host-<machine-id>.nk (portwarden-natsauth mint
+  #     --role host --host <machine-id>); each agent uses its own node's seed, so nodes
+  #     stay unable to publish for each other. A node without its key fails to start.
+  #   nkey: one seed (key credentialKey), valid for exactly one host id: singleNode only.
+  #   creds: one .creds file (key credentialKey) for every node. Its user must be allowed
+  #     asm.*.> and then ANY node can forge any other node's events, heartbeats and tamper
+  #     status: only with allowSharedCredentials: true.
+  existingSecret: portwarden-agent-nats
+  credentialType: nkey-dir
+  credentialKey: host.nk
+  singleNode: false
+  allowSharedCredentials: false
+  # Optional CA for tls:// (a Secret key holding a PEM bundle).
+  caSecret: ""
+  caKey: ca.pem
+
+agent:
+  heartbeat: 30s
+  tamperInterval: 30s
+  proxyMap: auto
+  imds: auto
+  # Extra flags, appended last.
+  extraArgs: []
+
+# The runtime's default seccomp profile is used unless set to Unconfined (needed only on
+# runtimes whose default profile gates bpf()/perf_event_open() on CAP_SYS_ADMIN).
+seccompProfile: RuntimeDefault
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+priorityClassName: system-node-critical
+tolerations:
+  - operator: Exists
+nodeSelector: {}
+affinity: {}
+podAnnotations: {}
+
+# Where the spool survives restarts on each node (not /var/lib/portwarden: that is the
+# .deb's, and two agents must never share a spool).
+spoolHostPath: /var/lib/portwarden-k8s

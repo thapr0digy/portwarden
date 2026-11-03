@@ -64,7 +64,7 @@ const (
 
 // HostSubjects are the subject kinds an agent publishes under asm.<host>.
 var HostSubjects = []string{"listener.opened", "listener.closed", "listener.owner_changed", "exposure.changed",
-	"snapshot", "heartbeat", "proxy.routes", "host.changed"}
+	"snapshot", "heartbeat", "proxy.routes", "host.changed", "tamper"}
 
 // reservedHostIDs would give a host a service's reply inbox (_INBOX_<service>).
 var reservedHostIDs = map[string]bool{"inventory": true, "alerter": true, "verifier": true, "admin": true}

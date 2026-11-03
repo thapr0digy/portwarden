@@ -1,0 +1,24 @@
+#!/bin/sh
+# portwarden-backend postinst: the units are installed but never enabled here (each needs
+# its config and credentials in /etc/portwarden first, see README "Backend"); an
+# administrator's enable, disable or mask is kept, and running units are restarted onto
+# the new binaries on upgrade (deb-systemd-invoke try-restart).
+set -e
+
+UNITS="portwarden-inventory.service portwarden-alerter.service portwarden-verifier.service"
+
+if [ "$1" = configure ] || [ "$1" = abort-upgrade ] || [ "$1" = abort-deconfigure ] || [ "$1" = abort-remove ]; then
+	for unit in $UNITS; do
+		deb-systemd-helper unmask "$unit" >/dev/null || true
+		deb-systemd-helper update-state "$unit" >/dev/null || true
+	done
+	if [ -d /run/systemd/system ]; then
+		systemctl --system daemon-reload >/dev/null || true
+		if [ -n "$2" ]; then
+			for unit in $UNITS; do
+				deb-systemd-invoke try-restart "$unit" >/dev/null || echo "$unit did not restart; see journalctl -u $unit" >&2
+			done
+		fi
+	fi
+fi
+exit 0

@@ -66,6 +66,11 @@ type Config struct {
 	// LocalAddr, when set, is called with the local address of every TCP connection
 	// made to NATS (the agent's own view of its outbound address). It must not block.
 	LocalAddr func(netip.Addr)
+	// OnDenied, when set, is called (from the sender goroutine) with the subject of a
+	// message the server refused for lack of permission, before it is dropped. The agent
+	// stops on it: wrong credentials for this host must show as silence, not as a
+	// running agent whose messages vanish. It must not block.
+	OnDenied func(subject string)
 }
 
 // Publisher implements agent.Sink on top of a JetStream stream.
@@ -92,10 +97,15 @@ type Publisher struct {
 	host    model.HostInfo
 	hostSet bool
 
+	// tamper is the last tamper status (SetTamper), carried on heartbeats; nil until the
+	// first pass.
+	tamper *asmv1.TamperStatus
+
 	// usingExistingLogged is touched only by the sender goroutine.
 	usingExistingLogged bool
 
-	perms permTracker
+	perms    permTracker
+	onDenied func(subject string)
 
 	reconnected atomic.Bool
 	wake        chan struct{}
@@ -142,10 +152,11 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 		proxies: make(map[string]model.ProxyRoutes),
 		runID:   ulid.Make().String(),
 		bootID:  cfg.BootID, runNumber: cfg.RunNumber,
-		q:    q,
-		wake: make(chan struct{}, 1),
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
+		onDenied: cfg.OnDenied,
+		q:        q,
+		wake:     make(chan struct{}, 1),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 
 	opts := []nats.Option{
@@ -363,7 +374,8 @@ func (p *Publisher) hostProtoLocked() *asmv1.HostInfo {
 }
 
 // Heartbeat enqueues a liveness message carrying the ring buffer's and the spool's
-// drop counters. dropped_foreign_netns is deprecated and always 0.
+// drop counters and the last tamper status. dropped_foreign_netns is deprecated and
+// always 0.
 func (p *Publisher) Heartbeat(ringbufDrops uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -376,6 +388,7 @@ func (p *Publisher) Heartbeat(ringbufDrops uint64) {
 		At:           timestamppb.Now(),
 		RingbufDrops: ringbufDrops,
 		QueueDrops:   p.q.Dropped(),
+		Tamper:       p.tamperLocked(),
 	})
 }
 
@@ -586,8 +599,11 @@ func (p *Publisher) run() {
 		var perm *permanentError
 		if errors.As(err, &perm) {
 			slog.Error("dropping message that can never be published",
-				"subject", m.Subject, "seq", m.Seq, "event_id", m.ID, "err", perm.err)
+				"subject", m.Subject, "seq", m.Seq, "event_id", m.ID, "err", perm.err, "permission_denied", perm.denied)
 			p.q.Discard(m.ID)
+			if perm.denied && p.onDenied != nil {
+				p.onDenied(m.Subject)
+			}
 			continue
 		}
 		if err == nil {
@@ -646,7 +662,7 @@ func (p *Publisher) sendOne(m spool.Msg, streamReady *bool) error {
 			*streamReady = false // stream vanished; re-ensure before the retry
 		}
 		if p.publishNeverSucceeds(err, m.Subject, mark) {
-			return &permanentError{err}
+			return &permanentError{err: err, denied: p.perms.denied(mark, m.Subject)}
 		}
 		return err
 	}
@@ -654,7 +670,10 @@ func (p *Publisher) sendOne(m spool.Msg, streamReady *bool) error {
 }
 
 // permanentError marks a failure that retrying cannot fix.
-type permanentError struct{ err error }
+type permanentError struct {
+	err    error
+	denied bool // the server refused it for lack of permission
+}
 
 func (e *permanentError) Error() string { return e.err.Error() }
 func (e *permanentError) Unwrap() error { return e.err }

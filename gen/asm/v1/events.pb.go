@@ -801,8 +801,10 @@ type Heartbeat struct {
 	// Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
 	// its spool directory (0 when it has none). Consumers order runs of one host by
 	// (boot_id, run_number) instead of the run_id's wall-clock time.
-	BootId        string `protobuf:"bytes,9,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
-	RunNumber     uint64 `protobuf:"varint,10,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
+	BootId    string `protobuf:"bytes,9,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	RunNumber uint64 `protobuf:"varint,10,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
+	// The agent's tamper checks as of its last pass (M6); unset from agents without them.
+	Tamper        *TamperStatus `protobuf:"bytes,11,opt,name=tamper,proto3" json:"tamper,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -908,6 +910,314 @@ func (x *Heartbeat) GetRunNumber() uint64 {
 	return 0
 }
 
+func (x *Heartbeat) GetTamper() *TamperStatus {
+	if x != nil {
+		return x.Tamper
+	}
+	return nil
+}
+
+// TamperFlag is one tamper signal the agent's self-checks (design §9) currently see.
+type TamperFlag struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// probe_detached, program_replaced, map_replaced, ptraced, binary_replaced,
+	// binary_missing, unit_changed, counter_reset, events_dropped.
+	Kind string `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	// What it is about: a program name (on_listen), a file path, a counter name, "self".
+	Subject string `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
+	// e.g. "link 12 now runs program 99 (tag 0a1b...), loaded 41 (tag 9f8e...)".
+	Detail string `protobuf:"bytes,3,opt,name=detail,proto3" json:"detail,omitempty"`
+	// When the agent first saw it (this run).
+	Since *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=since,proto3" json:"since,omitempty"`
+	// What was observed (a file's new hash, a tracer's pid, a link's program id): a new
+	// fingerprint for the same kind and subject is a new flag (M6 fix wave).
+	Fingerprint string `protobuf:"bytes,5,opt,name=fingerprint,proto3" json:"fingerprint,omitempty"`
+	// Informational: reported, never paged (an upgrade by the package, drops below the
+	// agent's --tamper-drop-rate).
+	Info          bool `protobuf:"varint,6,opt,name=info,proto3" json:"info,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TamperFlag) Reset() {
+	*x = TamperFlag{}
+	mi := &file_asm_v1_events_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TamperFlag) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TamperFlag) ProtoMessage() {}
+
+func (x *TamperFlag) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TamperFlag.ProtoReflect.Descriptor instead.
+func (*TamperFlag) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *TamperFlag) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *TamperFlag) GetSubject() string {
+	if x != nil {
+		return x.Subject
+	}
+	return ""
+}
+
+func (x *TamperFlag) GetDetail() string {
+	if x != nil {
+		return x.Detail
+	}
+	return ""
+}
+
+func (x *TamperFlag) GetSince() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Since
+	}
+	return nil
+}
+
+func (x *TamperFlag) GetFingerprint() string {
+	if x != nil {
+		return x.Fingerprint
+	}
+	return ""
+}
+
+func (x *TamperFlag) GetInfo() bool {
+	if x != nil {
+		return x.Info
+	}
+	return false
+}
+
+// TamperStatus is the result of the agent's last tamper pass.
+type TamperStatus struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Every flag currently raised; empty when all checks pass.
+	Flags     []*TamperFlag          `protobuf:"bytes,1,rep,name=flags,proto3" json:"flags,omitempty"`
+	CheckedAt *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=checked_at,json=checkedAt,proto3" json:"checked_at,omitempty"`
+	// The checks that ran, e.g. "probes", "self_exe", "unit", "ptrace", "counters".
+	Checks []string `protobuf:"bytes,3,rep,name=checks,proto3" json:"checks,omitempty"`
+	// Checks that could not read their evidence this pass ("unit: no systemd unit"); never
+	// a tamper signal by themselves.
+	Unknown []string `protobuf:"bytes,4,rep,name=unknown,proto3" json:"unknown,omitempty"`
+	// Per-program run counts, only while kernel.bpf_stats_enabled is 1.
+	ProgRunCounts map[string]uint64 `protobuf:"bytes,5,rep,name=prog_run_counts,json=progRunCounts,proto3" json:"prog_run_counts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	RingbufDrops  uint64            `protobuf:"varint,6,opt,name=ringbuf_drops,json=ringbufDrops,proto3" json:"ringbuf_drops,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TamperStatus) Reset() {
+	*x = TamperStatus{}
+	mi := &file_asm_v1_events_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TamperStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TamperStatus) ProtoMessage() {}
+
+func (x *TamperStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TamperStatus.ProtoReflect.Descriptor instead.
+func (*TamperStatus) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *TamperStatus) GetFlags() []*TamperFlag {
+	if x != nil {
+		return x.Flags
+	}
+	return nil
+}
+
+func (x *TamperStatus) GetCheckedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CheckedAt
+	}
+	return nil
+}
+
+func (x *TamperStatus) GetChecks() []string {
+	if x != nil {
+		return x.Checks
+	}
+	return nil
+}
+
+func (x *TamperStatus) GetUnknown() []string {
+	if x != nil {
+		return x.Unknown
+	}
+	return nil
+}
+
+func (x *TamperStatus) GetProgRunCounts() map[string]uint64 {
+	if x != nil {
+		return x.ProgRunCounts
+	}
+	return nil
+}
+
+func (x *TamperStatus) GetRingbufDrops() uint64 {
+	if x != nil {
+		return x.RingbufDrops
+	}
+	return 0
+}
+
+// TamperEvent is published on asm.<host>.tamper whenever a flag is raised or cleared.
+type TamperEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	HostId        string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	RunId         string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	Seq           uint64                 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
+	ObservedAt    *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	Status        *TamperStatus          `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`
+	Raised        []*TamperFlag          `protobuf:"bytes,7,rep,name=raised,proto3" json:"raised,omitempty"`
+	Cleared       []*TamperFlag          `protobuf:"bytes,8,rep,name=cleared,proto3" json:"cleared,omitempty"`
+	BootId        string                 `protobuf:"bytes,9,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	RunNumber     uint64                 `protobuf:"varint,10,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TamperEvent) Reset() {
+	*x = TamperEvent{}
+	mi := &file_asm_v1_events_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TamperEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TamperEvent) ProtoMessage() {}
+
+func (x *TamperEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_asm_v1_events_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TamperEvent.ProtoReflect.Descriptor instead.
+func (*TamperEvent) Descriptor() ([]byte, []int) {
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *TamperEvent) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *TamperEvent) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *TamperEvent) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *TamperEvent) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *TamperEvent) GetObservedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ObservedAt
+	}
+	return nil
+}
+
+func (x *TamperEvent) GetStatus() *TamperStatus {
+	if x != nil {
+		return x.Status
+	}
+	return nil
+}
+
+func (x *TamperEvent) GetRaised() []*TamperFlag {
+	if x != nil {
+		return x.Raised
+	}
+	return nil
+}
+
+func (x *TamperEvent) GetCleared() []*TamperFlag {
+	if x != nil {
+		return x.Cleared
+	}
+	return nil
+}
+
+func (x *TamperEvent) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *TamperEvent) GetRunNumber() uint64 {
+	if x != nil {
+		return x.RunNumber
+	}
+	return 0
+}
+
 type Exposure struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Level ExposureLevel          `protobuf:"varint,1,opt,name=level,proto3,enum=asm.v1.ExposureLevel" json:"level,omitempty"`
@@ -920,7 +1230,7 @@ type Exposure struct {
 
 func (x *Exposure) Reset() {
 	*x = Exposure{}
-	mi := &file_asm_v1_events_proto_msgTypes[7]
+	mi := &file_asm_v1_events_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -932,7 +1242,7 @@ func (x *Exposure) String() string {
 func (*Exposure) ProtoMessage() {}
 
 func (x *Exposure) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[7]
+	mi := &file_asm_v1_events_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -945,7 +1255,7 @@ func (x *Exposure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Exposure.ProtoReflect.Descriptor instead.
 func (*Exposure) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{7}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Exposure) GetLevel() ExposureLevel {
@@ -979,7 +1289,7 @@ type PublicIP struct {
 
 func (x *PublicIP) Reset() {
 	*x = PublicIP{}
-	mi := &file_asm_v1_events_proto_msgTypes[8]
+	mi := &file_asm_v1_events_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -991,7 +1301,7 @@ func (x *PublicIP) String() string {
 func (*PublicIP) ProtoMessage() {}
 
 func (x *PublicIP) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[8]
+	mi := &file_asm_v1_events_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1004,7 +1314,7 @@ func (x *PublicIP) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublicIP.ProtoReflect.Descriptor instead.
 func (*PublicIP) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{8}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PublicIP) GetIp() string {
@@ -1054,7 +1364,7 @@ type HostInfo struct {
 
 func (x *HostInfo) Reset() {
 	*x = HostInfo{}
-	mi := &file_asm_v1_events_proto_msgTypes[9]
+	mi := &file_asm_v1_events_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1066,7 +1376,7 @@ func (x *HostInfo) String() string {
 func (*HostInfo) ProtoMessage() {}
 
 func (x *HostInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[9]
+	mi := &file_asm_v1_events_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1079,7 +1389,7 @@ func (x *HostInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostInfo.ProtoReflect.Descriptor instead.
 func (*HostInfo) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{9}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *HostInfo) GetPublicIps() []*PublicIP {
@@ -1150,7 +1460,7 @@ type ExposureEvent struct {
 
 func (x *ExposureEvent) Reset() {
 	*x = ExposureEvent{}
-	mi := &file_asm_v1_events_proto_msgTypes[10]
+	mi := &file_asm_v1_events_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1162,7 +1472,7 @@ func (x *ExposureEvent) String() string {
 func (*ExposureEvent) ProtoMessage() {}
 
 func (x *ExposureEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[10]
+	mi := &file_asm_v1_events_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1175,7 +1485,7 @@ func (x *ExposureEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExposureEvent.ProtoReflect.Descriptor instead.
 func (*ExposureEvent) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{10}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ExposureEvent) GetEventId() string {
@@ -1312,7 +1622,7 @@ type ExposureConfirmation struct {
 
 func (x *ExposureConfirmation) Reset() {
 	*x = ExposureConfirmation{}
-	mi := &file_asm_v1_events_proto_msgTypes[11]
+	mi := &file_asm_v1_events_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1324,7 +1634,7 @@ func (x *ExposureConfirmation) String() string {
 func (*ExposureConfirmation) ProtoMessage() {}
 
 func (x *ExposureConfirmation) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[11]
+	mi := &file_asm_v1_events_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1337,7 +1647,7 @@ func (x *ExposureConfirmation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExposureConfirmation.ProtoReflect.Descriptor instead.
 func (*ExposureConfirmation) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{11}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ExposureConfirmation) GetEventId() string {
@@ -1467,7 +1777,7 @@ type HostEvent struct {
 
 func (x *HostEvent) Reset() {
 	*x = HostEvent{}
-	mi := &file_asm_v1_events_proto_msgTypes[12]
+	mi := &file_asm_v1_events_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1479,7 +1789,7 @@ func (x *HostEvent) String() string {
 func (*HostEvent) ProtoMessage() {}
 
 func (x *HostEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[12]
+	mi := &file_asm_v1_events_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1492,7 +1802,7 @@ func (x *HostEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostEvent.ProtoReflect.Descriptor instead.
 func (*HostEvent) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{12}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *HostEvent) GetEventId() string {
@@ -1583,7 +1893,7 @@ type Proxy struct {
 
 func (x *Proxy) Reset() {
 	*x = Proxy{}
-	mi := &file_asm_v1_events_proto_msgTypes[13]
+	mi := &file_asm_v1_events_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1595,7 +1905,7 @@ func (x *Proxy) String() string {
 func (*Proxy) ProtoMessage() {}
 
 func (x *Proxy) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[13]
+	mi := &file_asm_v1_events_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1608,7 +1918,7 @@ func (x *Proxy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Proxy.ProtoReflect.Descriptor instead.
 func (*Proxy) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{13}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Proxy) GetId() string {
@@ -1695,7 +2005,7 @@ type ProxyBackend struct {
 
 func (x *ProxyBackend) Reset() {
 	*x = ProxyBackend{}
-	mi := &file_asm_v1_events_proto_msgTypes[14]
+	mi := &file_asm_v1_events_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1707,7 +2017,7 @@ func (x *ProxyBackend) String() string {
 func (*ProxyBackend) ProtoMessage() {}
 
 func (x *ProxyBackend) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[14]
+	mi := &file_asm_v1_events_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1720,7 +2030,7 @@ func (x *ProxyBackend) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProxyBackend.ProtoReflect.Descriptor instead.
 func (*ProxyBackend) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{14}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ProxyBackend) GetAddress() string {
@@ -1830,7 +2140,7 @@ type ProxyRoute struct {
 
 func (x *ProxyRoute) Reset() {
 	*x = ProxyRoute{}
-	mi := &file_asm_v1_events_proto_msgTypes[15]
+	mi := &file_asm_v1_events_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1842,7 +2152,7 @@ func (x *ProxyRoute) String() string {
 func (*ProxyRoute) ProtoMessage() {}
 
 func (x *ProxyRoute) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[15]
+	mi := &file_asm_v1_events_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1855,7 +2165,7 @@ func (x *ProxyRoute) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProxyRoute.ProtoReflect.Descriptor instead.
 func (*ProxyRoute) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{15}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ProxyRoute) GetListen() []string {
@@ -1960,7 +2270,7 @@ type ProxyState struct {
 
 func (x *ProxyState) Reset() {
 	*x = ProxyState{}
-	mi := &file_asm_v1_events_proto_msgTypes[16]
+	mi := &file_asm_v1_events_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1972,7 +2282,7 @@ func (x *ProxyState) String() string {
 func (*ProxyState) ProtoMessage() {}
 
 func (x *ProxyState) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[16]
+	mi := &file_asm_v1_events_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1985,7 +2295,7 @@ func (x *ProxyState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProxyState.ProtoReflect.Descriptor instead.
 func (*ProxyState) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{16}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ProxyState) GetProxy() *Proxy {
@@ -2054,7 +2364,7 @@ type ProxyRoutes struct {
 
 func (x *ProxyRoutes) Reset() {
 	*x = ProxyRoutes{}
-	mi := &file_asm_v1_events_proto_msgTypes[17]
+	mi := &file_asm_v1_events_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2066,7 +2376,7 @@ func (x *ProxyRoutes) String() string {
 func (*ProxyRoutes) ProtoMessage() {}
 
 func (x *ProxyRoutes) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[17]
+	mi := &file_asm_v1_events_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2079,7 +2389,7 @@ func (x *ProxyRoutes) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProxyRoutes.ProtoReflect.Descriptor instead.
 func (*ProxyRoutes) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{17}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ProxyRoutes) GetEventId() string {
@@ -2198,7 +2508,7 @@ type ProxyRef struct {
 
 func (x *ProxyRef) Reset() {
 	*x = ProxyRef{}
-	mi := &file_asm_v1_events_proto_msgTypes[18]
+	mi := &file_asm_v1_events_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2210,7 +2520,7 @@ func (x *ProxyRef) String() string {
 func (*ProxyRef) ProtoMessage() {}
 
 func (x *ProxyRef) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[18]
+	mi := &file_asm_v1_events_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2223,7 +2533,7 @@ func (x *ProxyRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProxyRef.ProtoReflect.Descriptor instead.
 func (*ProxyRef) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{18}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ProxyRef) GetProxyId() string {
@@ -2308,7 +2618,7 @@ type ProbeRequest struct {
 
 func (x *ProbeRequest) Reset() {
 	*x = ProbeRequest{}
-	mi := &file_asm_v1_events_proto_msgTypes[19]
+	mi := &file_asm_v1_events_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2320,7 +2630,7 @@ func (x *ProbeRequest) String() string {
 func (*ProbeRequest) ProtoMessage() {}
 
 func (x *ProbeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_asm_v1_events_proto_msgTypes[19]
+	mi := &file_asm_v1_events_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2333,7 +2643,7 @@ func (x *ProbeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProbeRequest.ProtoReflect.Descriptor instead.
 func (*ProbeRequest) Descriptor() ([]byte, []int) {
-	return file_asm_v1_events_proto_rawDescGZIP(), []int{19}
+	return file_asm_v1_events_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ProbeRequest) GetEventId() string {
@@ -2462,7 +2772,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\aboot_id\x18\t \x01(\tR\x06bootId\x12\x1d\n" +
 	"\n" +
 	"run_number\x18\n" +
-	" \x01(\x04R\trunNumber\"\xca\x02\n" +
+	" \x01(\x04R\trunNumber\"\xf8\x02\n" +
 	"\tHeartbeat\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -2473,6 +2783,40 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\vqueue_drops\x18\a \x01(\x04R\n" +
 	"queueDrops\x126\n" +
 	"\x15dropped_foreign_netns\x18\b \x01(\x04B\x02\x18\x01R\x13droppedForeignNetns\x12\x17\n" +
+	"\aboot_id\x18\t \x01(\tR\x06bootId\x12\x1d\n" +
+	"\n" +
+	"run_number\x18\n" +
+	" \x01(\x04R\trunNumber\x12,\n" +
+	"\x06tamper\x18\v \x01(\v2\x14.asm.v1.TamperStatusR\x06tamper\"\xba\x01\n" +
+	"\n" +
+	"TamperFlag\x12\x12\n" +
+	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x18\n" +
+	"\asubject\x18\x02 \x01(\tR\asubject\x12\x16\n" +
+	"\x06detail\x18\x03 \x01(\tR\x06detail\x120\n" +
+	"\x05since\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x05since\x12 \n" +
+	"\vfingerprint\x18\x05 \x01(\tR\vfingerprint\x12\x12\n" +
+	"\x04info\x18\x06 \x01(\bR\x04info\"\xdd\x02\n" +
+	"\fTamperStatus\x12(\n" +
+	"\x05flags\x18\x01 \x03(\v2\x12.asm.v1.TamperFlagR\x05flags\x129\n" +
+	"\n" +
+	"checked_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcheckedAt\x12\x16\n" +
+	"\x06checks\x18\x03 \x03(\tR\x06checks\x12\x18\n" +
+	"\aunknown\x18\x04 \x03(\tR\aunknown\x12O\n" +
+	"\x0fprog_run_counts\x18\x05 \x03(\v2'.asm.v1.TamperStatus.ProgRunCountsEntryR\rprogRunCounts\x12#\n" +
+	"\rringbuf_drops\x18\x06 \x01(\x04R\fringbufDrops\x1a@\n" +
+	"\x12ProgRunCountsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xe7\x02\n" +
+	"\vTamperEvent\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
+	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
+	"\x06run_id\x18\x03 \x01(\tR\x05runId\x12\x10\n" +
+	"\x03seq\x18\x04 \x01(\x04R\x03seq\x12;\n" +
+	"\vobserved_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"observedAt\x12,\n" +
+	"\x06status\x18\x06 \x01(\v2\x14.asm.v1.TamperStatusR\x06status\x12*\n" +
+	"\x06raised\x18\a \x03(\v2\x12.asm.v1.TamperFlagR\x06raised\x12,\n" +
+	"\acleared\x18\b \x03(\v2\x12.asm.v1.TamperFlagR\acleared\x12\x17\n" +
 	"\aboot_id\x18\t \x01(\tR\x06bootId\x12\x1d\n" +
 	"\n" +
 	"run_number\x18\n" +
@@ -2659,7 +3003,7 @@ func file_asm_v1_events_proto_rawDescGZIP() []byte {
 }
 
 var file_asm_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_asm_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_asm_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_asm_v1_events_proto_goTypes = []any{
 	(Kind)(0),                     // 0: asm.v1.Kind
 	(Source)(0),                   // 1: asm.v1.Source
@@ -2671,78 +3015,91 @@ var file_asm_v1_events_proto_goTypes = []any{
 	(*ListenerState)(nil),         // 7: asm.v1.ListenerState
 	(*Snapshot)(nil),              // 8: asm.v1.Snapshot
 	(*Heartbeat)(nil),             // 9: asm.v1.Heartbeat
-	(*Exposure)(nil),              // 10: asm.v1.Exposure
-	(*PublicIP)(nil),              // 11: asm.v1.PublicIP
-	(*HostInfo)(nil),              // 12: asm.v1.HostInfo
-	(*ExposureEvent)(nil),         // 13: asm.v1.ExposureEvent
-	(*ExposureConfirmation)(nil),  // 14: asm.v1.ExposureConfirmation
-	(*HostEvent)(nil),             // 15: asm.v1.HostEvent
-	(*Proxy)(nil),                 // 16: asm.v1.Proxy
-	(*ProxyBackend)(nil),          // 17: asm.v1.ProxyBackend
-	(*ProxyRoute)(nil),            // 18: asm.v1.ProxyRoute
-	(*ProxyState)(nil),            // 19: asm.v1.ProxyState
-	(*ProxyRoutes)(nil),           // 20: asm.v1.ProxyRoutes
-	(*ProxyRef)(nil),              // 21: asm.v1.ProxyRef
-	(*ProbeRequest)(nil),          // 22: asm.v1.ProbeRequest
-	(*timestamppb.Timestamp)(nil), // 23: google.protobuf.Timestamp
+	(*TamperFlag)(nil),            // 10: asm.v1.TamperFlag
+	(*TamperStatus)(nil),          // 11: asm.v1.TamperStatus
+	(*TamperEvent)(nil),           // 12: asm.v1.TamperEvent
+	(*Exposure)(nil),              // 13: asm.v1.Exposure
+	(*PublicIP)(nil),              // 14: asm.v1.PublicIP
+	(*HostInfo)(nil),              // 15: asm.v1.HostInfo
+	(*ExposureEvent)(nil),         // 16: asm.v1.ExposureEvent
+	(*ExposureConfirmation)(nil),  // 17: asm.v1.ExposureConfirmation
+	(*HostEvent)(nil),             // 18: asm.v1.HostEvent
+	(*Proxy)(nil),                 // 19: asm.v1.Proxy
+	(*ProxyBackend)(nil),          // 20: asm.v1.ProxyBackend
+	(*ProxyRoute)(nil),            // 21: asm.v1.ProxyRoute
+	(*ProxyState)(nil),            // 22: asm.v1.ProxyState
+	(*ProxyRoutes)(nil),           // 23: asm.v1.ProxyRoutes
+	(*ProxyRef)(nil),              // 24: asm.v1.ProxyRef
+	(*ProbeRequest)(nil),          // 25: asm.v1.ProbeRequest
+	nil,                           // 26: asm.v1.TamperStatus.ProgRunCountsEntry
+	(*timestamppb.Timestamp)(nil), // 27: google.protobuf.Timestamp
 }
 var file_asm_v1_events_proto_depIdxs = []int32{
 	4,  // 0: asm.v1.Process.container:type_name -> asm.v1.Container
-	23, // 1: asm.v1.ListenerEvent.observed_at:type_name -> google.protobuf.Timestamp
+	27, // 1: asm.v1.ListenerEvent.observed_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: asm.v1.ListenerEvent.kind:type_name -> asm.v1.Kind
 	1,  // 3: asm.v1.ListenerEvent.source:type_name -> asm.v1.Source
 	3,  // 4: asm.v1.ListenerEvent.listener:type_name -> asm.v1.Listener
 	5,  // 5: asm.v1.ListenerEvent.processes:type_name -> asm.v1.Process
 	5,  // 6: asm.v1.ListenerEvent.previous_processes:type_name -> asm.v1.Process
-	10, // 7: asm.v1.ListenerEvent.exposure:type_name -> asm.v1.Exposure
-	12, // 8: asm.v1.ListenerEvent.host:type_name -> asm.v1.HostInfo
-	21, // 9: asm.v1.ListenerEvent.behind_proxy:type_name -> asm.v1.ProxyRef
+	13, // 7: asm.v1.ListenerEvent.exposure:type_name -> asm.v1.Exposure
+	15, // 8: asm.v1.ListenerEvent.host:type_name -> asm.v1.HostInfo
+	24, // 9: asm.v1.ListenerEvent.behind_proxy:type_name -> asm.v1.ProxyRef
 	3,  // 10: asm.v1.ListenerState.listener:type_name -> asm.v1.Listener
 	5,  // 11: asm.v1.ListenerState.processes:type_name -> asm.v1.Process
-	10, // 12: asm.v1.ListenerState.exposure:type_name -> asm.v1.Exposure
-	21, // 13: asm.v1.ListenerState.behind_proxy:type_name -> asm.v1.ProxyRef
-	23, // 14: asm.v1.Snapshot.taken_at:type_name -> google.protobuf.Timestamp
+	13, // 12: asm.v1.ListenerState.exposure:type_name -> asm.v1.Exposure
+	24, // 13: asm.v1.ListenerState.behind_proxy:type_name -> asm.v1.ProxyRef
+	27, // 14: asm.v1.Snapshot.taken_at:type_name -> google.protobuf.Timestamp
 	7,  // 15: asm.v1.Snapshot.listeners:type_name -> asm.v1.ListenerState
-	12, // 16: asm.v1.Snapshot.host:type_name -> asm.v1.HostInfo
-	19, // 17: asm.v1.Snapshot.proxies:type_name -> asm.v1.ProxyState
-	23, // 18: asm.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
-	2,  // 19: asm.v1.Exposure.level:type_name -> asm.v1.ExposureLevel
-	11, // 20: asm.v1.HostInfo.public_ips:type_name -> asm.v1.PublicIP
-	23, // 21: asm.v1.ExposureEvent.observed_at:type_name -> google.protobuf.Timestamp
-	3,  // 22: asm.v1.ExposureEvent.listener:type_name -> asm.v1.Listener
-	5,  // 23: asm.v1.ExposureEvent.processes:type_name -> asm.v1.Process
-	10, // 24: asm.v1.ExposureEvent.exposure:type_name -> asm.v1.Exposure
-	10, // 25: asm.v1.ExposureEvent.previous:type_name -> asm.v1.Exposure
-	12, // 26: asm.v1.ExposureEvent.host:type_name -> asm.v1.HostInfo
-	23, // 27: asm.v1.ExposureConfirmation.observed_at:type_name -> google.protobuf.Timestamp
-	3,  // 28: asm.v1.ExposureConfirmation.listener:type_name -> asm.v1.Listener
-	10, // 29: asm.v1.ExposureConfirmation.exposure:type_name -> asm.v1.Exposure
-	23, // 30: asm.v1.HostEvent.observed_at:type_name -> google.protobuf.Timestamp
-	12, // 31: asm.v1.HostEvent.host:type_name -> asm.v1.HostInfo
-	12, // 32: asm.v1.HostEvent.previous:type_name -> asm.v1.HostInfo
-	5,  // 33: asm.v1.Proxy.processes:type_name -> asm.v1.Process
-	3,  // 34: asm.v1.Proxy.listeners:type_name -> asm.v1.Listener
-	3,  // 35: asm.v1.ProxyBackend.listener:type_name -> asm.v1.Listener
-	5,  // 36: asm.v1.ProxyBackend.processes:type_name -> asm.v1.Process
-	23, // 37: asm.v1.ProxyBackend.last_seen:type_name -> google.protobuf.Timestamp
-	3,  // 38: asm.v1.ProxyRoute.frontends:type_name -> asm.v1.Listener
-	17, // 39: asm.v1.ProxyRoute.backends:type_name -> asm.v1.ProxyBackend
-	16, // 40: asm.v1.ProxyState.proxy:type_name -> asm.v1.Proxy
-	18, // 41: asm.v1.ProxyState.routes:type_name -> asm.v1.ProxyRoute
-	23, // 42: asm.v1.ProxyRoutes.observed_at:type_name -> google.protobuf.Timestamp
-	16, // 43: asm.v1.ProxyRoutes.proxy:type_name -> asm.v1.Proxy
-	18, // 44: asm.v1.ProxyRoutes.routes:type_name -> asm.v1.ProxyRoute
-	12, // 45: asm.v1.ProxyRoutes.host:type_name -> asm.v1.HostInfo
-	5,  // 46: asm.v1.ProxyRef.proxy:type_name -> asm.v1.Process
-	3,  // 47: asm.v1.ProxyRef.frontends:type_name -> asm.v1.Listener
-	23, // 48: asm.v1.ProbeRequest.requested_at:type_name -> google.protobuf.Timestamp
-	3,  // 49: asm.v1.ProbeRequest.listener:type_name -> asm.v1.Listener
-	2,  // 50: asm.v1.ProbeRequest.level:type_name -> asm.v1.ExposureLevel
-	51, // [51:51] is the sub-list for method output_type
-	51, // [51:51] is the sub-list for method input_type
-	51, // [51:51] is the sub-list for extension type_name
-	51, // [51:51] is the sub-list for extension extendee
-	0,  // [0:51] is the sub-list for field type_name
+	15, // 16: asm.v1.Snapshot.host:type_name -> asm.v1.HostInfo
+	22, // 17: asm.v1.Snapshot.proxies:type_name -> asm.v1.ProxyState
+	27, // 18: asm.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
+	11, // 19: asm.v1.Heartbeat.tamper:type_name -> asm.v1.TamperStatus
+	27, // 20: asm.v1.TamperFlag.since:type_name -> google.protobuf.Timestamp
+	10, // 21: asm.v1.TamperStatus.flags:type_name -> asm.v1.TamperFlag
+	27, // 22: asm.v1.TamperStatus.checked_at:type_name -> google.protobuf.Timestamp
+	26, // 23: asm.v1.TamperStatus.prog_run_counts:type_name -> asm.v1.TamperStatus.ProgRunCountsEntry
+	27, // 24: asm.v1.TamperEvent.observed_at:type_name -> google.protobuf.Timestamp
+	11, // 25: asm.v1.TamperEvent.status:type_name -> asm.v1.TamperStatus
+	10, // 26: asm.v1.TamperEvent.raised:type_name -> asm.v1.TamperFlag
+	10, // 27: asm.v1.TamperEvent.cleared:type_name -> asm.v1.TamperFlag
+	2,  // 28: asm.v1.Exposure.level:type_name -> asm.v1.ExposureLevel
+	14, // 29: asm.v1.HostInfo.public_ips:type_name -> asm.v1.PublicIP
+	27, // 30: asm.v1.ExposureEvent.observed_at:type_name -> google.protobuf.Timestamp
+	3,  // 31: asm.v1.ExposureEvent.listener:type_name -> asm.v1.Listener
+	5,  // 32: asm.v1.ExposureEvent.processes:type_name -> asm.v1.Process
+	13, // 33: asm.v1.ExposureEvent.exposure:type_name -> asm.v1.Exposure
+	13, // 34: asm.v1.ExposureEvent.previous:type_name -> asm.v1.Exposure
+	15, // 35: asm.v1.ExposureEvent.host:type_name -> asm.v1.HostInfo
+	27, // 36: asm.v1.ExposureConfirmation.observed_at:type_name -> google.protobuf.Timestamp
+	3,  // 37: asm.v1.ExposureConfirmation.listener:type_name -> asm.v1.Listener
+	13, // 38: asm.v1.ExposureConfirmation.exposure:type_name -> asm.v1.Exposure
+	27, // 39: asm.v1.HostEvent.observed_at:type_name -> google.protobuf.Timestamp
+	15, // 40: asm.v1.HostEvent.host:type_name -> asm.v1.HostInfo
+	15, // 41: asm.v1.HostEvent.previous:type_name -> asm.v1.HostInfo
+	5,  // 42: asm.v1.Proxy.processes:type_name -> asm.v1.Process
+	3,  // 43: asm.v1.Proxy.listeners:type_name -> asm.v1.Listener
+	3,  // 44: asm.v1.ProxyBackend.listener:type_name -> asm.v1.Listener
+	5,  // 45: asm.v1.ProxyBackend.processes:type_name -> asm.v1.Process
+	27, // 46: asm.v1.ProxyBackend.last_seen:type_name -> google.protobuf.Timestamp
+	3,  // 47: asm.v1.ProxyRoute.frontends:type_name -> asm.v1.Listener
+	20, // 48: asm.v1.ProxyRoute.backends:type_name -> asm.v1.ProxyBackend
+	19, // 49: asm.v1.ProxyState.proxy:type_name -> asm.v1.Proxy
+	21, // 50: asm.v1.ProxyState.routes:type_name -> asm.v1.ProxyRoute
+	27, // 51: asm.v1.ProxyRoutes.observed_at:type_name -> google.protobuf.Timestamp
+	19, // 52: asm.v1.ProxyRoutes.proxy:type_name -> asm.v1.Proxy
+	21, // 53: asm.v1.ProxyRoutes.routes:type_name -> asm.v1.ProxyRoute
+	15, // 54: asm.v1.ProxyRoutes.host:type_name -> asm.v1.HostInfo
+	5,  // 55: asm.v1.ProxyRef.proxy:type_name -> asm.v1.Process
+	3,  // 56: asm.v1.ProxyRef.frontends:type_name -> asm.v1.Listener
+	27, // 57: asm.v1.ProbeRequest.requested_at:type_name -> google.protobuf.Timestamp
+	3,  // 58: asm.v1.ProbeRequest.listener:type_name -> asm.v1.Listener
+	2,  // 59: asm.v1.ProbeRequest.level:type_name -> asm.v1.ExposureLevel
+	60, // [60:60] is the sub-list for method output_type
+	60, // [60:60] is the sub-list for method input_type
+	60, // [60:60] is the sub-list for extension type_name
+	60, // [60:60] is the sub-list for extension extendee
+	0,  // [0:60] is the sub-list for field type_name
 }
 
 func init() { file_asm_v1_events_proto_init() }
@@ -2756,7 +3113,7 @@ func file_asm_v1_events_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_asm_v1_events_proto_rawDesc), len(file_asm_v1_events_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   20,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

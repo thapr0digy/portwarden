@@ -1,5 +1,6 @@
 [Unit]
 Description=Portwarden agent (TCP/UDP listener inventory and exposure to NATS)
+Documentation=https://github.com/thapr0digy/portwarden
 DefaultDependencies=no
 Before=network-pre.target shutdown.target
 # Needed for a clean SIGTERM (and spool flush) at shutdown now default dependencies are off.
@@ -10,7 +11,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-# Static system user, created by dev/install-agent.sh:
+# Static system user (the .deb's postinst creates it; dev/install-agent.sh in the VM):
 #   useradd --system --no-create-home --shell /usr/sbin/nologin portwarden-agent
 User=portwarden-agent
 # Unsent messages are spooled here (64 MiB cap by default) and survive restarts.
@@ -18,19 +19,58 @@ User=portwarden-agent
 # under ProtectSystem=strict.
 StateDirectory=portwarden
 StateDirectoryMode=0700
-ExecStart=/usr/local/bin/portwarden-agent --spool-dir /var/lib/portwarden/spool
-# CAP_NET_ADMIN: read the firewall (nft list ruleset, iptables-nft-save) and join the
-# nf_tables change-notification group; both fail with EPERM without it. The agent runs
-# nft/iptables-save as children, which inherit the ambient set.
+# Site settings (NATS URL, credentials, TLS) go in PORTWARDEN_AGENT_ARGS, e.g.
+#   PORTWARDEN_AGENT_ARGS="--nats-url tls://nats.example:4222 --nats-nkey /etc/portwarden/agent/host.nk --tls-ca /etc/portwarden/nats-ca.pem"
+EnvironmentFile=-/etc/default/portwarden-agent
+ExecStart=/usr/bin/portwarden-agent --spool-dir /var/lib/portwarden/spool $PORTWARDEN_AGENT_ARGS
+Restart=always
+RestartSec=2s
+# The agent should outlive memory pressure that kills the services it watches.
+OOMScoreAdjust=-500
+
+# --- Privileges (design §9): exactly these four, ambient so the non-root user holds them.
+# CAP_BPF, CAP_PERFMON: load and attach the eBPF programs. CAP_SYS_PTRACE: read other
+# users' /proc/<pid>/exe, fd and root links. CAP_NET_ADMIN: read the firewall (nft list
+# ruleset, iptables-nft-save) and join the nf_tables change-notification group; both fail
+# with EPERM without it. The agent runs nft/iptables-save as children, which inherit the
+# ambient set (NoNewPrivileges keeps them from gaining more).
 AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_NET_ADMIN
 NoNewPrivileges=yes
-# Both leave /proc and /sys readable. ProtectKernelTunables is left off on purpose:
-# it hides /proc/kallsyms.
+
+# --- Filesystem. Everything is read-only but the state directory; /proc and /sys stay
+# readable (the agent reads every process's /proc entries, BTF and the cgroup tree).
+# ProtectKernelTunables also hides /proc/kallsyms and /proc/kcore: fine for the fentry,
+# fexit and cgroup programs used now (they resolve through BTF), but a future program
+# that needs kernel symbols (__ksym, kprobe.multi by name) fails to load under it.
 ProtectSystem=strict
 ProtectHome=yes
-Restart=always
-RestartSec=2s
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+UMask=0077
+
+# --- Kernel interfaces. AF_NETLINK: sock_diag, rtnetlink and nf_tables (the agent and
+# nft); AF_UNIX: the systemd bus; AF_INET/AF_INET6: NATS and cloud metadata. It never
+# listens. Namespaces are only read through /proc, never entered.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+PrivateIPC=yes
+SystemCallArchitectures=native
+# @system-service plus the two eBPF syscalls (bpf is in @privileged, perf_event_open in
+# @debug; neither group is allowed whole).
+SystemCallFilter=@system-service bpf perf_event_open
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=sysinit.target

@@ -70,3 +70,34 @@ func TestParseFlagsProxy(t *testing.T) {
 		}
 	}
 }
+
+func TestParseFlagsTamper(t *testing.T) {
+	o, err := parseFlags(nil)
+	if err != nil || o.tamperInterval != 30*time.Second || len(o.tamperFiles) != 0 {
+		t.Fatalf("tamper defaults: %+v %v", o, err)
+	}
+	o, err = parseFlags([]string{"--tamper-interval", "0s", "--tamper-files", "/etc/default/portwarden-agent,/etc/portwarden/agent/host.nk"})
+	if err != nil || o.tamperInterval != 0 || len(o.tamperFiles) != 2 || o.tamperFiles[1] != "/etc/portwarden/agent/host.nk" {
+		t.Fatalf("parsed %+v %v", o, err)
+	}
+	for _, args := range [][]string{{"--tamper-interval", "-1s"}, {"--tamper-files", "relative/path"}} {
+		if _, err := parseFlags(args); err == nil {
+			t.Fatalf("%v must be rejected", args)
+		}
+	}
+}
+
+func TestParseFlagsM6FixWave(t *testing.T) {
+	o, err := parseFlags(nil)
+	if err != nil || o.tamperDropRate != 1000 || o.natsNkeyDir != "" {
+		t.Fatalf("defaults %+v %v", o, err)
+	}
+	if o, err := parseFlags([]string{"--nats-nkey-dir", "/etc/portwarden/nats", "--tamper-drop-rate", "0"}); err != nil || o.natsNkeyDir == "" || o.tamperDropRate != 0 {
+		t.Fatalf("parsed %+v %v", o, err)
+	}
+	for _, args := range [][]string{{"--nats-nkey-dir", "/x", "--nats-nkey", "/y"}, {"--tamper-drop-rate", "-1"}} {
+		if _, err := parseFlags(args); err == nil {
+			t.Fatalf("%v must be rejected", args)
+		}
+	}
+}

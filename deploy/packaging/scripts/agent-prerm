@@ -1,0 +1,18 @@
+#!/bin/sh
+# portwarden-agent prerm: on removal stop the unit; on upgrade leave it running and write
+# the marker the agent's tamper check reads (/run/portwarden-agent/upgrading, holding the
+# version being installed): while it is fresh (10 min), an executable or unit file that
+# dpkg's md5sums for that version list with exactly the content on disk is reported as
+# "upgraded" (information), not as tamper. postinst removes it.
+set -e
+
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+	deb-systemd-invoke stop portwarden-agent.service >/dev/null || true
+fi
+if [ "$1" = upgrade ] && [ -n "$2" ]; then
+	mkdir -p /run/portwarden-agent
+	chmod 0755 /run/portwarden-agent
+	printf '%s\n' "$2" >/run/portwarden-agent/upgrading
+	chmod 0644 /run/portwarden-agent/upgrading
+fi
+exit 0

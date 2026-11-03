@@ -19,9 +19,11 @@ import (
 	"path/filepath"
 
 	"github.com/thapr0digy/portwarden/internal/natsauth"
+	"github.com/thapr0digy/portwarden/internal/version"
 )
 
 func main() {
+	version.HandleFlag()
 	if err := run(os.Args[1:], os.Stdout); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)

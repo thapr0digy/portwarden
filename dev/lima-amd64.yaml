@@ -1,0 +1,16 @@
+# Kernel matrix leg: Ubuntu 24.04 on x86_64 (amd64), emulated with QEMU TCG on an arm64
+# Mac (slow: minutes to boot). Created by `make matrix MATRIX_LEGS=amd64` as the Lima
+# instance portwarden-amd64 (remove it with `limactl delete -f portwarden-amd64`). It
+# runs test binaries cross-compiled on the host (dev/matrix.sh), so it needs no Go
+# toolchain. On an x86_64 host QEMU uses KVM instead and this leg runs at native speed.
+minimumLimaVersion: 2.0.0
+base:
+  - template:_images/ubuntu-24.04
+arch: x86_64
+vmType: qemu
+cpus: 4
+memory: 4GiB
+disk: 20GiB
+mounts:
+  - location: "{{.Home}}/projects/portwarden"
+    writable: true

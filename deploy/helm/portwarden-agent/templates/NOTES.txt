@@ -1,0 +1,7 @@
+The portwarden-agent DaemonSet runs in {{ .Release.Namespace }}. That namespace needs the
+"privileged" Pod Security level (hostPID, hostNetwork, hostPath, added capabilities):
+  kubectl label namespace {{ .Release.Namespace }} pod-security.kubernetes.io/enforce=privileged
+{{- if eq .Values.nats.credentialType "nkey-dir" }}
+The Secret {{ .Values.nats.existingSecret }} must hold host-<machine-id>.nk for every node;
+a node without its key does not start.
+{{- end }}

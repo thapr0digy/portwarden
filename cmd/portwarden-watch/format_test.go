@@ -87,6 +87,41 @@ func TestFormatHeartbeat(t *testing.T) {
 	}
 }
 
+func TestFormatHeartbeatTamper(t *testing.T) {
+	hb := &asmv1.Heartbeat{HostId: hostID, RunId: "r1", Seq: 9, At: at, Tamper: &asmv1.TamperStatus{
+		Flags: []*asmv1.TamperFlag{{Kind: "ptraced", Subject: "self"}, {Kind: "probe_detached", Subject: "on_connect4"}}}}
+	got, err := formatEvent("asm."+hostID+".heartbeat", mustMarshal(t, hb))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "2026-10-30T14:02:11.418Z 01234567 seq=9 HEARTBEAT drops=0/0 tamper=ptraced:self,probe_detached:on_connect4"
+	if got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+	// A clean status says so, so a log shows the checks run.
+	hb.Tamper = &asmv1.TamperStatus{Checks: []string{"probes"}}
+	got, _ = formatEvent("asm."+hostID+".heartbeat", mustMarshal(t, hb))
+	if want := "2026-10-30T14:02:11.418Z 01234567 seq=9 HEARTBEAT drops=0/0 tamper=ok"; got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestFormatTamper(t *testing.T) {
+	ev := &asmv1.TamperEvent{HostId: hostID, RunId: "r1", Seq: 12, ObservedAt: at,
+		Raised:  []*asmv1.TamperFlag{{Kind: "binary_replaced", Subject: "/usr/bin/portwarden-agent", Detail: "sha256 ab12 on disk, running 9f00"}},
+		Cleared: []*asmv1.TamperFlag{{Kind: "ptraced", Subject: "self"}},
+		Status:  &asmv1.TamperStatus{Flags: []*asmv1.TamperFlag{{Kind: "binary_replaced", Subject: "/usr/bin/portwarden-agent"}}}}
+	got, err := formatEvent("asm."+hostID+".tamper", mustMarshal(t, ev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "2026-10-30T14:02:11.418Z 01234567 seq=12 TAMPER raised=binary_replaced:/usr/bin/portwarden-agent cleared=ptraced:self " +
+		"now=binary_replaced:/usr/bin/portwarden-agent detail=sha256 ab12 on disk, running 9f00"
+	if got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}
+
 func TestFormatOwnerChanged(t *testing.T) {
 	ev := &asmv1.ListenerEvent{
 		HostId: hostID, RunId: "r1", Seq: 7, ObservedAt: at, Kind: asmv1.Kind_OWNER_CHANGED,

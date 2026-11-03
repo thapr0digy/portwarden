@@ -1,0 +1,24 @@
+#!/bin/sh
+# portwarden-agent postrm, as dh_installsystemd: mask on remove (so a leftover
+# configuration cannot start a missing binary), forget the unit's state on purge, and
+# drop the spool directory on purge. The system user is kept (Debian practice: files it
+# owned may remain elsewhere).
+set -e
+
+UNIT=portwarden-agent.service
+
+if [ -d /run/systemd/system ]; then
+	systemctl --system daemon-reload >/dev/null || true
+fi
+if [ "$1" = remove ]; then
+	deb-systemd-helper mask "$UNIT" >/dev/null || true
+fi
+if [ "$1" = purge ]; then
+	deb-systemd-helper purge "$UNIT" >/dev/null || true
+	deb-systemd-helper unmask "$UNIT" >/dev/null || true
+	rm -rf /var/lib/portwarden
+fi
+if [ "$1" = abort-upgrade ] || [ "$1" = failed-upgrade ]; then
+	rm -f /run/portwarden-agent/upgrading
+fi
+exit 0

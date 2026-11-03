@@ -2,6 +2,8 @@ package alerter
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -28,6 +30,16 @@ func (m *MemState) SetPaged(_ context.Context, key string, at time.Time) error {
 func (m *MemState) ClearPaged(_ context.Context, key string) error {
 	delete(m.Paged, key)
 	return nil
+}
+func (m *MemState) PagedKeys(_ context.Context, prefix string) ([]string, error) {
+	var out []string
+	for k := range m.Paged {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
 }
 func (m *MemState) ProbeResult(_ context.Context, key string) (string, error) {
 	return m.Probes[key], nil

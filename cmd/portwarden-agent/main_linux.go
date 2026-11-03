@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -19,7 +21,9 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/thapr0digy/portwarden/internal/agent"
+	"github.com/thapr0digy/portwarden/internal/backend/bus"
 	"github.com/thapr0digy/portwarden/internal/baseline"
+	"github.com/thapr0digy/portwarden/internal/cgroupns"
 	"github.com/thapr0digy/portwarden/internal/exposure"
 	"github.com/thapr0digy/portwarden/internal/hostid"
 	"github.com/thapr0digy/portwarden/internal/model"
@@ -31,6 +35,8 @@ import (
 	"github.com/thapr0digy/portwarden/internal/publish"
 	"github.com/thapr0digy/portwarden/internal/sdsocket"
 	"github.com/thapr0digy/portwarden/internal/state"
+	"github.com/thapr0digy/portwarden/internal/tamper"
+	"github.com/thapr0digy/portwarden/internal/version"
 )
 
 const (
@@ -51,6 +57,8 @@ const (
 	defaultProxyPoll = 2 * time.Second
 	proxySettle      = 2 * time.Second  // a changed proxy config is read once it held still this long
 	proxyMinGap      = 10 * time.Second // at most one proxy.routes per proxy per this interval
+	defaultTamper    = 30 * time.Second
+	defaultDropRate  = 1000
 )
 
 type options struct {
@@ -63,6 +71,10 @@ type options struct {
 	imds                                                                string
 	proxyMap                                                            string
 	proxyPoll                                                           time.Duration
+	tamperInterval                                                      time.Duration
+	tamperFiles                                                         []string
+	tamperDropRate                                                      float64
+	natsNkeyDir                                                         string
 }
 
 func parseFlags(args []string) (options, error) {
@@ -84,8 +96,30 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&o.imds, "imds", "auto", "cloud metadata for public IPs: auto (only when DMI says AWS, GCP or Azure) or off")
 	fs.StringVar(&o.proxyMap, "proxy-map", "auto", "map reverse proxies (nginx, Apache, HAProxy configs; observed proxy connections): auto or off")
 	fs.DurationVar(&o.proxyPoll, "proxy-poll", defaultProxyPoll, "how often proxy config files and connection counts are checked")
+	fs.DurationVar(&o.tamperInterval, "tamper-interval", defaultTamper, "interval between tamper self-checks (0 disables them)")
+	fs.Float64Var(&o.tamperDropRate, "tamper-drop-rate", defaultDropRate, "ring-buffer drops per minute at which events_dropped pages (below it the flag is informational; 0 never pages)")
+	fs.StringVar(&o.natsNkeyDir, "nats-nkey-dir", "", "directory of per-host nkey seeds (host-<host id>.nk, as portwarden-natsauth mint writes them): the agent uses its own host's (one Secret for a whole Kubernetes cluster)")
+	tamperFiles := fs.String("tamper-files", "", "comma-separated absolute paths of extra files whose change is a tamper signal (e.g. the NATS credentials)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
+	}
+	if o.tamperDropRate < 0 {
+		return o, fmt.Errorf("--tamper-drop-rate must not be negative, got %v", o.tamperDropRate)
+	}
+	if o.natsNkeyDir != "" && (o.natsNkey != "" || o.natsCreds != "") {
+		return o, errors.New("--nats-nkey-dir excludes --nats-nkey and --nats-creds")
+	}
+	if o.tamperInterval < 0 {
+		return o, fmt.Errorf("--tamper-interval must not be negative, got %s", o.tamperInterval)
+	}
+	for _, f := range strings.Split(*tamperFiles, ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		if !filepath.IsAbs(f) {
+			return o, fmt.Errorf("--tamper-files: %q is not an absolute path", f)
+		}
+		o.tamperFiles = append(o.tamperFiles, f)
 	}
 	if o.firewallPoll <= 0 {
 		return o, fmt.Errorf("--firewall-poll must be positive, got %s", o.firewallPoll)
@@ -117,6 +151,7 @@ func parseFlags(args []string) (options, error) {
 }
 
 func main() {
+	version.HandleFlag()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	slog.SetDefault(log)
 	opts, err := parseFlags(os.Args[1:])
@@ -141,6 +176,14 @@ func run(opts options, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if opts.natsNkeyDir != "" {
+		// One Secret for a cluster holds every node's seed; each agent takes its own, so
+		// hosts stay unable to publish for each other (ruling R-f).
+		opts.natsNkey = filepath.Join(opts.natsNkeyDir, "host-"+host+".nk")
+		if _, err := os.Stat(opts.natsNkey); err != nil {
+			return fmt.Errorf("--nats-nkey-dir: no seed for this host (%s): %w", host, err)
+		}
+	}
 	hostNetNS, err := baseline.HostNetNS()
 	if err != nil {
 		return fmt.Errorf("host network namespace: %w", err)
@@ -148,6 +191,9 @@ func run(opts options, log *slog.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	// Set when NATS refuses the agent's own subjects: the agent exits with it, so wrong
+	// credentials show as a failed unit and host silence, never as lost messages.
+	var deniedErr atomic.Pointer[error]
 
 	// Socket units are listed before the baseline, so socket-activated listeners in the
 	// startup snapshot carry their units; Match never blocks after this.
@@ -156,6 +202,15 @@ func run(opts options, log *slog.Logger) error {
 	matcher.Prime(primeCtx)
 	cancelPrime()
 	resolver := procinfo.NewResolver("/proc", "/sys/fs/cgroup", hashMaxBytes)
+	// In a container (a DaemonSet) /proc cgroup paths are relative to a private cgroup
+	// namespace; units, containers and the proxy cgroups need the host's paths.
+	cgns, err := cgroupns.Detect("/proc", "/sys/fs/cgroup")
+	if err != nil {
+		log.Warn("cgroup namespace root unknown; cgroup paths are used as /proc shows them", "err", err.Error())
+	} else if cgns.Root != "" {
+		log.Info("private cgroup namespace; translating cgroup paths", "root", cgns.Root)
+	}
+	resolver.SetCgroupTranslator(cgns.Host)
 	enrich := newEnricher(resolver, matcher, hostNetNS)
 
 	// The first exposure view (firewall and interfaces; each tool read is bounded) is read
@@ -187,6 +242,14 @@ func run(opts options, log *slog.Logger) error {
 	}
 	hostInfo.SetConditions(initialView.Conditions())
 
+	// Extra watched files are hashed before anything starts: a missing one is a bad flag.
+	var extraFiles *tamper.FileSet
+	if opts.tamperInterval > 0 && len(opts.tamperFiles) > 0 {
+		if extraFiles, err = tamper.NewFileSet("files", tamper.KindFileChanged, tamper.StaticFiles(opts.tamperFiles...)); err != nil {
+			return fmt.Errorf("--tamper-files: %w", err)
+		}
+	}
+
 	// Probes first, so no listener is missed while the baseline is taken.
 	pr, err := probes.Start()
 	if err != nil {
@@ -205,6 +268,16 @@ func run(opts options, log *slog.Logger) error {
 		SpoolDir: opts.spoolDir, SpoolMax: opts.spoolMax,
 		BootID: publish.ReadBootID(publish.BootIDPath), RunNumber: runNumber,
 		LocalAddr: hostInfo.SetIngestLocal,
+		OnDenied: func(subject string) {
+			if strings.HasSuffix(subject, "."+bus.KindTamper) {
+				log.Error("NATS refuses tamper events: re-render the auth block (portwarden-natsauth render) for this release", "subject", subject)
+				return
+			}
+			err := fmt.Errorf("NATS refuses this agent's publishes (%s): its credentials are not host %s's user", subject, host)
+			if deniedErr.CompareAndSwap(nil, &err) {
+				stop()
+			}
+		},
 	})
 	if err != nil {
 		_ = pr.Close()
@@ -231,7 +304,7 @@ func run(opts options, log *slog.Logger) error {
 			go publicip.RunIMDS(ctx, publicip.NewClient("", imdsTimeout), cloud, refresh, imdsRetry, hostInfo.SetCloud)
 		}
 	}
-	log.Info("started", "host_id", host, "netns", hostNetNS, "nats_url", opts.natsURL,
+	log.Info("started", "version", version.Version, "host_id", host, "netns", hostNetNS, "nats_url", opts.natsURL,
 		"spool_dir", opts.spoolDir, "spool_max", opts.spoolMax)
 
 	var beats sync.WaitGroup
@@ -254,10 +327,22 @@ func run(opts options, log *slog.Logger) error {
 	}
 	var proxyConns *probes.ProxyConns
 	if opts.proxyMap == "auto" {
-		proxyConns = startProxyMapping(ctx, opts, hostNetNS, resolver, &agentOpts, log)
+		proxyConns = startProxyMapping(ctx, opts, hostNetNS, resolver, cgns.Host, &agentOpts, log)
+	}
+
+	if opts.tamperInterval > 0 {
+		mon := newTamperMonitor(extraFiles, opts.tamperDropRate, pr, proxyConns, log)
+		beats.Add(1)
+		go func() {
+			defer beats.Done()
+			tamperLoop(ctx, opts.tamperInterval, mon, pub, log)
+		}()
 	}
 
 	runErr := agent.Run(ctx, pr, baseline.Snapshot, loggingSink{pub, log}, agentOpts)
+	if e := deniedErr.Load(); e != nil {
+		runErr = *e
+	}
 	stop() // end the heartbeat loop even if Run returned on its own
 	beats.Wait()
 

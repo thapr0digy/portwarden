@@ -25,6 +25,10 @@ type Resolver struct {
 	open func(string) (*os.File, error) // test seam: opens an exe for hashing
 	now  func() time.Time               // test seam: clock for the rewalk limit
 
+	// hostCgroup maps a /proc cgroup path to the host's (cgroupns.Translator.Host);
+	// nil is the identity.
+	hostCgroup func(string) string
+
 	mu       sync.Mutex
 	hashes   map[fileID]string
 	cgroups  map[uint64]string // cgroup id (dir inode) -> path relative to cgroupRoot
@@ -41,6 +45,10 @@ func NewResolver(procRoot, cgroupRoot string, hashMax int64) *Resolver {
 		hashes: make(map[fileID]string),
 	}
 }
+
+// SetCgroupTranslator sets how /proc cgroup paths become host paths when the agent runs
+// in a private cgroup namespace (cgroupns.Translator.Host). Call it before Enrich.
+func (r *Resolver) SetCgroupTranslator(host func(string) string) { r.hostCgroup = host }
 
 // Enrich fills the empty Exe, Cmdline, SHA256, Unit and Container fields of p from
 // /proc/<pid>, or from p.CgroupID when the process has already exited. It never
@@ -90,6 +98,9 @@ func (r *Resolver) cgroupPath(procDir string, id uint64) (string, bool) {
 	if b, err := os.ReadFile(filepath.Join(procDir, "cgroup")); err == nil {
 		for _, line := range strings.Split(string(b), "\n") {
 			if path, ok := strings.CutPrefix(line, "0::"); ok {
+				if r.hostCgroup != nil {
+					path = r.hostCgroup(path)
+				}
 				return path, true
 			}
 		}

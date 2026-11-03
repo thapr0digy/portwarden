@@ -71,6 +71,13 @@ type Table struct {
 	// has several (a socket-activated sshd is held by systemd and by sshd).
 	coOwners map[uint64][]model.Process
 	pending  map[model.ListenerKey]pendingClose
+	// flags holds each open or pending listener's IPV6_V6ONLY flag as last reported;
+	// flagMoved is set when a mutation changed an open listener's flag without any
+	// listener-level Change (a dual-stack SO_REUSEPORT socket joining a v6-only key, a
+	// reopen inside the close grace with another flag): its exposure must be judged
+	// again. TakeRejudge reads and clears it.
+	flags     map[model.ListenerKey]model.V6Only
+	flagMoved bool
 }
 
 // New returns an empty table. A listener that loses its last socket closes
@@ -82,7 +89,34 @@ func New(closeGrace time.Duration) *Table {
 		byKey:      make(map[model.ListenerKey]map[uint64]struct{}),
 		coOwners:   make(map[uint64][]model.Process),
 		pending:    make(map[model.ListenerKey]pendingClose),
+		flags:      make(map[model.ListenerKey]model.V6Only),
 	}
+}
+
+// TakeRejudge reports whether an open listener's IPV6_V6ONLY flag changed since the
+// last call without a Change saying so, and clears it. The caller judges exposure
+// again: the flag decides whether a [::] listener takes IPv4.
+func (t *Table) TakeRejudge() bool {
+	moved := t.flagMoved
+	t.flagMoved = false
+	return moved
+}
+
+// noteFlag records an open listener's current flag, raising flagMoved when it differs
+// from the one last recorded (kept through a pending close). A listener that is not
+// open keeps its record while pending and loses it once closed.
+func (t *Table) noteFlag(k model.ListenerKey) {
+	if _, open := t.byKey[k]; !open {
+		if _, pending := t.pending[k]; !pending {
+			delete(t.flags, k)
+		}
+		return
+	}
+	cur := t.v6OnlyOf(k)
+	if prev, ok := t.flags[k]; ok && prev != cur {
+		t.flagMoved = true
+	}
+	t.flags[k] = cur
 }
 
 // Apply records an observation and returns the listener-level changes it causes.
@@ -94,8 +128,16 @@ func New(closeGrace time.Duration) *Table {
 func (t *Table) Apply(o model.Observation) []Change {
 	switch o.Kind {
 	case model.Opened:
+		key := o.Key
+		if stored, live := t.sockets[o.Cookie]; live {
+			key = stored.Key
+		}
+		defer t.noteFlag(key)
 		return t.open(o)
 	case model.Closed:
+		if stored, live := t.sockets[o.Cookie]; live {
+			defer t.noteFlag(stored.Key)
+		}
 		return t.close(o)
 	}
 	return nil
@@ -204,6 +246,7 @@ func (t *Table) Expire(now time.Time) []Change {
 			continue
 		}
 		delete(t.pending, key)
+		delete(t.flags, key)
 		out = append(out, Change{Kind: model.Closed, Key: key, Procs: p.procs, At: p.at, Source: p.source})
 	}
 	sortChanges(out)
@@ -294,6 +337,10 @@ func (t *Table) Reconcile(dump []model.Observation, touched map[uint64]struct{},
 	var out []Change
 	for key, was := range wasOpen {
 		_, now := t.byKey[key]
+		if was && !now {
+			delete(t.pending, key) // closed at once below: no grace, no flag kept
+		}
+		t.noteFlag(key)
 		switch {
 		case was && now:
 			out = append(out, t.ownerDelta(key, before[key], at, model.SourceReconcile)...)

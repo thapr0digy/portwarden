@@ -2,6 +2,7 @@ package state
 
 import (
 	"testing"
+	"time"
 
 	"github.com/thapr0digy/portwarden/internal/model"
 )
@@ -52,5 +53,45 @@ func TestReobservedSocketFillsV6Only(t *testing.T) {
 	tb.Apply(openV6(1, k, 100, model.V6OnlyOff))
 	if got := tb.Snapshot()[0].V6Only; got != model.V6OnlyOn {
 		t.Fatalf("overwritten: %v", got)
+	}
+}
+
+// TakeRejudge flags a flag change that no Change reports: a socket joining or leaving,
+// a reopen inside the grace, and a recheck that finds another socket; a first open or a
+// final close does not need it (its Change is judged).
+func TestTakeRejudge(t *testing.T) {
+	k := key("::", 9443)
+	tb := New(time.Hour)
+	tb.Apply(openV6(1, k, 100, model.V6OnlyOn))
+	if tb.TakeRejudge() {
+		t.Fatal("first open")
+	}
+	tb.Apply(openV6(2, k, 100, model.V6OnlyOff))
+	if !tb.TakeRejudge() || tb.TakeRejudge() {
+		t.Fatal("dual-stack socket joined: once")
+	}
+	tb.Apply(closeObs(2, k))
+	if !tb.TakeRejudge() {
+		t.Fatal("dual-stack socket left")
+	}
+	tb.Apply(closeObs(1, k))
+	tb.Apply(openV6(3, k, 100, model.V6OnlyOff))
+	if !tb.TakeRejudge() {
+		t.Fatal("reopened dual-stack inside the grace")
+	}
+	// A recheck that finds the socket replaced by a v6-only one (missed events).
+	dump := []model.Observation{openV6(4, k, 100, model.V6OnlyOn)}
+	if ch := tb.Reconcile(dump, nil, t0); len(ch) != 0 {
+		t.Fatalf("same holders: %+v", ch)
+	}
+	if !tb.TakeRejudge() {
+		t.Fatal("recheck replaced the socket")
+	}
+	// Expired close: the record goes; a later open is a fresh listener.
+	tb.Apply(closeObs(4, k))
+	tb.Expire(t0.Add(48 * time.Hour))
+	tb.Apply(openV6(5, k, 100, model.V6OnlyOff))
+	if tb.TakeRejudge() {
+		t.Fatal("a new listener after an expired close")
 	}
 }

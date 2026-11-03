@@ -118,6 +118,7 @@ func Run(ctx context.Context, src EventSource, snap Snapshotter, sink Sink, opts
 	for _, o := range baseline {
 		table.Apply(enrich(o))
 	}
+	table.TakeRejudge() // the baseline is judged below as a whole
 
 	l := &loop{
 		table: table, sink: sink, snap: snap, enrich: enrich, opts: opts,
@@ -275,6 +276,9 @@ func (l *loop) apply(o model.Observation) {
 // publish sends changes, with their listeners' exposure and any exposure change they
 // cause, and re-arms the grace timer at the table's next deadline, since every table
 // mutation can move it.
+//
+// A mutation that changed only a listener's IPV6_V6ONLY flag (no Change) still makes
+// the listeners judged again, since the flag decides whether a [::] socket takes IPv4.
 func (l *loop) publish(changes []state.Change) {
 	var routes []model.ProxyRoutes
 	if len(changes) > 0 {
@@ -282,7 +286,8 @@ func (l *loop) publish(changes []state.Change) {
 		routes = l.annotateProxies(changes, listeners)
 		l.feedMapper(listeners)
 	}
-	if len(changes) > 0 && l.judge != nil {
+	flagMoved := l.table.TakeRejudge()
+	if (len(changes) > 0 || flagMoved) && l.judge != nil {
 		l.rejudge(changes, triggerListener)
 	} else {
 		publish(l.sink, changes)

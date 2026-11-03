@@ -141,6 +141,9 @@ message HostInfo {
   // "fw:unreadable iptables-save: Permission denied" while the firewall cannot be read in
   // full (listeners then keep their last known level). Empty when all is read.
   repeated string conditions = 4;
+  // The cloud region (AWS placement/region, the GCP zone's region, the Azure location);
+  // the backend's cloud look-up needs it. Empty off-cloud.
+  string region = 5;
 }
 
 // ExposureEvent is published on asm.<host>.exposure.changed when a listener's level
@@ -159,6 +162,41 @@ message ExposureEvent {
   // mapping's proxy appeared), firewall, interfaces, recheck.
   string trigger = 10;
   HostInfo host = 11;
+  // Who published it: "" for the host's agent; "cloud" for the backend's cloud look-up
+  // (level 3). Events with an origin are not part of the host's sequence: their run_id is
+  // the publishing service's and seq is 0, so gap trackers skip them.
+  string origin = 12;
+}
+
+// ExposureConfirmation is published by the outside checker (portwarden-verifier) on
+// asm.<host>.exposure.confirmed after it probed a listener from outside the server.
+message ExposureConfirmation {
+  string event_id = 1;
+  string host_id = 2;
+  // The verifier's run; seq is always 0 (not part of the host's sequence).
+  string run_id = 3;
+  uint64 seq = 4;
+  google.protobuf.Timestamp observed_at = 5;
+  Listener listener = 6;
+  // confirmed: the probe connected (TCP) or got an answer (UDP). unreachable: refused,
+  // timed out (TCP), or an ICMP port unreachable (UDP). no_response: UDP silence, which
+  // means open or filtered, never closed.
+  string result = 7;
+  // The address and port probed, e.g. "203.0.113.7:443" or "[2001:db8::1]:53".
+  string target = 8;
+  // tcp-connect, http-head, dns, ntp, snmp, memcached, udp.
+  string probe = 9;
+  // What the service sent first (at most 256 bytes, non-printable bytes escaped).
+  string banner = 10;
+  // e.g. "connect: connection refused", "no answer within 3s".
+  string detail = 11;
+  uint32 rtt_ms = 12;
+  // The checker's identity (its configured name, e.g. "portwarden-verifier@probe-1").
+  string checker = 13;
+  // Set when result is confirmed: level CONFIRMED with the evidence.
+  Exposure exposure = 14;
+  // Always "verifier".
+  string origin = 15;
 }
 
 // HostEvent is published on asm.<host>.host.changed when the public-IP candidates or the

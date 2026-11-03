@@ -48,6 +48,9 @@ func parseMessage(subject string, data []byte) (parsed, error) {
 		body := fmt.Sprintf("EXPOSURE %s %s %s->%s trigger=%s", l.GetProto(),
 			net.JoinHostPort(l.GetAddr(), strconv.Itoa(int(l.GetPort()))),
 			levelName(ev.GetPrevious()), levelName(ev.GetExposure()), ev.GetTrigger())
+		if ev.GetOrigin() != "" {
+			body += " origin=" + ev.GetOrigin()
+		}
 		if n := l.GetNetns(); n != 0 && n != initNetNS {
 			body += fmt.Sprintf(" netns=%d", n)
 		}
@@ -55,6 +58,12 @@ func parseMessage(subject string, data []byte) (parsed, error) {
 			body += " evidence=" + strings.Join(evd, "; ")
 		}
 		return parsed{header(ev.GetObservedAt(), ev.GetHostId(), ev.GetSeq()) + " " + body, ev.GetRunId(), ev.GetSeq()}, nil
+	case strings.HasSuffix(subject, ".exposure.confirmed"):
+		var ev asmv1.ExposureConfirmation
+		if err := proto.Unmarshal(data, &ev); err != nil {
+			return parsed{}, fmt.Errorf("decode %s: %w", subject, err)
+		}
+		return parsed{header(ev.GetObservedAt(), ev.GetHostId(), ev.GetSeq()) + " " + probeLine(&ev), ev.GetRunId(), ev.GetSeq()}, nil
 	case strings.HasSuffix(subject, ".proxy.routes"):
 		var ev asmv1.ProxyRoutes
 		if err := proto.Unmarshal(data, &ev); err != nil {
@@ -195,6 +204,9 @@ func hostSuffix(h *asmv1.HostInfo) string {
 	if h.GetInstanceId() != "" {
 		s += " id=" + h.GetInstanceId()
 	}
+	if h.GetRegion() != "" {
+		s += " region=" + h.GetRegion()
+	}
 	var ips []string
 	for _, ip := range h.GetPublicIps() {
 		v := ip.GetIp() + "/" + ip.GetVia() + "/" + ip.GetDir()
@@ -232,6 +244,9 @@ type gapTracker struct {
 
 // check returns a GAP line when seq skips ahead within a run, else "".
 func (g *gapTracker) check(run string, seq uint64) string {
+	if seq == 0 {
+		return "" // backend events (cloud look-up, verifier) are not part of a host's sequence
+	}
 	if g.last == nil {
 		g.last = map[string]uint64{}
 	}
@@ -323,4 +338,23 @@ func behindSuffix(refs []*asmv1.ProxyRef) string {
 		parts[i] = fmt.Sprintf("%s:%d:%s[%s]", r.GetKind(), r.GetProxy().GetPid(), path, labels(r.GetConfig(), r.GetSeen()))
 	}
 	return " behind=" + strings.Join(parts, ",")
+}
+
+// probeLine renders an outside-checker result: "PROBE <proto> <addr:port> result=<r>
+// target=<ip:port> probe=<p> rtt=<n>ms checker=<c>", then banner="…" or detail="…" when set.
+func probeLine(ev *asmv1.ExposureConfirmation) string {
+	l := ev.GetListener()
+	s := fmt.Sprintf("PROBE %s %s result=%s target=%s probe=%s rtt=%dms checker=%s", l.GetProto(),
+		net.JoinHostPort(l.GetAddr(), strconv.Itoa(int(l.GetPort()))), ev.GetResult(), ev.GetTarget(),
+		ev.GetProbe(), ev.GetRttMs(), ev.GetChecker())
+	if n := l.GetNetns(); n != 0 && n != initNetNS {
+		s += fmt.Sprintf(" netns=%d", n)
+	}
+	if ev.GetBanner() != "" {
+		s += " banner=" + strconv.Quote(ev.GetBanner())
+	}
+	if ev.GetDetail() != "" {
+		s += " detail=" + strconv.Quote(ev.GetDetail())
+	}
+	return s
 }

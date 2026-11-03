@@ -251,3 +251,57 @@ func TestFormatHostConditions(t *testing.T) {
 		t.Fatalf("got %q %v", got, err)
 	}
 }
+
+func TestFormatBackendEvents(t *testing.T) {
+	ev := &asmv1.ExposureEvent{
+		HostId: hostID, RunId: "cloud-run", ObservedAt: at, Trigger: "cloud", Origin: "cloud",
+		Listener: &asmv1.Listener{Proto: "tcp", Addr: "0.0.0.0", Port: 443, Netns: initNetNS},
+		Exposure: &asmv1.Exposure{Level: asmv1.ExposureLevel_EXPOSURE_CLOUD_OPEN,
+			Evidence: []string{"cloud: sg-1 allows tcp/443 from 0.0.0.0/0"}},
+		Previous: &asmv1.Exposure{Level: asmv1.ExposureLevel_EXPOSURE_HOST_FIREWALL_OPEN},
+	}
+	got, err := formatEvent("asm."+hostID+".exposure.changed", mustMarshal(t, ev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "2026-10-30T14:02:11.418Z 01234567 seq=0 EXPOSURE tcp 0.0.0.0:443 host_firewall_open->cloud_open trigger=cloud origin=cloud evidence=cloud: sg-1 allows tcp/443 from 0.0.0.0/0"
+	if got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+	c := &asmv1.ExposureConfirmation{
+		HostId: hostID, RunId: "v1", ObservedAt: at, Origin: "verifier",
+		Listener: &asmv1.Listener{Proto: "tcp", Addr: "0.0.0.0", Port: 22, Netns: initNetNS},
+		Result:   "confirmed", Target: "10.231.0.1:22", Probe: "tcp-connect", RttMs: 3,
+		Banner: "SSH-2.0-OpenSSH_9.6", Checker: "probe-1",
+	}
+	got, err = formatEvent("asm."+hostID+".exposure.confirmed", mustMarshal(t, c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `2026-10-30T14:02:11.418Z 01234567 seq=0 PROBE tcp 0.0.0.0:22 result=confirmed target=10.231.0.1:22 probe=tcp-connect rtt=3ms checker=probe-1 banner="SSH-2.0-OpenSSH_9.6"`
+	if got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+	c.Result, c.Banner, c.Detail = "unreachable", "", "connect: connection timed out"
+	got, _ = formatEvent("asm."+hostID+".exposure.confirmed", mustMarshal(t, c))
+	want = `2026-10-30T14:02:11.418Z 01234567 seq=0 PROBE tcp 0.0.0.0:22 result=unreachable target=10.231.0.1:22 probe=tcp-connect rtt=3ms checker=probe-1 detail="connect: connection timed out"`
+	if got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestGapTrackerIgnoresSeqZero(t *testing.T) {
+	var g gapTracker
+	for _, s := range []uint64{0, 0, 0} {
+		if gap := g.check("verifier-run", s); gap != "" {
+			t.Fatalf("seq 0 (backend events) must never be a gap: %s", gap)
+		}
+	}
+}
+
+func TestHostSuffixRegion(t *testing.T) {
+	got := hostSuffix(&asmv1.HostInfo{Cloud: "aws", InstanceId: "i-1", Region: "eu-west-1"})
+	if got != " cloud=aws id=i-1 region=eu-west-1 ips=-" {
+		t.Fatalf("got %q", got)
+	}
+}

@@ -79,6 +79,8 @@ func TestAWSIMDSv2(t *testing.T) {
 			w.Write([]byte("i-0abc123"))
 		case "/latest/meta-data/public-ipv4":
 			w.Write([]byte("34.120.1.7"))
+		case "/latest/meta-data/placement/region":
+			w.Write([]byte("eu-west-1"))
 		default:
 			http.NotFound(w, r) // no ipv6
 		}
@@ -87,7 +89,8 @@ func TestAWSIMDSv2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Cloud != AWS || info.InstanceID != "i-0abc123" || !slices.Equal(info.PublicIPs, []netip.Addr{netip.MustParseAddr("34.120.1.7")}) {
+	if info.Cloud != AWS || info.InstanceID != "i-0abc123" || info.Region != "eu-west-1" ||
+		!slices.Equal(info.PublicIPs, []netip.Addr{netip.MustParseAddr("34.120.1.7")}) {
 		t.Fatalf("info = %+v", info)
 	}
 }
@@ -119,6 +122,8 @@ func TestGCP(t *testing.T) {
 		switch r.URL.Path {
 		case "/computeMetadata/v1/instance/id":
 			w.Write([]byte("4419012345678"))
+		case "/computeMetadata/v1/instance/zone":
+			w.Write([]byte("projects/123456/zones/us-central1-a"))
 		case "/computeMetadata/v1/instance/network-interfaces/":
 			if r.URL.Query().Get("recursive") != "true" {
 				http.NotFound(w, r)
@@ -134,7 +139,7 @@ func TestGCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []netip.Addr{netip.MustParseAddr("35.200.1.2"), netip.MustParseAddr("2600:1900:4000::1")}
-	if info.InstanceID != "4419012345678" || !slices.Equal(info.PublicIPs, want) {
+	if info.InstanceID != "4419012345678" || info.Region != "us-central1" || !slices.Equal(info.PublicIPs, want) {
 		t.Fatalf("info = %+v", info)
 	}
 }
@@ -152,13 +157,13 @@ func TestAzure(t *testing.T) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		w.Write([]byte(`{"compute":{"vmId":"02aab8a4-74ef-476e-8182-f6d2ba4166a6"},"network":{"interface":[{"ipv4":{"ipAddress":[{"privateIpAddress":"10.0.0.4","publicIpAddress":"20.40.1.2"},{"privateIpAddress":"10.0.0.5","publicIpAddress":""}]},"ipv6":{"ipAddress":[]}}]}}`))
+		w.Write([]byte(`{"compute":{"vmId":"02aab8a4-74ef-476e-8182-f6d2ba4166a6","location":"westeurope"},"network":{"interface":[{"ipv4":{"ipAddress":[{"privateIpAddress":"10.0.0.4","publicIpAddress":"20.40.1.2"},{"privateIpAddress":"10.0.0.5","publicIpAddress":""}]},"ipv6":{"ipAddress":[]}}]}}`))
 	})
 	info, err := c.Fetch(context.Background(), Azure)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.InstanceID != "02aab8a4-74ef-476e-8182-f6d2ba4166a6" || !slices.Equal(info.PublicIPs, []netip.Addr{netip.MustParseAddr("20.40.1.2")}) {
+	if info.InstanceID != "02aab8a4-74ef-476e-8182-f6d2ba4166a6" || info.Region != "westeurope" || !slices.Equal(info.PublicIPs, []netip.Addr{netip.MustParseAddr("20.40.1.2")}) {
 		t.Fatalf("info = %+v", info)
 	}
 }

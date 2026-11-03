@@ -840,7 +840,7 @@ func exposureToProto(e model.Exposure) *asmv1.Exposure {
 }
 
 func hostToProto(h model.HostInfo) *asmv1.HostInfo {
-	out := &asmv1.HostInfo{Cloud: h.Cloud, InstanceId: h.InstanceID, Conditions: slices.Clone(h.Conditions)}
+	out := &asmv1.HostInfo{Cloud: h.Cloud, InstanceId: h.InstanceID, Region: h.Region, Conditions: slices.Clone(h.Conditions)}
 	for _, ip := range h.PublicIPs {
 		out.PublicIps = append(out.PublicIps, &asmv1.PublicIP{Ip: ip.IP.String(), Via: ip.Via, Dir: ip.Dir, Iface: ip.Iface})
 	}

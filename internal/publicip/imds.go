@@ -56,7 +56,9 @@ func Detect(dmiDir string) string {
 type Info struct {
 	Cloud      string
 	InstanceID string
-	PublicIPs  []netip.Addr
+	// Region is best effort: empty when the metadata service does not say.
+	Region    string
+	PublicIPs []netip.Addr
 }
 
 // Client queries the instance metadata service. Each request is bounded by Timeout.
@@ -150,6 +152,9 @@ func (c *Client) aws(ctx context.Context) (Info, error) {
 		return Info{}, fmt.Errorf("aws: instance-id: %w", err)
 	}
 	info := Info{Cloud: AWS, InstanceID: strings.TrimSpace(string(id))}
+	if region, _, err := c.do(ctx, http.MethodGet, "/latest/meta-data/placement/region", h); err == nil {
+		info.Region = strings.TrimSpace(string(region))
+	}
 	for _, path := range []string{"/latest/meta-data/public-ipv4", "/latest/meta-data/ipv6"} {
 		body, _, err := c.do(ctx, http.MethodGet, path, h)
 		if errors.Is(err, errNotFound) {
@@ -190,6 +195,9 @@ func (c *Client) gcp(ctx context.Context) (Info, error) {
 		return Info{}, fmt.Errorf("gcp: network-interfaces: %w", err)
 	}
 	info := Info{Cloud: GCP, InstanceID: strings.TrimSpace(string(id))}
+	if zone, _, err := c.do(ctx, http.MethodGet, "/computeMetadata/v1/instance/zone", h); err == nil {
+		info.Region = gcpRegion(strings.TrimSpace(string(zone)))
+	}
 	for _, n := range nics {
 		for _, ac := range n.AccessConfigs {
 			if a, err := netip.ParseAddr(ac.ExternalIP); err == nil {
@@ -212,7 +220,8 @@ func (c *Client) azure(ctx context.Context) (Info, error) {
 	}
 	var doc struct {
 		Compute struct {
-			VMID string `json:"vmId"`
+			VMID     string `json:"vmId"`
+			Location string `json:"location"`
 		} `json:"compute"`
 		Network struct {
 			Interface []struct {
@@ -232,7 +241,7 @@ func (c *Client) azure(ctx context.Context) (Info, error) {
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return Info{}, fmt.Errorf("azure: %w", err)
 	}
-	info := Info{Cloud: Azure, InstanceID: doc.Compute.VMID}
+	info := Info{Cloud: Azure, InstanceID: doc.Compute.VMID, Region: doc.Compute.Location}
 	for _, n := range doc.Network.Interface {
 		for _, a := range append(n.IPv4.IPAddress, n.IPv6.IPAddress...) {
 			if ip, err := netip.ParseAddr(a.PublicIPAddress); err == nil {
@@ -241,6 +250,15 @@ func (c *Client) azure(ctx context.Context) (Info, error) {
 		}
 	}
 	return info, nil
+}
+
+// gcpRegion turns "projects/<n>/zones/us-central1-a" into "us-central1".
+func gcpRegion(zone string) string {
+	zone = zone[strings.LastIndex(zone, "/")+1:]
+	if i := strings.LastIndex(zone, "-"); i > 0 {
+		return zone[:i]
+	}
+	return ""
 }
 
 // RunIMDS fetches the provider's metadata now and every refresh after, retrying a

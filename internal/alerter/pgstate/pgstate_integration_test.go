@@ -179,8 +179,8 @@ func TestForgetHost(t *testing.T) {
 	s.Close()
 	s = open2(t)
 	got, err := s.Forgotten(ctx)
-	if err != nil || len(got) != 2 || got["web"] != (alerter.ForgetMark{Seq: 77, Stream: pgStream1, Back: true}) ||
-		got["w_b"] != (alerter.ForgetMark{Seq: 77, Stream: pgStream1}) {
+	if err != nil || len(got) != 2 || !sameMark(got["web"], alerter.ForgetMark{Seq: 77, Stream: pgStream1, Back: true}) ||
+		!sameMark(got["w_b"], alerter.ForgetMark{Seq: 77, Stream: pgStream1}) {
 		t.Fatalf("forgotten %v %v", got, err)
 	}
 	var m alerter.ForgetMark
@@ -218,7 +218,12 @@ func TestForgottenAcrossAStreamReset(t *testing.T) {
 		t.Fatalf("pruned %d (%v), want 2", n, err)
 	}
 	got, _ := s.Forgotten(ctx)
-	if len(got) != 2 || got["kept"].Seq != 7 || got["replaced"] != (alerter.ForgetMark{Seq: 3, Stream: pgStream2}) {
+	if len(got) != 2 || got["kept"].Seq != 7 || !sameMark(got["replaced"], alerter.ForgetMark{Seq: 3, Stream: pgStream2}) {
 		t.Fatalf("left %v", got)
 	}
+}
+
+// sameMark compares marks with time.Time.Equal (PostgreSQL returns the local zone).
+func sameMark(a, b alerter.ForgetMark) bool {
+	return a.Seq == b.Seq && a.Back == b.Back && a.Stream.Equal(b.Stream)
 }

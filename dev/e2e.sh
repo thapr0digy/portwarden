@@ -10,7 +10,12 @@
 #   5. efficiency: with kernel.bpf_stats_enabled=1, 10 000 real TCP connections accepted
 #      by a python http.server must not run on_listen or on_stop; 1000 UDP client sockets
 #      run on_udp_bind/on_udp_unhash (average ns per run printed) but produce no event.
-#   6. spool: with nats-server down, a listener opened on :8095 survives an agent restart in
+#   6. exposure: :8093 behind an nft drop rule opens at level bound; inserting an accept
+#      rule moves it to host_firewall_open (exposure.changed) within 5 s.
+#   7. docker: a container listener published with -p 18090:80 reaches host_firewall_open;
+#      a DOCKER-USER drop for it brings it back to bound, removing the drop restores it.
+#      SKIP when docker or the busybox image is unavailable.
+#   8. spool: with nats-server down, a listener opened on :8095 survives an agent restart in
 #      the spool and reaches a fresh watcher (--since 5m) with its original time.
 # Self-contained: it builds its own binaries, runs its own nats-server on a private port
 # and store, runs its agent with its own spool directory, stops the portwarden-agent
@@ -26,6 +31,12 @@ RESTART_PORT=8097
 NETNS_PORT=8096
 SPOOL_PORT=8095
 MARKER_PORT=8094
+EXPOSURE_PORT=8093
+DOCKER_HOST_PORT=18090
+DOCKER_IMAGE=busybox:1.36
+DOCKER_NAME=pw-e2e
+NFT_TABLE=pw_e2e
+EXPOSURE_WINDOW_S=5
 RESTART_UNIT=pw-e2e
 CONNECTIONS=10000
 UDP_CLIENTS=1000
@@ -43,6 +54,8 @@ nats_pid=""
 unit_was_active=false
 old_bpf_stats=""
 ssh_service_restore="" # start|stop: undoes the socket-activation check's change to ssh.service
+docker_started=false
+docker_rule=false
 
 log() { echo "e2e: $*"; }
 
@@ -64,6 +77,9 @@ cleanup() {
 	fi
 	sudo pkill -TERM -f "http.server --bind 127.0.0.1 $NETNS_PORT" 2>/dev/null || true
 	sudo systemctl stop "$RESTART_UNIT" 2>/dev/null || true
+	sudo nft delete table inet "$NFT_TABLE" 2>/dev/null || true
+	$docker_rule && sudo iptables -D DOCKER-USER -p tcp --dport 80 -j DROP 2>/dev/null || true
+	$docker_started && sudo docker rm -f "$DOCKER_NAME" >/dev/null 2>&1 || true
 	for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
 	[ -n "$ssh_service_restore" ] && sudo systemctl -q "$ssh_service_restore" ssh.service || true
 	[ -n "$old_bpf_stats" ] && sudo sysctl -q kernel.bpf_stats_enabled="$old_bpf_stats" || true
@@ -184,7 +200,7 @@ signal.pause()' "$1" &
 	pids+=($!)
 }
 
-for port in "$SERVER_PORT" "$RESTART_PORT" "$NETNS_PORT" "$SPOOL_PORT"; do
+for port in "$SERVER_PORT" "$RESTART_PORT" "$NETNS_PORT" "$SPOOL_PORT" "$EXPOSURE_PORT" "$DOCKER_HOST_PORT"; do
 	ss -Hltn "sport = :$port" | grep -q . && fail "tcp port $port is already in use"
 done
 for port in "$UDP_PORT" "$MARKER_PORT"; do
@@ -266,6 +282,64 @@ listener_netns=$(grep -oE ' netns=[0-9]+' <<<"$netns_line" | tr -dc 0-9) || true
 	fail "netns listener line has no foreign netns= (host $host_netns): $netns_line"
 echo "netns listener: netns=$listener_netns (host $host_netns)"
 sudo pkill -TERM -f "http.server --bind 127.0.0.1 $NETNS_PORT"
+
+log "exposure: :$EXPOSURE_PORT behind an nft drop, then an accept"
+# firewall_reads: how many firewall-triggered views the agent has read so far.
+firewall_reads() { count_in "$work/agent.log" '"msg":"firewall read","trigger":"firewall"'; }
+sudo nft delete table inet "$NFT_TABLE" 2>/dev/null || true
+reads_before=$(firewall_reads)
+sudo nft -f - <<NFT
+table inet $NFT_TABLE {
+	chain input {
+		type filter hook input priority 10; policy accept;
+		tcp dport $EXPOSURE_PORT drop
+	}
+}
+NFT
+# The listener opens after the agent has read the drop rule, so its first level is bound.
+read_since() { [ "$(firewall_reads)" -gt "$reads_before" ]; }
+wait_for "the agent to read the drop rule" "$EXPOSURE_WINDOW_S" read_since
+python3 -m http.server "$EXPOSURE_PORT" --bind 0.0.0.0 --directory "$work/www" >/dev/null 2>&1 &
+exposure_pid=$!
+pids+=("$exposure_pid")
+wait_for "EXPOSURE tcp 0.0.0.0:$EXPOSURE_PORT new->bound" "$LINE_TIMEOUT_S" \
+	seen "EXPOSURE tcp 0.0.0.0:$EXPOSURE_PORT new->bound trigger=opened .*nft: drop tcp/$EXPOSURE_PORT from 0/0" 1
+t0=$(now_ns)
+sudo nft insert rule inet "$NFT_TABLE" input tcp dport "$EXPOSURE_PORT" accept
+wait_for "EXPOSURE tcp 0.0.0.0:$EXPOSURE_PORT bound->host_firewall_open" "$EXPOSURE_WINDOW_S" \
+	seen "EXPOSURE tcp 0.0.0.0:$EXPOSURE_PORT bound->host_firewall_open trigger=firewall .*nft: accept tcp/$EXPOSURE_PORT from 0/0" 1
+t1=$(now_ns)
+echo "exposure firewall latency: $(((t1 - t0) / 1000000)) ms ($(grep -m1 -- "EXPOSURE tcp 0.0.0.0:$EXPOSURE_PORT bound->" "$work/watch.log" | cut -d' ' -f4-))"
+kill "$exposure_pid"
+wait "$exposure_pid" 2>/dev/null || true
+sudo nft delete table inet "$NFT_TABLE"
+
+log "docker: container listener behind -p $DOCKER_HOST_PORT:80"
+if ! command -v docker >/dev/null || ! sudo docker info >/dev/null 2>&1; then
+	echo "docker exposure: SKIP (docker unavailable)"
+elif ! sudo docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1 && ! sudo docker pull -q "$DOCKER_IMAGE" >/dev/null 2>&1; then
+	echo "docker exposure: SKIP (image $DOCKER_IMAGE unavailable)"
+else
+	sudo docker rm -f "$DOCKER_NAME" >/dev/null 2>&1 || true
+	docker_started=true
+	sudo docker run -d --name "$DOCKER_NAME" -p "$DOCKER_HOST_PORT:80" "$DOCKER_IMAGE" httpd -f -p 80 >/dev/null
+	ctr_pid=$(sudo docker inspect -f '{{.State.Pid}}' "$DOCKER_NAME")
+	ctr_netns=$(sudo readlink "/proc/$ctr_pid/ns/net" | tr -dc 0-9)
+	# busybox httpd may bind 0.0.0.0:80 or [::]:80.
+	ctr_open="EXPOSURE tcp (0\.0\.0\.0|\[::\]):80 [a-z_]+->host_firewall_open trigger=[a-z]+ netns=$ctr_netns .*tcp/$DOCKER_HOST_PORT "
+	wait_for "container :80 at host_firewall_open" 10 seen "$ctr_open" 1
+	echo "docker exposure: $(grep -m1 -E -- "$ctr_open" "$work/watch.log" | cut -d' ' -f4-)"
+	docker_rule=true
+	sudo iptables -I DOCKER-USER -p tcp --dport 80 -j DROP
+	wait_for "container :80 back to bound" "$EXPOSURE_WINDOW_S" \
+		seen "EXPOSURE tcp (0\.0\.0\.0|\[::\]):80 host_firewall_open->bound trigger=firewall netns=$ctr_netns " 1
+	sudo iptables -D DOCKER-USER -p tcp --dport 80 -j DROP
+	docker_rule=false
+	wait_for "container :80 open again" "$EXPOSURE_WINDOW_S" seen "$ctr_open" 2
+	echo "docker exposure follows the host firewall: open -> bound (DOCKER-USER drop) -> open"
+	sudo docker rm -f "$DOCKER_NAME" >/dev/null
+	docker_started=false
+fi
 
 log "socket activation: :22 after a recheck"
 if ! systemctl is-active --quiet ssh.socket; then

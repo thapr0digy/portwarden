@@ -198,3 +198,56 @@ func TestNewRunNoGap(t *testing.T) {
 		t.Fatal("duplicate seq must not be a gap")
 	}
 }
+
+func TestFormatExposureChanged(t *testing.T) {
+	ev := &asmv1.ExposureEvent{
+		HostId: hostID, RunId: "r1", Seq: 7, ObservedAt: at, Trigger: "firewall",
+		Listener: &asmv1.Listener{Proto: "tcp", Addr: "0.0.0.0", Port: 8093, Netns: initNetNS},
+		Exposure: &asmv1.Exposure{Level: asmv1.ExposureLevel_EXPOSURE_HOST_FIREWALL_OPEN,
+			Evidence: []string{"bind:any", "nft: accept tcp/8093 from 0/0 (eth0, inet pw_e2e input)"}},
+		Previous: &asmv1.Exposure{Level: asmv1.ExposureLevel_EXPOSURE_BOUND},
+	}
+	got, err := formatEvent("asm."+hostID+".exposure.changed", mustMarshal(t, ev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "2026-10-30T14:02:11.418Z 01234567 seq=7 EXPOSURE tcp 0.0.0.0:8093 bound->host_firewall_open trigger=firewall evidence=bind:any; nft: accept tcp/8093 from 0/0 (eth0, inet pw_e2e input)"
+	if got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+	ev.Previous, ev.Trigger, ev.Listener.Netns = nil, "opened", 4026532300
+	ev.Exposure = &asmv1.Exposure{Level: asmv1.ExposureLevel_EXPOSURE_LOCAL}
+	got, _ = formatEvent("asm."+hostID+".exposure.changed", mustMarshal(t, ev))
+	want = "2026-10-30T14:02:11.418Z 01234567 seq=7 EXPOSURE tcp 0.0.0.0:8093 new->local trigger=opened netns=4026532300"
+	if got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestFormatHostChanged(t *testing.T) {
+	ev := &asmv1.HostEvent{HostId: hostID, RunId: "r1", Seq: 2, ObservedAt: at, Host: &asmv1.HostInfo{
+		Cloud: "aws", InstanceId: "i-0abc",
+		PublicIps: []*asmv1.PublicIP{{Ip: "54.1.2.3", Via: "imds", Dir: "in"}, {Ip: "2600:1f18::15", Via: "netlink", Dir: "in", Iface: "eth0"}},
+	}}
+	got, err := formatEvent("asm."+hostID+".host.changed", mustMarshal(t, ev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "2026-10-30T14:02:11.418Z 01234567 seq=2 HOST cloud=aws id=i-0abc ips=54.1.2.3/imds/in,2600:1f18::15/netlink/in/eth0"
+	if got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+	ev.Host = nil
+	got, _ = formatEvent("asm."+hostID+".host.changed", mustMarshal(t, ev))
+	if !strings.HasSuffix(got, " HOST ips=-") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestFormatHostConditions(t *testing.T) {
+	ev := &asmv1.HostEvent{HostId: hostID, RunId: "r1", Seq: 3, ObservedAt: at, Host: &asmv1.HostInfo{Conditions: []string{"fw:unreadable iptables-save: Permission denied"}}}
+	got, err := formatEvent("asm."+hostID+".host.changed", mustMarshal(t, ev))
+	if err != nil || !strings.HasSuffix(got, " HOST ips=- conditions=fw:unreadable iptables-save: Permission denied") {
+		t.Fatalf("got %q %v", got, err)
+	}
+}

@@ -1,0 +1,16 @@
+table inet pwc1 {
+	set m { type ipv4_addr; flags dynamic; }
+	set f2b { type ipv4_addr; }
+	chain input {
+		type filter hook input priority 10; policy accept;
+		tcp dport 22 ct state new meter flood { ip saddr limit rate over 10/second } drop
+		tcp dport 23 add @m { ip saddr limit rate over 10/minute } drop
+		tcp dport 24 ct count over 10 reject
+		meta l4proto . th dport vmap { tcp . 25 : accept }
+		tcp flags & (fin|syn|rst|ack) != syn ct state new drop
+		tcp dport 26 limit rate 5/second accept
+		tcp dport 27 limit rate over 5/second drop
+		ip saddr @f2b tcp dport 28 drop
+		tcp flags syn tcp dport 29 accept
+	}
+}

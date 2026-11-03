@@ -1,5 +1,5 @@
 [Unit]
-Description=Portwarden agent (TCP/UDP listener inventory to NATS)
+Description=Portwarden agent (TCP/UDP listener inventory and exposure to NATS)
 DefaultDependencies=no
 Before=network-pre.target shutdown.target
 # Needed for a clean SIGTERM (and spool flush) at shutdown now default dependencies are off.
@@ -19,8 +19,11 @@ User=portwarden-agent
 StateDirectory=portwarden
 StateDirectoryMode=0700
 ExecStart=/usr/local/bin/portwarden-agent --spool-dir /var/lib/portwarden/spool
-AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE
-CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE
+# CAP_NET_ADMIN: read the firewall (nft list ruleset, iptables-nft-save) and join the
+# nf_tables change-notification group; both fail with EPERM without it. The agent runs
+# nft/iptables-save as children, which inherit the ambient set.
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_PTRACE CAP_NET_ADMIN
 NoNewPrivileges=yes
 # Both leave /proc and /sys readable. ProtectKernelTunables is left off on purpose:
 # it hides /proc/kallsyms.

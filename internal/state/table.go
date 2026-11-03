@@ -11,7 +11,8 @@ import (
 )
 
 // Change is a listener-level transition produced by Table.Apply, Expire or
-// Reconcile. PrevProcs is set on OwnerChanged only.
+// Reconcile. PrevProcs is set on OwnerChanged only. The table leaves Exposure empty;
+// the agent fills it in (on Closed: the listener's last exposure).
 type Change struct {
 	Kind      model.Kind
 	Key       model.ListenerKey
@@ -19,12 +20,28 @@ type Change struct {
 	PrevProcs []model.Process
 	At        time.Time
 	Source    model.Source
+	Exposure  model.Exposure
 }
 
-// Listener is a currently open listener and the processes holding its sockets.
+// Listener is a currently open listener and the processes holding its sockets. The
+// table leaves Exposure empty; the agent fills it in.
 type Listener struct {
-	Key   model.ListenerKey
-	Procs []model.Process
+	Key      model.ListenerKey
+	Procs    []model.Process
+	Exposure model.Exposure
+}
+
+// ExposureChange is a listener judged for the first time (Previous is zero) or whose
+// exposure level changed. Trigger says what made the agent judge again: opened,
+// listener (another listener changed, e.g. a port mapping's proxy), firewall,
+// interfaces or recheck.
+type ExposureChange struct {
+	Key      model.ListenerKey
+	Procs    []model.Process
+	Exposure model.Exposure
+	Previous model.Exposure
+	Trigger  string
+	At       time.Time
 }
 
 // pendingClose is a listener whose last socket closed and whose Closed change

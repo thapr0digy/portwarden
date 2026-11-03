@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -19,10 +20,14 @@ import (
 
 	"github.com/thapr0digy/portwarden/internal/agent"
 	"github.com/thapr0digy/portwarden/internal/baseline"
+	"github.com/thapr0digy/portwarden/internal/exposure"
 	"github.com/thapr0digy/portwarden/internal/hostid"
+	"github.com/thapr0digy/portwarden/internal/model"
+	"github.com/thapr0digy/portwarden/internal/netif"
 	"github.com/thapr0digy/portwarden/internal/preflight"
 	"github.com/thapr0digy/portwarden/internal/probes"
 	"github.com/thapr0digy/portwarden/internal/procinfo"
+	"github.com/thapr0digy/portwarden/internal/publicip"
 	"github.com/thapr0digy/portwarden/internal/publish"
 	"github.com/thapr0digy/portwarden/internal/sdsocket"
 	"github.com/thapr0digy/portwarden/internal/state"
@@ -37,6 +42,12 @@ const (
 	defaultSpoolDir  = "/var/lib/portwarden/spool"
 	defaultCloseWait = 2 * time.Second
 	defaultRecheck   = 5 * time.Minute
+	defaultFWPoll    = 30 * time.Second
+	viewDebounce     = time.Second     // a burst of firewall or address changes is read once
+	viewMaxWait      = 5 * time.Second // …but no later than this after its first change
+	imdsTimeout      = 2 * time.Second
+	imdsRetry        = 30 * time.Second
+	dmiDir           = "/sys/class/dmi/id"
 )
 
 type options struct {
@@ -45,6 +56,8 @@ type options struct {
 	spoolDir                                                  string
 	spoolMax                                                  int64
 	closeGrace, recheck                                       time.Duration
+	firewallPoll                                              time.Duration
+	imds                                                      string
 }
 
 func parseFlags(args []string) (options, error) {
@@ -61,8 +74,16 @@ func parseFlags(args []string) (options, error) {
 	spoolMax := fs.String("spool-max", defaultSpoolMax, "spool size limit in bytes (KiB, MiB and GiB suffixes)")
 	fs.DurationVar(&o.closeGrace, "close-grace", defaultCloseWait, "delay before a closed listener is reported (0 reports at once)")
 	fs.DurationVar(&o.recheck, "recheck", defaultRecheck, "interval between full listener rechecks (0 disables)")
+	fs.DurationVar(&o.firewallPoll, "firewall-poll", defaultFWPoll, "firewall re-read interval when change notifications are unavailable or iptables-legacy is in use")
+	fs.StringVar(&o.imds, "imds", "auto", "cloud metadata for public IPs: auto (only when DMI says AWS, GCP or Azure) or off")
 	if err := fs.Parse(args); err != nil {
 		return o, err
+	}
+	if o.firewallPoll <= 0 {
+		return o, fmt.Errorf("--firewall-poll must be positive, got %s", o.firewallPoll)
+	}
+	if o.imds != "auto" && o.imds != "off" {
+		return o, fmt.Errorf("--imds must be auto or off, got %q", o.imds)
 	}
 	if o.heartbeat <= 0 {
 		return o, fmt.Errorf("--heartbeat must be positive, got %s", o.heartbeat)
@@ -122,6 +143,35 @@ func run(opts options, log *slog.Logger) error {
 	cancelPrime()
 	enrich := newEnricher(procinfo.NewResolver("/proc", "/sys/fs/cgroup", hashMaxBytes), matcher, hostNetNS)
 
+	// The first exposure view (firewall and interfaces; each tool read is bounded) is read
+	// before the probes start, so the probe buffer is not held open for it. The watcher
+	// joins the change notifications first, so a change during startup is not missed.
+	watcher := exposure.NewWatcher(exposure.WatchConfig{
+		Config: exposure.Config{
+			HostNetNS:  hostNetNS,
+			Run:        exposure.ExecRunner,
+			Interfaces: netif.Snapshot,
+			NetnsAddrs: exposure.ProcNetnsAddrs("/proc"),
+		},
+		Debounce:         viewDebounce,
+		MaxWait:          viewMaxWait,
+		Poll:             opts.firewallPoll,
+		Recheck:          opts.recheck,
+		FirewallChanges:  netif.WatchNftables,
+		InterfaceChanges: netif.WatchAddresses,
+	})
+	initialView := watcher.Initial(ctx)
+	var pubRef atomic.Pointer[publish.Publisher]
+	hostInfo := publicip.NewCollector(func(h model.HostInfo) {
+		if p := pubRef.Load(); p != nil {
+			p.SetHost(h)
+		}
+	})
+	if ifs, err := initialView.Interfaces(); err == nil {
+		hostInfo.SetInterfaces(ifs)
+	}
+	hostInfo.SetConditions(initialView.Conditions())
+
 	// Probes first, so no listener is missed while the baseline is taken.
 	pr, err := probes.Start()
 	if err != nil {
@@ -132,10 +182,32 @@ func run(opts options, log *slog.Logger) error {
 		CAFile: opts.tlsCA, CertFile: opts.tlsCert, KeyFile: opts.tlsKey,
 		HostID:   host,
 		SpoolDir: opts.spoolDir, SpoolMax: opts.spoolMax,
+		LocalAddr: hostInfo.SetIngestLocal,
 	})
 	if err != nil {
 		_ = pr.Close()
 		return fmt.Errorf("publisher: %w", err)
+	}
+	pubRef.Store(pub)
+	pub.SetHost(hostInfo.Host())
+
+	judges := make(chan agent.Judge, 1)
+	go watcher.Run(ctx, initialView, func(v *exposure.View) {
+		if ifs, err := v.Interfaces(); err == nil {
+			hostInfo.SetInterfaces(ifs)
+		}
+		hostInfo.SetConditions(v.Conditions())
+		offerLatest(judges, v)
+	})
+	if opts.imds == "auto" {
+		if cloud := publicip.Detect(dmiDir); cloud != "" {
+			log.Info("cloud detected; reading instance metadata", "cloud", cloud)
+			refresh := opts.recheck
+			if refresh <= 0 {
+				refresh = defaultRecheck
+			}
+			go publicip.RunIMDS(ctx, publicip.NewClient("", imdsTimeout), cloud, refresh, imdsRetry, hostInfo.SetCloud)
+		}
 	}
 	log.Info("started", "host_id", host, "netns", hostNetNS, "nats_url", opts.natsURL,
 		"spool_dir", opts.spoolDir, "spool_max", opts.spoolMax)
@@ -153,6 +225,8 @@ func run(opts options, log *slog.Logger) error {
 		Recheck:    opts.recheck,
 		Drops:      pr.Counters,
 		Settle:     recheckSettle,
+		Judge:      initialView,
+		Judges:     judges,
 	})
 	stop() // end the heartbeat loop even if Run returned on its own
 	beats.Wait()
@@ -171,6 +245,22 @@ func run(opts options, log *slog.Logger) error {
 		log.Info("stopped")
 	}
 	return runErr
+}
+
+// offerLatest hands j to the agent loop, replacing a judge it has not taken yet: only
+// the newest view matters.
+func offerLatest(ch chan agent.Judge, j agent.Judge) {
+	for {
+		select {
+		case ch <- j:
+			return
+		default:
+		}
+		select {
+		case <-ch:
+		default:
+		}
+	}
 }
 
 func errOrUnknown(err error) error {

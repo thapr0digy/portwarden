@@ -29,14 +29,39 @@ type parsed struct {
 	seq  uint64
 }
 
-// formatEvent renders one stream message as a single line. The subject's last token
-// (opened, closed, owner_changed, snapshot, heartbeat) selects the payload type.
+// formatEvent renders one stream message as a single line. The subject's suffix
+// (listener.opened/closed/owner_changed, exposure.changed, host.changed, snapshot,
+// heartbeat) selects the payload type.
 func formatEvent(subject string, data []byte) (string, error) {
 	p, err := parseMessage(subject, data)
 	return p.line, err
 }
 
 func parseMessage(subject string, data []byte) (parsed, error) {
+	switch {
+	case strings.HasSuffix(subject, ".exposure.changed"):
+		var ev asmv1.ExposureEvent
+		if err := proto.Unmarshal(data, &ev); err != nil {
+			return parsed{}, fmt.Errorf("decode %s: %w", subject, err)
+		}
+		l := ev.GetListener()
+		body := fmt.Sprintf("EXPOSURE %s %s %s->%s trigger=%s", l.GetProto(),
+			net.JoinHostPort(l.GetAddr(), strconv.Itoa(int(l.GetPort()))),
+			levelName(ev.GetPrevious()), levelName(ev.GetExposure()), ev.GetTrigger())
+		if n := l.GetNetns(); n != 0 && n != initNetNS {
+			body += fmt.Sprintf(" netns=%d", n)
+		}
+		if evd := ev.GetExposure().GetEvidence(); len(evd) > 0 {
+			body += " evidence=" + strings.Join(evd, "; ")
+		}
+		return parsed{header(ev.GetObservedAt(), ev.GetHostId(), ev.GetSeq()) + " " + body, ev.GetRunId(), ev.GetSeq()}, nil
+	case strings.HasSuffix(subject, ".host.changed"):
+		var ev asmv1.HostEvent
+		if err := proto.Unmarshal(data, &ev); err != nil {
+			return parsed{}, fmt.Errorf("decode %s: %w", subject, err)
+		}
+		return parsed{header(ev.GetObservedAt(), ev.GetHostId(), ev.GetSeq()) + " HOST" + hostSuffix(ev.GetHost()), ev.GetRunId(), ev.GetSeq()}, nil
+	}
 	kind := subject[strings.LastIndexByte(subject, '.')+1:]
 	switch kind {
 	case "opened", "closed", "owner_changed":
@@ -139,6 +164,44 @@ func holders(ps []*asmv1.Process) string {
 		parts[i] = fmt.Sprintf("%d/%s", p.GetPid(), p.GetComm())
 	}
 	return strings.Join(parts, ",")
+}
+
+// levelName is an exposure's level without the enum prefix ("host_firewall_open"), or
+// "new" when it is unset (a listener's first judgement).
+func levelName(e *asmv1.Exposure) string {
+	if e.GetLevel() == asmv1.ExposureLevel_EXPOSURE_LEVEL_UNSPECIFIED {
+		return "new"
+	}
+	return strings.ToLower(strings.TrimPrefix(e.GetLevel().String(), "EXPOSURE_"))
+}
+
+// hostSuffix prints " cloud=<c> id=<instance> ips=<ip>/<via>/<dir>[/<iface>],…"; cloud
+// and id are omitted when empty, no candidate is "ips=-".
+func hostSuffix(h *asmv1.HostInfo) string {
+	var s string
+	if h.GetCloud() != "" {
+		s += " cloud=" + h.GetCloud()
+	}
+	if h.GetInstanceId() != "" {
+		s += " id=" + h.GetInstanceId()
+	}
+	var ips []string
+	for _, ip := range h.GetPublicIps() {
+		v := ip.GetIp() + "/" + ip.GetVia() + "/" + ip.GetDir()
+		if ip.GetIface() != "" {
+			v += "/" + ip.GetIface()
+		}
+		ips = append(ips, v)
+	}
+	if len(ips) == 0 {
+		s += " ips=-"
+	} else {
+		s += " ips=" + strings.Join(ips, ",")
+	}
+	if c := h.GetConditions(); len(c) > 0 {
+		s += " conditions=" + strings.Join(c, "; ")
+	}
+	return s
 }
 
 func verb(k asmv1.Kind) string {

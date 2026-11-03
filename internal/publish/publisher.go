@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/netip"
 	"os"
 	"slices"
 	"strings"
@@ -54,6 +56,9 @@ type Config struct {
 	HostID                                    string
 	SpoolDir                                  string
 	SpoolMax                                  int64
+	// LocalAddr, when set, is called with the local address of every TCP connection
+	// made to NATS (the agent's own view of its outbound address). It must not block.
+	LocalAddr func(netip.Addr)
 }
 
 // Publisher implements agent.Sink on top of a JetStream stream.
@@ -71,6 +76,11 @@ type Publisher struct {
 	// snapOverflowMark is q.Overflowed() just after the last snapshot was queued. A
 	// higher count means a snapshot or change after it was lost to overflow.
 	snapOverflowMark uint64
+
+	// host is the host block stamped on events and snapshots; hostSet is false until
+	// the first SetHost.
+	host    model.HostInfo
+	hostSet bool
 
 	// usingExistingLogged is touched only by the sender goroutine.
 	usingExistingLogged bool
@@ -162,6 +172,12 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	if cfg.CAFile != "" {
 		opts = append(opts, nats.RootCAs(cfg.CAFile))
 	}
+	if cfg.LocalAddr != nil {
+		opts = append(opts, nats.SetCustomDialer(&localAddrDialer{
+			d:      net.Dialer{Timeout: nats.DefaultTimeout},
+			notify: cfg.LocalAddr,
+		}))
+	}
 	if cfg.CertFile != "" {
 		opts = append(opts, nats.ClientCert(cfg.CertFile, cfg.KeyFile))
 	}
@@ -224,6 +240,72 @@ func (p *Publisher) Snapshot(listeners []state.Listener) {
 	}
 	p.haveSnap = true
 	p.enqueueSnapshot(listeners)
+}
+
+// ExposureChanges enqueues one exposure.changed event per change and folds the new
+// exposure into the current listener set (for resnapshots).
+func (p *Publisher) ExposureChanges(changes []state.ExposureChange) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, c := range changes {
+		if l, ok := p.current[c.Key]; ok {
+			l.Exposure = cloneExposure(c.Exposure)
+			p.current[c.Key] = l
+		}
+		id, seq := p.nextIDLocked()
+		at := c.At
+		if at.IsZero() {
+			at = time.Now()
+		}
+		ev := &asmv1.ExposureEvent{
+			EventId:    id,
+			HostId:     p.hostID,
+			RunId:      p.runID,
+			Seq:        seq,
+			ObservedAt: timestamppb.New(at),
+			Listener:   listenerToProto(c.Key),
+			Processes:  processesToProto(c.Procs),
+			Exposure:   exposureToProto(c.Exposure),
+			Trigger:    c.Trigger,
+			Host:       p.hostProtoLocked(),
+		}
+		if c.Previous.Level != model.ExposureUnknown {
+			ev.Previous = exposureToProto(c.Previous)
+		}
+		p.enqueueLocked("exposure.changed", id, seq, ev)
+	}
+}
+
+// SetHost replaces the host block stamped on later events and snapshots. A change
+// after the first call is published on host.changed.
+func (p *Publisher) SetHost(h model.HostInfo) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.hostSet && p.host.Equal(h) {
+		return
+	}
+	prev, wasSet := p.host, p.hostSet
+	p.host, p.hostSet = h.Clone(), true
+	if !wasSet {
+		return
+	}
+	id, seq := p.nextIDLocked()
+	p.enqueueLocked("host.changed", id, seq, &asmv1.HostEvent{
+		EventId:    id,
+		HostId:     p.hostID,
+		RunId:      p.runID,
+		Seq:        seq,
+		ObservedAt: timestamppb.Now(),
+		Host:       hostToProto(p.host),
+		Previous:   hostToProto(prev),
+	})
+}
+
+func (p *Publisher) hostProtoLocked() *asmv1.HostInfo {
+	if !p.hostSet {
+		return nil
+	}
+	return hostToProto(p.host)
 }
 
 // Heartbeat enqueues a liveness message carrying the ring buffer's and the spool's
@@ -296,6 +378,8 @@ func (p *Publisher) enqueueChange(c state.Change) {
 		Listener:          listenerToProto(c.Key),
 		Processes:         processesToProto(c.Procs),
 		PreviousProcesses: previous,
+		Exposure:          exposureToProto(c.Exposure),
+		Host:              p.hostProtoLocked(),
 	})
 }
 
@@ -306,6 +390,7 @@ func (p *Publisher) enqueueSnapshot(listeners []state.Listener) {
 		states = append(states, &asmv1.ListenerState{
 			Listener:  listenerToProto(l.Key),
 			Processes: processesToProto(l.Procs),
+			Exposure:  exposureToProto(l.Exposure),
 		})
 	}
 	p.enqueueLocked("snapshot", id, seq, &asmv1.Snapshot{
@@ -315,6 +400,7 @@ func (p *Publisher) enqueueSnapshot(listeners []state.Listener) {
 		Seq:       seq,
 		TakenAt:   timestamppb.Now(),
 		Listeners: states,
+		Host:      p.hostProtoLocked(),
 	})
 	// Read after the push: a drop the push itself caused is older than this snapshot.
 	p.snapOverflowMark = p.q.Overflowed()
@@ -337,12 +423,17 @@ func (p *Publisher) applyLocked(c state.Change) {
 	case model.Closed:
 		delete(p.current, c.Key)
 	case model.Opened, model.OwnerChanged:
-		p.current[c.Key] = copyListener(state.Listener{Key: c.Key, Procs: c.Procs})
+		p.current[c.Key] = copyListener(state.Listener{Key: c.Key, Procs: c.Procs, Exposure: c.Exposure})
 	}
 }
 
 func copyListener(l state.Listener) state.Listener {
-	return state.Listener{Key: l.Key, Procs: slices.Clone(l.Procs)}
+	return state.Listener{Key: l.Key, Procs: slices.Clone(l.Procs), Exposure: cloneExposure(l.Exposure)}
+}
+
+func cloneExposure(e model.Exposure) model.Exposure {
+	e.Evidence = slices.Clone(e.Evidence)
+	return e
 }
 
 // resnapshot queues a snapshot of the current listener set (the last snapshot plus every
@@ -678,6 +769,52 @@ func listenerToProto(k model.ListenerKey) *asmv1.Listener {
 		Port:  uint32(k.Port),
 		Key:   k.String(),
 	}
+}
+
+// exposureToProto converts an exposure; an unjudged one is nil (the field is unset).
+func exposureToProto(e model.Exposure) *asmv1.Exposure {
+	if e.Level == model.ExposureUnknown {
+		return nil
+	}
+	var level asmv1.ExposureLevel
+	switch e.Level {
+	case model.ExposureLocal:
+		level = asmv1.ExposureLevel_EXPOSURE_LOCAL
+	case model.ExposureBound:
+		level = asmv1.ExposureLevel_EXPOSURE_BOUND
+	case model.ExposureHostFirewallOpen:
+		level = asmv1.ExposureLevel_EXPOSURE_HOST_FIREWALL_OPEN
+	case model.ExposureCloudOpen:
+		level = asmv1.ExposureLevel_EXPOSURE_CLOUD_OPEN
+	case model.ExposureConfirmed:
+		level = asmv1.ExposureLevel_EXPOSURE_CONFIRMED
+	}
+	return &asmv1.Exposure{Level: level, Evidence: slices.Clone(e.Evidence)}
+}
+
+func hostToProto(h model.HostInfo) *asmv1.HostInfo {
+	out := &asmv1.HostInfo{Cloud: h.Cloud, InstanceId: h.InstanceID, Conditions: slices.Clone(h.Conditions)}
+	for _, ip := range h.PublicIPs {
+		out.PublicIps = append(out.PublicIps, &asmv1.PublicIP{Ip: ip.IP.String(), Via: ip.Via, Dir: ip.Dir, Iface: ip.Iface})
+	}
+	return out
+}
+
+// localAddrDialer dials NATS and reports each connection's local address.
+type localAddrDialer struct {
+	d      net.Dialer
+	notify func(netip.Addr)
+}
+
+func (l *localAddrDialer) Dial(network, address string) (net.Conn, error) {
+	c, err := l.d.Dial(network, address)
+	if err != nil {
+		return nil, err
+	}
+	if ap, perr := netip.ParseAddrPort(c.LocalAddr().String()); perr == nil {
+		l.notify(ap.Addr().Unmap())
+	}
+	return c, nil
 }
 
 func processesToProto(procs []model.Process) []*asmv1.Process {

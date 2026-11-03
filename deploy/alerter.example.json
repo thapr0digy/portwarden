@@ -1,0 +1,23 @@
+{
+  "nats": {
+    "url": "tls://nats.example:4222",
+    "nkey_file": "/run/credentials/portwarden-alerter.service/nats.nk",
+    "ca_file": "/etc/portwarden/nats-ca.pem"
+  },
+  "rules": {
+    "page_level": "host_firewall_open",
+    "page_on_confirmed": true,
+    "page_on_silence": true,
+    "silent_after": "90s",
+    "dedupe_window": "1h",
+    "ignore": [
+      { "proto": "tcp", "port": 22 }
+    ]
+  },
+  "webhook": {
+    "url": "https://alerts.example/hooks/portwarden",
+    "secret_file": "/run/credentials/portwarden-alerter.service/webhook.secret",
+    "timeout": "5s",
+    "max_attempts": 5
+  }
+}

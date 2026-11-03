@@ -1,0 +1,35 @@
+[Unit]
+Description=Portwarden inventory (ASM_EVENTS -> PostgreSQL, read-only API, host silence, cloud look-up)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# The API binds 127.0.0.1:8740 by default (config "listen").
+# Secrets are passed as systemd credentials (readable only by this service, under
+# /run/credentials/portwarden-inventory.service/); the config file names those paths.
+LoadCredential=nats.nk:/etc/portwarden/nats/inventory.nk
+LoadCredential=dsn:/etc/portwarden/inventory.dsn
+LoadCredential=token:/etc/portwarden/inventory.token
+ExecStart=/usr/local/bin/portwarden-inventory --config /etc/portwarden/inventory.json
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

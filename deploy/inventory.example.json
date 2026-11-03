@@ -13,5 +13,11 @@
     "aws": true,
     "refresh": "10m",
     "regions": ["eu-west-1", "us-east-1"]
+  },
+  "retention": {
+    "history": "2160h",
+    "quarantine": "720h",
+    "interval": "1h",
+    "batch": 1000
   }
 }

@@ -130,3 +130,14 @@ func TestRetentionConfig(t *testing.T) {
 		t.Fatalf("configured %+v", r)
 	}
 }
+
+// The shipped example config is valid (unknown keys are refused) and sets the defaults.
+func TestExampleConfigLoads(t *testing.T) {
+	var c Config
+	if err := loadConfig("../../deploy/inventory.example.json", &c); err != nil {
+		t.Fatal(err)
+	}
+	if r := c.retention(); r.History != inventory.DefaultHistoryRetention || r.Quarantine != inventory.DefaultQuarantineRetention || r.Batch != 1000 {
+		t.Fatalf("example retention %+v", r)
+	}
+}

@@ -26,14 +26,16 @@ type recorder struct {
 	snapshots chan []state.Listener
 	changes   chan []state.Change
 	exposures chan []state.ExposureChange
+	proxies   chan []model.ProxyRoutes
 
-	mu    sync.Mutex
+	mu          sync.Mutex
+	snapProxies []model.ProxyRoutes // proxies of the latest snapshot
 	order []string // "changes" / "snapshot", in call order
 }
 
 func newRecorder() *recorder {
 	return &recorder{snapshots: make(chan []state.Listener, 8), changes: make(chan []state.Change, 64),
-		exposures: make(chan []state.ExposureChange, 64)}
+		exposures: make(chan []state.ExposureChange, 64), proxies: make(chan []model.ProxyRoutes, 64)}
 }
 
 func (r *recorder) ExposureChanges(c []state.ExposureChange) {
@@ -41,12 +43,18 @@ func (r *recorder) ExposureChanges(c []state.ExposureChange) {
 	r.exposures <- c
 }
 
-func (r *recorder) Snapshot(l []state.Listener, _ []model.ProxyRoutes) {
+func (r *recorder) Snapshot(l []state.Listener, p []model.ProxyRoutes) {
 	r.note("snapshot")
+	r.mu.Lock()
+	r.snapProxies = p
+	r.mu.Unlock()
 	r.snapshots <- l
 }
 
-func (r *recorder) ProxyRoutes([]model.ProxyRoutes) { r.note("proxies") }
+func (r *recorder) ProxyRoutes(p []model.ProxyRoutes) {
+	r.note("proxies")
+	r.proxies <- p
+}
 
 func (r *recorder) Changes(c []state.Change) {
 	r.note("changes")

@@ -27,6 +27,8 @@ Kernel-touching work happens in a Lima VM named `portwarden` (Ubuntu 24.04), whi
 | `make dist` / `make dist-check` / `make dist-lint` | On the host: release artifacts in `dist/` (see "Packaging and install"); `dist-check` rebuilds in a temp dir and fails unless byte-identical; `dist-lint` runs `dpkg-deb` and `lintian` over the `.deb`s in the VM |
 | `make lint-deploy` | On the host: `helm lint`, `kubeconform -strict` over the rendered chart and `deploy/kubernetes/daemonset.yaml`, `actionlint` over `.github/workflows` (`dev/lint-deploy.sh`; tools via `go run` at pinned versions) |
 | `make matrix` | On the host: the kernel test matrix (see "Kernel test matrix"); `MATRIX_LEGS="2604"` runs one leg |
+| `make vm-verify` / `dev/vm-verify.sh [--legs "2404 2604 amd64"]` | On the host, from any checkout (see "VM verify from any checkout"): copies this checkout where the VMs can see it and runs the kernel matrix there |
+| `make dev-test` | On the host: `dev/vmlock-test.sh`, tests of the VM lock and of the file list `dev/vm-verify.sh` copies (no VM) |
 | `dev/install-postgres.sh` | In the VM: installs PostgreSQL 16 from Ubuntu's archive (localhost only). `dev/itest.sh` and `dev/e2e.sh` create a throwaway database and role with a generated password per run and drop it on exit (`internal/inventory/pg` tests read the DSN from `PORTWARDEN_TEST_PG`) |
 | `dev/proxy-fixtures.sh` | In the VM: re-records the proxy parser fixtures: copies the distro configs (`/etc/nginx`, `/etc/apache2`, `/etc/haproxy`) into `internal/proxy/*/testdata/ubuntu-default/root` and records `nginx -T`, `apache2 -S`, `apache2 -t -D DUMP_INCLUDES`, `haproxy -c`; hand-written cases (`testdata/<case>/root/etc/pw-*`) are dumped from an overlay of `/etc` in a private mount namespace, so the real `/etc` is never written. Golden route files: `go test ./internal/proxy/... -update` after reviewing the diff |
 
@@ -345,6 +347,27 @@ NATS credentials in Kubernetes are per node: mint a host user per node (`portwar
 A missing VM is created and provisioned (`dev/provision.sh` from this checkout; it now also installs nginx, PostgreSQL, Docker and lintian, and falls back to the standalone `bpftool` package). VMs stay up for the next run; remove them with `limactl delete -f portwarden-2604 portwarden-amd64`. On an arm64 Mac the x86_64 VM is emulated (QEMU TCG: it boots in about 6 minutes and the eBPF tests pass, a few times slower than native); it needs `brew install qemu lima-additional-guestagents`. On an x86_64 host the same leg runs under KVM at native speed.
 
 CI (`.github/workflows/ci.yml`): a `unit` job (tests, vet with and without `integration`, amd64 and arm64 builds, `buf generate` + `go generate` drift, `make dist` + `dist-check` + `dist-lint`, `lint-deploy`) and a `kernel` job per leg (`2404`, `2604`) that installs QEMU and Lima on the `ubuntu-24.04` runner, opens `/dev/kvm` (GitHub's x86_64 Linux runners have KVM) and runs `dev/matrix.sh` for the leg with the workspace mounted, so CI's legs are x86_64 VMs running the real probes. The workflow passes actionlint; it has not run on GitHub (Actions minutes on this account may be exhausted).
+
+### VM verify from any checkout
+
+The VMs mount only `~/projects/portwarden`, so `make itest`, `make e2e` and `make matrix` only test that checkout. `dev/vm-verify.sh` runs the matrix for any checkout (a Flowryn worktree, a verify checkout, another `git worktree`):
+
+1. It copies the checkout's files (`git ls-files --cached --others --exclude-standard`: tracked files and new files not ignored, so uncommitted work is tested; plus any generated BPF objects; no `.git`, no `.matrix/` or `dist/`) into a fresh `~/projects/portwarden/.vmverify/<short-sha>-XXXXXX/` (gitignored), with rsync, or tar without it. `VMVERIFY_ROOT` names another mounted directory.
+2. With the `amd64` leg it runs `make dist` in the copy first (log: `.matrix/dist.log`), so the `.deb` lifecycle check runs; git there reads this checkout's history (`GIT_DIR`), so the version is this branch's.
+3. It runs the copy's own `dev/matrix.sh` (`MATRIX_LEGS` from `--legs`), so the copy is the repo under test, and prints the matrix's per-leg summary. It exits non-zero when any leg fails.
+4. On exit the logs and `summary.txt` go to this checkout's `.matrix/` and the copy is removed (`VMVERIFY_KEEP=1` keeps it for debugging).
+
+**VM lock.** `dev/matrix.sh` (and so `dev/vm-verify.sh`), `make itest` and `make e2e` take a host-wide lock, `~/projects/portwarden/.vmverify/lock/` (`dev/vmlock.sh`; a directory, since macOS has no `flock`), whose `owner` file names the holder (pid, checkout, branch, start, command). A second run prints `vmlock: waiting for the VMs (…); held by: …` every 5 minutes and gives up after `VMLOCK_TIMEOUT` seconds (default 5400). A lock whose owner process is gone is taken over (`vmlock: took over a stale lock: …`). Tests started by hand inside a VM take no lock, so before each leg (and before `make itest`/`e2e`) the VM is checked with `pgrep` for `e2e.sh`, `itest.sh` or a running `*.test` binary, and the run waits while one is found. Remove a lock by hand only when its owner is not running: `rm -r ~/projects/portwarden/.vmverify/lock`.
+
+**In Flowryn.** Add it as the last step of the project's verify list, after the Mac-side steps, and allow about an hour (three legs; the emulated x86_64 leg is the longest):
+
+```toml
+[projects.portwarden]
+verify = ["go test ./...", "GOOS=linux go vet ./...", "GOOS=linux go vet -tags integration ./...", "dev/vm-verify.sh"]
+verify_timeout_min = 60
+```
+
+(The first three entries stand for the steps already there.) A verify run that finds the VMs held waits for the lock inside that hour; `dev/vm-verify.sh --legs 2404` is a shorter check.
 
 ## x86 test checklist
 

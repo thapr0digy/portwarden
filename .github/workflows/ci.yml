@@ -54,6 +54,8 @@ jobs:
           dev/dist-lint.sh
       - name: Deployment lint (Helm, kubeconform, actionlint)
         run: dev/lint-deploy.sh
+      - name: Dev script tests (VM lock, vm-verify file list)
+        run: dev/vmlock-test.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dist

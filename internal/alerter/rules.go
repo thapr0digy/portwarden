@@ -127,8 +127,13 @@ type State interface {
 	SetProbeResult(ctx context.Context, key, result string, at time.Time) error
 	// ClearProbes drops the probe results whose key starts with prefix.
 	ClearProbes(ctx context.Context, prefix string) error
-	// SetForgotten records a forgotten host's watermark (the highest one wins).
-	SetForgotten(ctx context.Context, host string, streamSeq uint64) error
+	// SetForgotten records a forgotten host's mark (Back false); a mark of the same stream
+	// with a higher sequence is kept, one of another stream replaced.
+	SetForgotten(ctx context.Context, host string, mark ForgetMark) error
+	// SetBack records that a forgotten host sent an agent message after its mark.
+	SetBack(ctx context.Context, host string) error
+	// ForgetMark returns a host's mark (ok false: never forgotten).
+	ForgetMark(ctx context.Context, host string) (ForgetMark, bool, error)
 	Enqueue(ctx context.Context, a *Alert) error
 }
 
@@ -247,6 +252,10 @@ func (e *Engine) Confirmation(ctx context.Context, st State, host string, ev *as
 func (e *Engine) Silent(ctx context.Context, st State, t liveness.Transition) (Decision, error) {
 	if !e.rules.PageOnSilence {
 		return Decision{}, nil
+	}
+	// A host forgotten meanwhile (and not back) is not silent: it is gone.
+	if m, ok, err := st.ForgetMark(ctx, t.Host); err != nil || (ok && !m.Back) {
+		return Decision{Suppressed: "forgotten"}, err
 	}
 	key := "silent:" + t.Host
 	if _, paged, err := st.LastPaged(ctx, key); err != nil || paged {

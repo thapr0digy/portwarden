@@ -11,13 +11,13 @@ import (
 type MemState struct {
 	Paged     map[string]time.Time
 	Probes    map[string]string
-	Forgotten map[string]uint64
+	Forgotten map[string]ForgetMark
 	Queue     []*Alert
 }
 
 // NewMemState returns an empty state.
 func NewMemState() *MemState {
-	return &MemState{Paged: map[string]time.Time{}, Probes: map[string]string{}, Forgotten: map[string]uint64{}}
+	return &MemState{Paged: map[string]time.Time{}, Probes: map[string]string{}, Forgotten: map[string]ForgetMark{}}
 }
 func (m *MemState) ClearProbes(_ context.Context, prefix string) error {
 	for k := range m.Probes {
@@ -27,9 +27,23 @@ func (m *MemState) ClearProbes(_ context.Context, prefix string) error {
 	}
 	return nil
 }
-func (m *MemState) SetForgotten(_ context.Context, host string, seq uint64) error {
-	m.Forgotten[host] = max(m.Forgotten[host], seq)
+func (m *MemState) SetForgotten(_ context.Context, host string, mark ForgetMark) error {
+	if old, ok := m.Forgotten[host]; ok && old.Stream.Equal(mark.Stream) && old.Seq >= mark.Seq {
+		return nil
+	}
+	m.Forgotten[host] = mark
 	return nil
+}
+func (m *MemState) SetBack(_ context.Context, host string) error {
+	if f, ok := m.Forgotten[host]; ok {
+		f.Back = true
+		m.Forgotten[host] = f
+	}
+	return nil
+}
+func (m *MemState) ForgetMark(_ context.Context, host string) (ForgetMark, bool, error) {
+	f, ok := m.Forgotten[host]
+	return f, ok, nil
 }
 
 func (m *MemState) LastPaged(_ context.Context, key string) (time.Time, bool, error) {

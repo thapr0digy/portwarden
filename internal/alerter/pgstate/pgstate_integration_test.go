@@ -155,7 +155,9 @@ func TestForgetHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, h := range []string{"w_b", "web"} {
-		if err := s.InTx(ctx, func(st alerter.State) error { return e.Forget(ctx, st, h, 77) }); err != nil {
+		if err := s.InTx(ctx, func(st alerter.State) error {
+			return e.Forget(ctx, st, h, alerter.ForgetMark{Seq: 77, Stream: pgStream1})
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -165,13 +167,58 @@ func TestForgetHost(t *testing.T) {
 	if marks != 6 || probes != 2 {
 		t.Fatalf("left %d marks and %d probes, want 6 and 2 (web-2 and we%% untouched)", marks, probes)
 	}
-	if err := s.InTx(ctx, func(st alerter.State) error { return st.SetForgotten(ctx, "web", 5) }); err != nil {
+	// An older announcement of the same stream changes nothing; SetBack sticks.
+	if err := s.InTx(ctx, func(st alerter.State) error {
+		if err := st.SetForgotten(ctx, "web", alerter.ForgetMark{Seq: 5, Stream: pgStream1}); err != nil {
+			return err
+		}
+		return st.SetBack(ctx, "web")
+	}); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
 	s = open2(t)
 	got, err := s.Forgotten(ctx)
-	if err != nil || len(got) != 2 || got["web"] != 77 || got["w_b"] != 77 {
+	if err != nil || len(got) != 2 || got["web"] != (alerter.ForgetMark{Seq: 77, Stream: pgStream1, Back: true}) ||
+		got["w_b"] != (alerter.ForgetMark{Seq: 77, Stream: pgStream1}) {
 		t.Fatalf("forgotten %v %v", got, err)
+	}
+	var m alerter.ForgetMark
+	var ok bool
+	_ = s.InTx(ctx, func(st alerter.State) error { m, ok, err = st.ForgetMark(ctx, "web"); return err })
+	if !ok || !m.Back || m.Seq != 77 {
+		t.Fatalf("ForgetMark %+v %v", m, ok)
+	}
+}
+
+var (
+	pgStream1 = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	pgStream2 = time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+)
+
+// The stream was recreated (sequences start over) and a host id is reused: the old mark
+// goes at start, as does one past the new stream's last sequence; a new stream's
+// announcement replaces an old mark whatever its sequence.
+func TestForgottenAcrossAStreamReset(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if err := s.InTx(ctx, func(st alerter.State) error {
+		for h, m := range map[string]alerter.ForgetMark{"reused": {Seq: 5000, Stream: pgStream1}, "past-end": {Seq: 900, Stream: pgStream2},
+			"kept": {Seq: 7, Stream: pgStream2}, "replaced": {Seq: 4000, Stream: pgStream1}} {
+			if err := st.SetForgotten(ctx, h, m); err != nil {
+				return err
+			}
+		}
+		return st.SetForgotten(ctx, "replaced", alerter.ForgetMark{Seq: 3, Stream: pgStream2})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.PruneForgotten(ctx, pgStream2, 100)
+	if err != nil || n != 2 {
+		t.Fatalf("pruned %d (%v), want 2", n, err)
+	}
+	got, _ := s.Forgotten(ctx)
+	if len(got) != 2 || got["kept"].Seq != 7 || got["replaced"] != (alerter.ForgetMark{Seq: 3, Stream: pgStream2}) {
+		t.Fatalf("left %v", got)
 	}
 }

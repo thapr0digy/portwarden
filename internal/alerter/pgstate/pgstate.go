@@ -172,30 +172,58 @@ func (t txState) ClearProbes(ctx context.Context, prefix string) error {
 	return err
 }
 
-func (t txState) SetForgotten(ctx context.Context, host string, seq uint64) error {
-	_, err := t.tx.Exec(ctx, `INSERT INTO alerter_forgotten (host, stream_seq) VALUES ($1, $2)
-		ON CONFLICT (host) DO UPDATE SET stream_seq = GREATEST(alerter_forgotten.stream_seq, EXCLUDED.stream_seq), at = now()`,
-		clean(host), int64(seq))
+func (t txState) SetForgotten(ctx context.Context, host string, m alerter.ForgetMark) error {
+	_, err := t.tx.Exec(ctx, `INSERT INTO alerter_forgotten (host, stream_seq, stream_created, back) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (host) DO UPDATE SET stream_seq = EXCLUDED.stream_seq, stream_created = EXCLUDED.stream_created,
+			back = EXCLUDED.back, at = now()
+		WHERE alerter_forgotten.stream_created <> EXCLUDED.stream_created OR alerter_forgotten.stream_seq < EXCLUDED.stream_seq`,
+		clean(host), int64(m.Seq), m.Stream, m.Back)
 	return err
 }
 
-// Forgotten returns every forgotten host's watermark (host to stream sequence).
-func (s *Store) Forgotten(ctx context.Context) (map[string]uint64, error) {
-	rows, err := s.pool.Query(ctx, "SELECT host, stream_seq FROM alerter_forgotten")
+func (t txState) SetBack(ctx context.Context, host string) error {
+	_, err := t.tx.Exec(ctx, "UPDATE alerter_forgotten SET back = true WHERE host = $1", clean(host))
+	return err
+}
+
+func (t txState) ForgetMark(ctx context.Context, host string) (alerter.ForgetMark, bool, error) {
+	var m alerter.ForgetMark
+	var seq int64
+	err := t.tx.QueryRow(ctx, "SELECT stream_seq, stream_created, back FROM alerter_forgotten WHERE host = $1", clean(host)).
+		Scan(&seq, &m.Stream, &m.Back)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return m, false, nil
+	}
+	m.Seq = uint64(seq)
+	return m, err == nil, err
+}
+
+// Forgotten returns every forgotten host's mark.
+func (s *Store) Forgotten(ctx context.Context) (map[string]alerter.ForgetMark, error) {
+	rows, err := s.pool.Query(ctx, "SELECT host, stream_seq, stream_created, back FROM alerter_forgotten")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]uint64{}
+	out := map[string]alerter.ForgetMark{}
 	for rows.Next() {
 		var h string
 		var seq int64
-		if err := rows.Scan(&h, &seq); err != nil {
+		var m alerter.ForgetMark
+		if err := rows.Scan(&h, &seq, &m.Stream, &m.Back); err != nil {
 			return nil, err
 		}
-		out[h] = uint64(seq)
+		m.Seq = uint64(seq)
+		out[h] = m
 	}
 	return out, rows.Err()
+}
+
+// PruneForgotten drops the marks of another stream (created at another time) and those
+// past its last sequence (a reset), at start.
+func (s *Store) PruneForgotten(ctx context.Context, stream time.Time, lastSeq uint64) (int64, error) {
+	tag, err := s.pool.Exec(ctx, "DELETE FROM alerter_forgotten WHERE stream_created <> $1 OR stream_seq > $2", stream, int64(lastSeq))
+	return tag.RowsAffected(), err
 }
 
 func (t txState) Enqueue(ctx context.Context, a *alerter.Alert) error {

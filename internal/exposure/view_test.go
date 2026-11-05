@@ -201,7 +201,9 @@ func TestJudgeKubernetes(t *testing.T) {
 		"4026532501/tcp/0.0.0.0:80": {model.ExposureHostFirewallOpen, []string{
 			"nat: dnat tcp/8088 -> 10.42.0.12:80", "bind:192.168.5.15 (eth0)",
 			"iptables: accept tcp/8088 from 0/0 (eth0, ip filter FLANNEL-FWD)"}},
-		"4026532501/tcp/0.0.0.0:9100": {model.ExposureLocal, []string{"netns: no host port mapping"}},
+		// No host port maps it, but kube-proxy (iptables mode) is present: bound, as in
+		// nftables mode.
+		"4026532501/tcp/0.0.0.0:9100": {model.ExposureBound, []string{kubeIptPodsNote}},
 		"4026532502/tcp/0.0.0.0:80": {model.ExposureBound, []string{
 			"netns: public address 34.120.1.7", "firewall: not judged (other netns)"}},
 	})

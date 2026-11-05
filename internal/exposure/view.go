@@ -200,10 +200,14 @@ func (v *View) init() {
 	for _, i := range v.ifs {
 		switch {
 		case i.Name == "kube-ipvs0":
-			v.opaque = append(v.opaque, "kube-proxy IPVS mode")
+			v.opaque = append(v.opaque, evKubeIPVS)
 		case strings.HasPrefix(i.Name, "cilium_"):
 			v.opaque = append(v.opaque, "Cilium")
 		}
+	}
+	if slices.Contains(v.opaque, evKubeIPVS) {
+		// IPVS mode owns the same service chains; name the mode actually in use.
+		v.opaque = slices.DeleteFunc(v.opaque, func(s string) bool { return s == evKubeIptPods })
 	}
 	slices.Sort(v.opaque)
 	v.opaque = slices.Compact(v.opaque)
@@ -584,8 +588,20 @@ func (v *View) judgeNetns(l state.Listener, maps []Mapping) model.Exposure {
 
 const (
 	evTooManyNATPaths = "too many NAT paths"
-	evKubeNftPods     = "kube-proxy nftables: pod addresses may be routable in the cluster"
+	evKubeIPVS        = "kube-proxy IPVS mode"
+	// evKubePodsRoutable is why a pod no host port maps is not provably local under
+	// kube-proxy, in either mode it simulates.
+	evKubePodsRoutable = "pod addresses may be routable in the cluster"
+	evKubeNftPods      = "kube-proxy nftables: " + evKubePodsRoutable
+	evKubeIptPods      = "kube-proxy iptables: " + evKubePodsRoutable
 )
+
+// isKubeProxyIptablesChain reports kube-proxy's own iptables service chains. The
+// kubelet's KUBE-FIREWALL and the canary chains exist without kube-proxy (or in every
+// mode), so they do not count; nftables mode names its chains in lower case.
+func isKubeProxyIptablesChain(name string) bool {
+	return name == "KUBE-SERVICES" || name == "KUBE-NODEPORTS"
+}
 
 // undecidedByTruncation turns a mapped container's closed verdict into an undetermined
 // one when mapping discovery was cut short: another mapping it did not find may let
@@ -640,6 +656,10 @@ func (v *View) scanNAT() (targets []natTarget, opaque []string) {
 			// CIDRs are often routed to the node inside the cluster or beyond it, and an
 			// unknown is never lowered.
 			opaque = append(opaque, evKubeNftPods)
+		case isKubeProxyIptablesChain(c.Name):
+			// Simulated since M3; an unmapped pod is bound for the same reason as in
+			// nftables mode.
+			opaque = append(opaque, evKubeIptPods)
 		case strings.HasPrefix(c.Name, "CILIUM_") || c.Table == "cilium":
 			opaque = append(opaque, "Cilium")
 		case c.Name == "DOCKER-INGRESS":

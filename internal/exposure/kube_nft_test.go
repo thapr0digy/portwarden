@@ -12,7 +12,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/state"
 )
 
-const kubePodsNote = "fw:undetermined netns mapping (kube-proxy nftables: pod addresses may be routable in the cluster)"
+const kubePodsNote = "fw:undetermined netns mapping (" + evKubeNftPods + ")"
 
 // kubePodAddrs maps the kube fixture's pods (by holder pid) to their addresses.
 func kubePodAddrs(pid uint32) ([]netip.Addr, error) {

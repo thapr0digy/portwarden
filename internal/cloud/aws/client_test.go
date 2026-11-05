@@ -209,10 +209,11 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if action == "DescribeVpcEndpoints" {
 		f.endpointsFilter = r.Form.Get("Filter.1.Name") + "=" + r.Form.Get("Filter.1.Value.1")
 	}
+	block := f.blockPrefixLists
 	f.mu.Unlock()
 	if action == "GetManagedPrefixListEntries" {
 		switch {
-		case f.blockPrefixLists:
+		case block:
 			<-r.Context().Done()
 			return
 		case f.throttlePrefixLists:

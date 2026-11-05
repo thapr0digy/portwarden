@@ -170,7 +170,7 @@ type fakeAWS struct {
 	// blockPrefixLists holds GetManagedPrefixListEntries until the client gives up.
 	blockPrefixLists bool
 	// failEndpoints answers DescribeVpcEndpoints with UnauthorizedOperation.
-	failEndpoints bool
+	failEndpoints   bool
 	endpointsFilter string // the Filter.1 seen on DescribeVpcEndpoints
 }
 

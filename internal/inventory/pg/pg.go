@@ -328,17 +328,18 @@ func setHostInfo(ctx context.Context, tx pgx.Tx, host string, h *asmv1.HostInfo)
 	return err
 }
 
-// badResource holds the hosts already logged for an invalid cloud_resource.
-var badResource sync.Map
+// badResource remembers the invalid cloud_resource values already logged (bounded).
+var badResource = newBadResources(maxBadResourceHosts)
 
 // checkedResource returns the host block's cloud_resource when it has its cloud's shape
-// (cloud.ValidResource), else "" (dropped; logged once per host). The value
-// comes from the host, which must not steer the backend's cloud calls.
+// (cloud.ValidResource), else "" (dropped; logged once per distinct value per host, never
+// with the value). The value comes from the host, which must not steer the backend's
+// cloud calls.
 func checkedResource(host string, h *asmv1.HostInfo) string {
 	r := h.GetCloudResource()
 	if err := cloud.ValidResource(h.GetCloud(), h.GetInstanceId(), r); err != nil {
-		if _, seen := badResource.LoadOrStore(host, true); !seen {
-			slog.Warn("inventory: dropping an invalid cloud_resource; logged once per host", "host", host, "cloud", h.GetCloud(), "err", err, "length", len(r))
+		if badResource.changed(host, r) {
+			slog.Warn("inventory: dropping an invalid cloud_resource; logged once per distinct value", "host", host, "cloud", h.GetCloud(), "err", err, "length", len(r))
 		}
 		return ""
 	}

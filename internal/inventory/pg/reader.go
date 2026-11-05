@@ -27,7 +27,7 @@ func clampLimit(n int) int {
 	return min(n, maxLimit+1)
 }
 
-const hostColumns = `h.host_id, h.cloud, h.instance_id, h.region, h.public_ips, h.conditions, h.run_id, h.last_seq,
+const hostColumns = `h.host_id, h.cloud, h.instance_id, h.region, h.cloud_resource, h.public_ips, h.conditions, h.run_id, h.last_seq,
 	h.needs_resync, h.last_snapshot_at, h.last_heartbeat, h.ringbuf_drops, h.queue_drops, h.silent_since, h.cloud_status,
 	h.cloud_checked_at, h.first_seen, h.updated_at, h.firewall_fingerprint, h.firewall_changed_at, h.tamper, h.tamper_at,
 	(SELECT count(*) FROM listeners l WHERE l.host_id = h.host_id)`
@@ -37,7 +37,7 @@ func scanHost(row pgx.Row) (inventory.HostView, error) {
 	var ips, conds, tamper []byte
 	var last, rb, qd int64
 	var n int64
-	err := row.Scan(&v.ID, &v.Cloud, &v.InstanceID, &v.Region, &ips, &conds, &v.RunID, &last, &v.NeedsResync,
+	err := row.Scan(&v.ID, &v.Cloud, &v.InstanceID, &v.Region, &v.CloudResource, &ips, &conds, &v.RunID, &last, &v.NeedsResync,
 		&v.LastSnapshotAt, &v.LastHeartbeat, &rb, &qd, &v.SilentSince, &v.CloudStatus, &v.CloudCheckedAt,
 		&v.FirstSeen, &v.UpdatedAt, &v.FirewallFingerprint, &v.FirewallChangedAt, &tamper, &v.TamperAt, &n)
 	v.PublicIPs, v.Conditions = json.RawMessage(ips), json.RawMessage(conds)
@@ -234,8 +234,8 @@ func (s *Store) CloudHosts(ctx context.Context) ([]string, error) {
 // CloudHost returns a host's identity and listeners for the cloud look-up.
 func (s *Store) CloudHost(ctx context.Context, host string) (inventory.CloudHost, bool, error) {
 	var h inventory.CloudHost
-	err := s.pool.QueryRow(ctx, "SELECT host_id, cloud, instance_id, region FROM hosts WHERE host_id = $1", host).
-		Scan(&h.ID, &h.Cloud, &h.InstanceID, &h.Region)
+	err := s.pool.QueryRow(ctx, "SELECT host_id, cloud, instance_id, region, cloud_resource FROM hosts WHERE host_id = $1", host).
+		Scan(&h.ID, &h.Cloud, &h.InstanceID, &h.Region, &h.Resource)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return h, false, nil
 	}

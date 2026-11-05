@@ -72,6 +72,8 @@ type HostInfo struct {
 	InstanceID string
 	// Region is the cloud region, for the backend's cloud look-up.
 	Region string
+	// Resource is the instance's full name in its cloud (GCP, Azure; M10).
+	Resource string
 	// Conditions are host-level problems that weaken the agent's judgements, e.g.
 	// "fw:unreadable iptables-save: Permission denied".
 	Conditions []string
@@ -79,7 +81,7 @@ type HostInfo struct {
 
 // Equal compares every field, candidates and conditions in order.
 func (h HostInfo) Equal(g HostInfo) bool {
-	return h.Cloud == g.Cloud && h.InstanceID == g.InstanceID && h.Region == g.Region && slices.Equal(h.PublicIPs, g.PublicIPs) &&
+	return h.Cloud == g.Cloud && h.InstanceID == g.InstanceID && h.Region == g.Region && h.Resource == g.Resource && slices.Equal(h.PublicIPs, g.PublicIPs) &&
 		slices.Equal(h.Conditions, g.Conditions)
 }
 

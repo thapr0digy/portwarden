@@ -159,3 +159,35 @@ func TestCloudLookupIncompleteNeverLowers(t *testing.T) {
 		t.Fatalf("sent %d, want 2", sent)
 	}
 }
+
+// An undetermined verdict (M10: a route table not read, a route to an appliance) neither
+// lowers a cloud-open listener nor raises one, and the host's status counts it.
+func TestCloudLookupUndeterminedNeitherRaisesNorLowers(t *testing.T) {
+	state := &fakeCloudState{status: map[string]string{}, hosts: map[string]CloudHost{"h1": {ID: "h1", Cloud: "aws", InstanceID: "i-1", Region: "r",
+		Listeners: []CloudListener{
+			{Key: "a", Proto: "tcp", Port: 443, AgentLevel: 3, CloudLevel: 4, CloudEvidence: []string{"cloud: sg-1 allows tcp/443 from 0.0.0.0/0"}},
+			{Key: "b", Proto: "tcp", Port: 22, AgentLevel: 3},
+		}}}}
+	prov := undeterminedProvider{}
+	sent := 0
+	l := NewCloudLookup(state, map[string]cloud.Provider{"aws": prov}, func(context.Context, string, string, proto.Message) error {
+		sent++
+		return nil
+	}, "r")
+	if err := l.Check(context.Background(), "h1"); err != nil {
+		t.Fatal(err)
+	}
+	if sent != 0 || !strings.Contains(state.status["h1"], "2 listeners checked, 0 open, 2 undetermined") {
+		t.Fatalf("sent %d status %q", sent, state.status["h1"])
+	}
+}
+
+type undeterminedProvider struct{}
+
+func (undeterminedProvider) Evaluate(_ context.Context, _ cloud.Host, ports []cloud.Port) ([]cloud.Verdict, error) {
+	var out []cloud.Verdict
+	for _, p := range ports {
+		out = append(out, cloud.Verdict{Key: p.Key, Evidence: []string{cloud.UndeterminedEvidence + " (eni-1: route tables not read: denied)"}})
+	}
+	return out, nil
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -129,7 +130,7 @@ func (l *CloudLookup) Check(ctx context.Context, host string) error {
 			stale = append(stale, cl)
 		}
 	}
-	verdicts, err := prov.Evaluate(ctx, cloud.Host{ID: h.ID, Cloud: h.Cloud, InstanceID: h.InstanceID, Region: h.Region}, ports)
+	verdicts, err := prov.Evaluate(ctx, cloud.Host{ID: h.ID, Cloud: h.Cloud, InstanceID: h.InstanceID, Region: h.Region, Resource: h.Resource}, ports)
 	if err != nil {
 		status := "error: " + err.Error()
 		if errors.Is(err, cloud.ErrUnsupported) {
@@ -147,7 +148,7 @@ func (l *CloudLookup) Check(ctx context.Context, host string) error {
 	for _, cl := range h.Listeners {
 		byKey[cl.Key] = cl
 	}
-	open, incomplete := 0, 0
+	open, incomplete, undetermined := 0, 0, 0
 	for _, v := range verdicts {
 		cl := byKey[v.Key]
 		if v.Open {
@@ -155,6 +156,9 @@ func (l *CloudLookup) Check(ctx context.Context, host string) error {
 		}
 		if !v.Complete {
 			incomplete++
+		}
+		if !v.Open && slices.ContainsFunc(v.Evidence, func(e string) bool { return strings.HasPrefix(e, cloud.UndeterminedEvidence) }) {
+			undetermined++
 		}
 		wasOpen, wasEvidence := cl.CloudLevel >= cloud.LevelCloudOpen, cl.CloudEvidence
 		if s, ok := l.sent[host+"/"+v.Key]; ok {
@@ -176,7 +180,11 @@ func (l *CloudLookup) Check(ctx context.Context, host string) error {
 		}
 	}
 	status := fmt.Sprintf("ok: %d listeners checked, %d open", len(verdicts), open)
-	if incomplete > 0 {
+	switch {
+	case undetermined > 0:
+		status = fmt.Sprintf("incomplete: %d listeners checked, %d open, %d undetermined (data not read in full or not decidable; nothing was raised or lowered by it)",
+			len(verdicts), open, undetermined)
+	case incomplete > 0:
 		status = fmt.Sprintf("incomplete: %d listeners checked, %d open (data not read in full; nothing was lowered)", len(verdicts), open)
 	}
 	return l.State.SetCloudStatus(ctx, host, status, now)

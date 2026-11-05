@@ -86,7 +86,7 @@ func (c *Collector) update(change func()) {
 
 // build orders the candidates: cloud metadata, then interfaces, then the ingest view.
 func (c *Collector) build() model.HostInfo {
-	h := model.HostInfo{Cloud: c.cloud.Cloud, InstanceID: c.cloud.InstanceID, Region: c.cloud.Region, Conditions: slices.Clone(c.conds)}
+	h := model.HostInfo{Cloud: c.cloud.Cloud, InstanceID: c.cloud.InstanceID, Region: c.cloud.Region, Resource: c.cloud.Resource, Conditions: slices.Clone(c.conds)}
 	for _, a := range c.cloud.PublicIPs {
 		h.PublicIPs = append(h.PublicIPs, model.PublicIP{IP: a.Unmap(), Via: model.ViaIMDS, Dir: model.DirIn})
 	}

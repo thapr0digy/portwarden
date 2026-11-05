@@ -197,8 +197,27 @@ func TestStoreLifecycle(t *testing.T) {
 	}
 
 	ch, ok, err := s.CloudHost(ctx, h1)
-	if err != nil || !ok || ch.InstanceID != "i-1" || len(ch.Listeners) != 1 {
+	if err != nil || !ok || ch.InstanceID != "i-1" || ch.Resource != "" || len(ch.Listeners) != 1 {
 		t.Fatalf("cloud host %+v %v %v", ch, ok, err)
+	}
+
+	// M10: the cloud resource round-trips to the look-up and the API.
+	gcp := &asmv1.HostInfo{Cloud: "gcp", InstanceId: "4419012345678", Region: "us-central1",
+		CloudResource: "projects/acme-prod/zones/us-central1-a/instances/4419012345678"}
+	apply(t, s, &inventory.Cursor{RunID: "01A", LastSeq: 2}, "host.changed", &asmv1.HostEvent{HostId: h1, RunId: "01A", Seq: 2, Host: gcp})
+	ch, _, err = s.CloudHost(ctx, h1)
+	if err != nil || ch.Resource != gcp.CloudResource || ch.Cloud != "gcp" {
+		t.Fatalf("cloud host after host.changed %+v %v", ch, err)
+	}
+	if hv, _, _ := s.Host(ctx, h1); hv.CloudResource != gcp.CloudResource {
+		t.Fatalf("api host %+v", hv)
+	}
+	// A resource naming another instance (or of the wrong shape) is dropped, not stored.
+	forged := &asmv1.HostInfo{Cloud: "gcp", InstanceId: "4419012345678", Region: "us-central1",
+		CloudResource: "projects/victim-prod/zones/us-central1-a/instances/999"}
+	apply(t, s, &inventory.Cursor{RunID: "01A", LastSeq: 3}, "host.changed", &asmv1.HostEvent{HostId: h1, RunId: "01A", Seq: 3, Host: forged})
+	if ch, _, err = s.CloudHost(ctx, h1); err != nil || ch.Resource != "" {
+		t.Fatalf("forged resource stored: %+v %v", ch, err)
 	}
 }
 

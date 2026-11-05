@@ -29,6 +29,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
 	"github.com/thapr0digy/portwarden/internal/cloud"
 	cloudaws "github.com/thapr0digy/portwarden/internal/cloud/aws"
+	"github.com/thapr0digy/portwarden/internal/cloud/reach"
 	"github.com/thapr0digy/portwarden/internal/inventory"
 	"github.com/thapr0digy/portwarden/internal/inventory/api"
 	"github.com/thapr0digy/portwarden/internal/inventory/pg"
@@ -121,6 +122,29 @@ type CloudConfig struct {
 	Endpoint string       `json:"endpoint"`
 	// Regions, when set, are the only regions looked up.
 	Regions []string `json:"regions"`
+	// VPNCIDRs are the operator's VPN egress or office ranges (M10). The reach rule counts
+	// every source address a cloud rule allows as the internet unless it is private
+	// (RFC 1918, CGNAT, ULA and the other special-purpose ranges) or listed here.
+	VPNCIDRs []string `json:"vpn_cidrs"`
+	// AllowBroad accepts vpn_cidrs wider than /8 (IPv4) or /16 (IPv6); a /0 is never
+	// accepted.
+	AllowBroad bool `json:"allow_broad"`
+}
+
+// policy parses vpn_cidrs into the reach rule; a bad, /0 or (without allow_broad) too
+// broad range is refused at start, and the accepted ranges are logged.
+func (c CloudConfig) policy() (reach.Policy, error) {
+	vpn, err := reach.ParseVPN(c.VPNCIDRs, c.AllowBroad)
+	if err != nil {
+		return reach.Policy{}, fmt.Errorf("cloud.%w", err)
+	}
+	pol := reach.NewPolicy(vpn)
+	ranges := make([]string, 0, len(vpn))
+	for _, p := range pol.VPN() {
+		ranges = append(ranges, p.String())
+	}
+	slog.Info("cloud: reach rule: sources outside private ranges and vpn_cidrs count as the internet", "vpn_cidrs", ranges, "allow_broad", c.AllowBroad)
+	return pol, nil
 }
 
 func main() {
@@ -150,6 +174,10 @@ func run(path string) error {
 		cfg.Listen = defaultListen
 	}
 	if err := cfg.Retention.validate(); err != nil {
+		return err
+	}
+	policy, err := cfg.Cloud.policy()
+	if err != nil {
 		return err
 	}
 	if err := checkListen(cfg.Listen, cfg.AllowInsecureListen); err != nil {
@@ -248,7 +276,7 @@ func run(path string) error {
 	slog.Info("retention", "history", ret.History.String(), "quarantine", ret.Quarantine.String(), "interval", ret.Interval.String(), "batch", ret.Batch)
 	wg.Go(func() { ret.Run(ctx, store) })
 	if cfg.Cloud.AWS {
-		prov, err := cloudaws.New(ctx, cloudaws.Options{Endpoint: cfg.Cloud.Endpoint, Regions: cfg.Cloud.Regions})
+		prov, err := cloudaws.New(ctx, cloudaws.Options{Endpoint: cfg.Cloud.Endpoint, Regions: cfg.Cloud.Regions, Policy: policy})
 		if err != nil {
 			return err
 		}

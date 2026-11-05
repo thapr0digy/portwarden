@@ -20,6 +20,7 @@ import (
 	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
 	"github.com/thapr0digy/portwarden/internal/cloud"
+	"github.com/thapr0digy/portwarden/internal/cloud/reach"
 )
 
 // EC2API is the read-only EC2 subset the look-up calls.
@@ -27,6 +28,8 @@ type EC2API interface {
 	ec2.DescribeInstancesAPIClient
 	ec2.DescribeSecurityGroupsAPIClient
 	ec2.DescribeNetworkAclsAPIClient
+	ec2.DescribeRouteTablesAPIClient
+	ec2.GetManagedPrefixListEntriesAPIClient
 }
 
 // ELBv2API is the read-only ELBv2 subset the look-up calls.
@@ -68,9 +71,15 @@ type Options struct {
 	// Regions, when set, are the only regions looked up (a host block naming another is an
 	// error). At most 64 regions get clients either way.
 	Regions []string
+	// Policy is the reach rule: the operator's VPN ranges never count as the internet.
+	Policy reach.Policy
 }
 
 const maxRegions = 64
+
+// maxPrefixLists bounds the prefix lists read per host; rules naming one beyond it are
+// undetermined.
+const maxPrefixLists = 100
 
 var (
 	regionRe   = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-[0-9]+$`)
@@ -212,7 +221,19 @@ func (p *Provider) Evaluate(ctx context.Context, h cloud.Host, ports []cloud.Por
 	if aclTrunc {
 		incomplete = append(incomplete, "network ACLs truncated")
 	}
-	verdicts := Evaluate(HostData{Instance: inst, SecurityGroups: sgs, NACLs: nacls, LBs: lbs}, ports)
+	data := HostData{Instance: inst, SecurityGroups: sgs, NACLs: nacls, LBs: lbs, Policy: p.opts.Policy,
+		PrefixLists: p.prefixLists(ctx, c, sgs)}
+	// Route tables are read after the M5 permissions: one that fails (an IAM policy without
+	// ec2:DescribeRouteTables) leaves the direct paths undetermined, never fails the host.
+	rts, rtTrunc, err := p.routeTables(ctx, c, instanceVPCs(inst))
+	switch {
+	case err != nil:
+		data.RoutesErr = err.Error()
+	case rtTrunc:
+		incomplete = append(incomplete, "route tables truncated")
+	}
+	data.RouteTables = rts
+	verdicts := Evaluate(data, ports)
 	if len(incomplete) > 0 {
 		for i := range verdicts {
 			verdicts[i].Complete = false
@@ -281,6 +302,68 @@ func (p *Provider) nacls(ctx context.Context, c Clients, subnets []string) (map[
 		}
 	}
 	return out, pg.HasMorePages(), nil
+}
+
+func (p *Provider) routeTables(ctx context.Context, c Clients, vpcs []string) ([]ec2types.RouteTable, bool, error) {
+	if len(vpcs) == 0 {
+		return nil, false, nil
+	}
+	var out []ec2types.RouteTable
+	pg := ec2.NewDescribeRouteTablesPaginator(c.EC2, &ec2.DescribeRouteTablesInput{
+		Filters: []ec2types.Filter{{Name: awssdk.String("vpc-id"), Values: vpcs}},
+	})
+	for page := 0; pg.HasMorePages() && page < p.opts.MaxPages; page++ {
+		res, err := pg.NextPage(ctx)
+		if err != nil {
+			return nil, false, fmt.Errorf("aws: DescribeRouteTables: %w", err)
+		}
+		out = append(out, res.RouteTables...)
+	}
+	return out, pg.HasMorePages(), nil
+}
+
+// prefixLists reads the entries of the managed prefix lists the groups' rules name (both
+// customer- and AWS-managed). A list that fails or is truncated is kept with its error, so
+// the rules naming it are undetermined; the host is never failed for it.
+func (p *Provider) prefixLists(ctx context.Context, c Clients, sgs map[string]ec2types.SecurityGroup) map[string]PrefixList {
+	var ids []string
+	for _, g := range sgs {
+		for _, perm := range g.IpPermissions {
+			for _, ref := range perm.PrefixListIds {
+				if id := deref(ref.PrefixListId); id != "" {
+					ids = append(ids, id)
+				}
+			}
+		}
+	}
+	sort.Strings(ids)
+	ids = slices.Compact(ids)
+	out := map[string]PrefixList{}
+	for i, id := range ids {
+		if i == maxPrefixLists {
+			break // the rest stay unread: undetermined
+		}
+		out[id] = p.prefixList(ctx, c, id)
+	}
+	return out
+}
+
+func (p *Provider) prefixList(ctx context.Context, c Clients, id string) PrefixList {
+	var pl PrefixList
+	pg := ec2.NewGetManagedPrefixListEntriesPaginator(c.EC2, &ec2.GetManagedPrefixListEntriesInput{PrefixListId: awssdk.String(id)})
+	for page := 0; pg.HasMorePages() && page < p.opts.MaxPages; page++ {
+		res, err := pg.NextPage(ctx)
+		if err != nil {
+			return PrefixList{Err: fmt.Sprintf("GetManagedPrefixListEntries: %v", err)}
+		}
+		for _, e := range res.Entries {
+			pl.CIDRs = append(pl.CIDRs, deref(e.Cidr))
+		}
+	}
+	if pg.HasMorePages() {
+		return PrefixList{Err: "entries truncated"}
+	}
+	return pl
 }
 
 // regionLBs returns the region's internet-facing load balancers, cached for LBTTL and read

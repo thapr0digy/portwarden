@@ -12,7 +12,8 @@
   "cloud": {
     "aws": true,
     "refresh": "10m",
-    "regions": ["eu-west-1", "us-east-1"]
+    "regions": ["eu-west-1", "us-east-1"],
+    "vpn_cidrs": ["81.2.69.160/28"]
   },
   "retention": {
     "history": "2160h",

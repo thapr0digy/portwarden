@@ -13,14 +13,13 @@ import (
 	"github.com/thapr0digy/portwarden/internal/cloud/reach"
 )
 
-// outcome is a path's verdict: closed, undetermined (the data cannot decide; the listener
-// keeps its level) or open.
-type outcome int
+// outcome is a path's verdict (shared with the other clouds' judges).
+type outcome = reach.Outcome
 
 const (
-	closed outcome = iota
-	undetermined
-	open
+	closed       = reach.Closed
+	undetermined = reach.Undetermined
+	open         = reach.Open
 )
 
 // Replies to a TCP client go back to its source port, which the client picks: 1-65535.

@@ -575,6 +575,42 @@ func TestVirtualNetworkWithRouteTable(t *testing.T) {
 	check(t, d, ssh, wantClosed)
 }
 
+// Review of PR #17: a subnet not read may have a route table, so VirtualNetwork sources
+// (the default AllowVnetInBound included) may be any address there: undetermined, never closed.
+func TestVirtualNetworkSubnetUnknown(t *testing.T) {
+	defaultsOnly := func(d HostData) {
+		n := d.NSGs[key(nnsgID)]
+		n.Properties.SecurityRules = nil
+		d.NSGs[key(nnsgID)] = n
+	}
+	t.Run("subnet not read", func(t *testing.T) {
+		w := defaultWorld()
+		w.errs = map[string]string{subID: "429 Too Many Requests"}
+		d := w.data(t)
+		defaultsOnly(d)
+		check(t, d, ssh, wantUndetermined, "AllowVnetInBound", "subnet not read")
+	})
+	t.Run("subnet missing", func(t *testing.T) {
+		w := defaultWorld()
+		d := w.data(t)
+		delete(d.Subnets, key(subID))
+		defaultsOnly(d)
+		check(t, d, ssh, wantUndetermined, "AllowVnetInBound")
+	})
+	t.Run("only a VirtualNetwork allow", func(t *testing.T) {
+		w := defaultWorld()
+		w.nicRules = []string{allowSSH("vnet", 100, "VirtualNetwork"), r("deny", 200, "Deny", "*", "*", "")}
+		w.errs = map[string]string{subID: "500"}
+		check(t, w.data(t), ssh, wantUndetermined, "subnet not read")
+	})
+	t.Run("deny wins", func(t *testing.T) {
+		w := defaultWorld()
+		w.nicRules = []string{r("deny", 100, "Deny", "*", "*", "")}
+		w.errs = map[string]string{subID: "500"}
+		check(t, w.data(t), ssh, wantClosed)
+	})
+}
+
 // Review m579 minor: a public IP without an address (dynamic, VM stopped) may hold one again.
 func TestDynamicIPUnallocated(t *testing.T) {
 	w := defaultWorld()

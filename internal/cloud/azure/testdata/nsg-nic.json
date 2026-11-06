@@ -1,0 +1,14 @@
+{
+  "id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/web-rg/providers/Microsoft.Network/networkSecurityGroups/nic-nsg",
+  "name": "nic-nsg",
+  "properties": {
+    "securityRules": [
+      {"name": "web-to-asg", "properties": {"protocol": "*", "sourcePortRange": "*", "destinationPortRange": "*", "sourceAddressPrefix": "*", "destinationApplicationSecurityGroups": [{"id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/web-rg/providers/Microsoft.Network/applicationSecurityGroups/web-asg"}], "access": "Allow", "priority": 100, "direction": "Inbound"}}
+    ],
+    "defaultSecurityRules": [
+      {"name": "AllowVnetInBound", "properties": {"protocol": "*", "sourcePortRange": "*", "destinationPortRange": "*", "sourceAddressPrefix": "VirtualNetwork", "destinationAddressPrefix": "VirtualNetwork", "access": "Allow", "priority": 65000, "direction": "Inbound"}},
+      {"name": "AllowAzureLoadBalancerInBound", "properties": {"protocol": "*", "sourcePortRange": "*", "destinationPortRange": "*", "sourceAddressPrefix": "AzureLoadBalancer", "destinationAddressPrefix": "*", "access": "Allow", "priority": 65001, "direction": "Inbound"}},
+      {"name": "DenyAllInBound", "properties": {"protocol": "*", "sourcePortRange": "*", "destinationPortRange": "*", "sourceAddressPrefix": "*", "destinationAddressPrefix": "*", "access": "Deny", "priority": 65500, "direction": "Inbound"}}
+    ]
+  }
+}

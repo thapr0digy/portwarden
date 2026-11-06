@@ -146,6 +146,12 @@ type GCPConfig struct {
 	KeyFile string `json:"key_file"`
 	// Projects are the only projects looked up (required when enabled).
 	Projects []string `json:"projects"`
+	// HierarchyConfirmed tells the look-up that a getEffectiveFirewalls answer without
+	// hierarchical policies means there are none (the projects are outside an
+	// organisation, or the role can read the organisation's and folders' policies).
+	// Google does not document whether policies the caller cannot read are left out, so
+	// without it a closed interface with no hierarchical policy is undetermined.
+	HierarchyConfirmed bool `json:"hierarchy_confirmed"`
 }
 
 // keyFile resolves the service-account key file ("" for the metadata server).
@@ -169,7 +175,7 @@ func (c CloudConfig) providers(ctx context.Context, policy reach.Policy, getenv 
 		names = append(names, "aws")
 	}
 	if c.GCP.Enabled {
-		prov, err := cloudgcp.New(cloudgcp.Options{KeyFile: c.GCP.keyFile(getenv), Projects: c.GCP.Projects, Policy: policy})
+		prov, err := cloudgcp.New(cloudgcp.Options{KeyFile: c.GCP.keyFile(getenv), Projects: c.GCP.Projects, Policy: policy, HierarchyConfirmed: c.GCP.HierarchyConfirmed})
 		if err != nil {
 			return nil, nil, fmt.Errorf("cloud.%w", err)
 		}

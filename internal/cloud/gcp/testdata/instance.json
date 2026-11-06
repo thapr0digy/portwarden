@@ -1,0 +1,29 @@
+{
+  "_source": "handwritten after docs.cloud.google.com/compute/docs/reference/rest/v1/instances/get (read 2026-11-05)",
+  "kind": "compute#instance",
+  "id": "4567890123456789012",
+  "name": "web-1",
+  "zone": "https://www.googleapis.com/compute/v1/projects/acme-prod/zones/us-central1-a",
+  "tags": {"items": ["web", "ssh"], "fingerprint": "abc="},
+  "serviceAccounts": [{"email": "web@acme-prod.iam.gserviceaccount.com", "scopes": ["https://www.googleapis.com/auth/cloud-platform"]}],
+  "networkInterfaces": [
+    {
+      "kind": "compute#networkInterface",
+      "name": "nic0",
+      "network": "https://www.googleapis.com/compute/v1/projects/acme-prod/global/networks/default",
+      "subnetwork": "https://www.googleapis.com/compute/v1/projects/acme-prod/regions/us-central1/subnetworks/default",
+      "networkIP": "10.128.0.5",
+      "stackType": "IPV4_IPV6",
+      "ipv6AccessType": "EXTERNAL",
+      "accessConfigs": [{"kind": "compute#accessConfig", "type": "ONE_TO_ONE_NAT", "name": "External NAT", "natIP": "34.68.10.20", "networkTier": "PREMIUM"}],
+      "ipv6AccessConfigs": [{"kind": "compute#accessConfig", "type": "DIRECT_IPV6", "name": "external-ipv6", "externalIpv6": "2600:1900:4000:abcd::", "externalIpv6PrefixLength": 96}]
+    },
+    {
+      "kind": "compute#networkInterface",
+      "name": "nic1",
+      "network": "https://www.googleapis.com/compute/v1/projects/acme-prod/global/networks/backend",
+      "networkIP": "10.8.0.5",
+      "stackType": "IPV4_ONLY"
+    }
+  ]
+}

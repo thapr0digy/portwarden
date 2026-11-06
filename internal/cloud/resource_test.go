@@ -85,3 +85,20 @@ func TestItem5AzureInstanceIDMustBeUUID(t *testing.T) {
 		}
 	}
 }
+
+func TestParseAzureResource(t *testing.T) {
+	sub, group, vm, err := ParseAzureResource("/SUBSCRIPTIONS/0B1C2D3E-4F50-6172-8394-A5B6C7D8E9F0/resourcegroups/Web-RG/providers/microsoft.compute/virtualMachines/web1")
+	if err != nil || sub != "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0" || group != "Web-RG" || vm != "web1" {
+		t.Fatalf("%q %q %q %v", sub, group, vm, err)
+	}
+	for _, bad := range []string{
+		"",
+		"/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/rg/providers/Microsoft.Compute/virtualMachineScaleSets/ss/virtualMachines/3",
+		"/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/a/b",
+		"/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/a?x",
+	} {
+		if _, _, _, err := ParseAzureResource(bad); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}

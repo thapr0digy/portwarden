@@ -13,6 +13,12 @@
     "aws": true,
     "refresh": "10m",
     "regions": ["eu-west-1", "us-east-1"],
+    "gcp": {
+      "enabled": true,
+      "projects": ["acme-prod"],
+      "hierarchy_confirmed": false,
+      "key_file": "/run/credentials/portwarden-inventory.service/gcp-key"
+    },
     "vpn_cidrs": ["81.2.69.160/28"]
   },
   "retention": {

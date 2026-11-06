@@ -41,12 +41,12 @@ func ValidResource(cloudName, instanceID, r string) error {
 	}
 	switch cloudName {
 	case "gcp":
-		m := gcpResourceRe.FindStringSubmatch(r)
-		if m == nil {
-			return fmt.Errorf("cloud_resource is not projects/<id>/zones/<zone>/instances/<number>")
+		_, _, inst, err := ParseGCPResource(r)
+		if err != nil {
+			return err
 		}
-		if m[3] != instanceID {
-			return fmt.Errorf("cloud_resource names instance %s, the host block %q", m[3], instanceID)
+		if inst != instanceID {
+			return fmt.Errorf("cloud_resource names instance %s, the host block %q", inst, instanceID)
 		}
 	case "azure":
 		if !azureResourceRe.MatchString(r) {
@@ -59,4 +59,17 @@ func ValidResource(cloudName, instanceID, r string) error {
 		return fmt.Errorf("cloud_resource is not expected on cloud %q", cloudName)
 	}
 	return nil
+}
+
+// ParseGCPResource splits a GCP cloud_resource (projects/<id>/zones/<zone>/instances/<n>)
+// into its validated parts. Callers build API paths from these, never from r itself.
+func ParseGCPResource(r string) (project, zone, instance string, err error) {
+	if len(r) > MaxResourceLen {
+		return "", "", "", fmt.Errorf("cloud_resource longer than %d bytes", MaxResourceLen)
+	}
+	m := gcpResourceRe.FindStringSubmatch(r)
+	if m == nil {
+		return "", "", "", fmt.Errorf("cloud_resource is not projects/<id>/zones/<zone>/instances/<number>")
+	}
+	return m[1], m[2], m[3], nil
 }

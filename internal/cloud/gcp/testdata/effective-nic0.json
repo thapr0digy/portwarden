@@ -1,0 +1,54 @@
+{
+  "_source": "handwritten after docs.cloud.google.com/compute/docs/reference/rest/v1/instances/getEffectiveFirewalls (read 2026-11-05)",
+  "firewalls": [
+    {
+      "kind": "compute#firewall",
+      "id": "111",
+      "name": "default-allow-ssh",
+      "network": "https://www.googleapis.com/compute/v1/projects/acme-prod/global/networks/default",
+      "priority": 65534,
+      "sourceRanges": ["0.0.0.0/0"],
+      "allowed": [{"IPProtocol": "tcp", "ports": ["22"]}],
+      "direction": "INGRESS",
+      "logConfig": {"enable": false},
+      "disabled": false
+    },
+    {
+      "kind": "compute#firewall",
+      "id": "112",
+      "name": "allow-https-web",
+      "network": "https://www.googleapis.com/compute/v1/projects/acme-prod/global/networks/default",
+      "priority": 1000,
+      "sourceRanges": ["0.0.0.0/0", "::/0"],
+      "targetTags": ["web"],
+      "allowed": [{"IPProtocol": "tcp", "ports": ["443"]}],
+      "direction": "INGRESS",
+      "disabled": false
+    }
+  ],
+  "firewallPolicys": [
+    {
+      "name": "274877906944",
+      "shortName": "org-baseline",
+      "type": "HIERARCHY",
+      "rules": [
+        {"kind": "compute#firewallPolicyRule", "priority": 100, "action": "deny", "direction": "INGRESS", "description": "no telnet",
+         "match": {"srcIpRanges": ["0.0.0.0/0"], "layer4Configs": [{"ipProtocol": "tcp", "ports": ["23"]}]}, "enableLogging": false, "ruleTupleCount": 3},
+        {"kind": "compute#firewallPolicyRule", "priority": 2147483645, "action": "goto_next", "direction": "INGRESS",
+         "match": {"srcIpRanges": ["0.0.0.0/0"], "layer4Configs": [{"ipProtocol": "all"}]}},
+        {"kind": "compute#firewallPolicyRule", "priority": 2147483644, "action": "goto_next", "direction": "EGRESS",
+         "match": {"destIpRanges": ["0.0.0.0/0"], "layer4Configs": [{"ipProtocol": "all"}]}}
+      ]
+    },
+    {
+      "name": "acme-network-policy",
+      "shortName": "acme-network-policy",
+      "type": "NETWORK",
+      "priority": 1000,
+      "rules": [
+        {"kind": "compute#firewallPolicyRule", "ruleName": "block-ssh-from-internet", "priority": 500, "action": "deny", "direction": "INGRESS",
+         "match": {"srcNetworkType": "INTERNET", "layer4Configs": [{"ipProtocol": "tcp", "ports": ["22"]}]}}
+      ]
+    }
+  ]
+}

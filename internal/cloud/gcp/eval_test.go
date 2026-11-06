@@ -74,6 +74,8 @@ type judgement struct {
 	eff  string
 	port cloud.Port
 	vpn  []string
+	// unconfirmed: cloud.gcp.hierarchy_confirmed is off.
+	unconfirmed bool
 }
 
 func (j judgement) run(t *testing.T) cloud.Verdict {
@@ -82,7 +84,12 @@ func (j judgement) run(t *testing.T) cloud.Verdict {
 	for _, c := range j.vpn {
 		vpn = append(vpn, netip.MustParsePrefix(c))
 	}
-	d := HostData{Instance: j.inst, Effective: map[string]Effective{"nic0": parseEffective(t, j.eff)}, Policy: reach.NewPolicy(vpn)}
+	// The same rules on every interface; hierarchical policies confirmed visible unless a
+	// test says otherwise.
+	d := HostData{Instance: j.inst, Effective: map[string]Effective{}, Policy: reach.NewPolicy(vpn), HierarchyConfirmed: !j.unconfirmed}
+	for _, nic := range j.inst.Interfaces {
+		d.Effective[nic.Name] = parseEffective(t, j.eff)
+	}
 	return Evaluate(d, []cloud.Port{j.port})[0]
 }
 
@@ -372,7 +379,7 @@ func TestTargetSecureTags(t *testing.T) {
 }
 
 func TestTargetResourcesAndType(t *testing.T) {
-	inst := ipv4Only(loadInstance(t))
+	inst := nic0Only(ipv4Only(loadInstance(t)))
 	other := policyRule(`{"srcIpRanges":["0.0.0.0/0"],"layer4Configs":[{"ipProtocol":"tcp"}]}`, `,"targetResources":["https://www.googleapis.com/compute/v1/projects/acme-prod/global/networks/backend"]`)
 	expect(t, judgement{inst: inst, eff: other, port: tcp(443)}.run(t), isClosed)
 	same := policyRule(`{"srcIpRanges":["0.0.0.0/0"],"layer4Configs":[{"ipProtocol":"tcp"}]}`, `,"targetResources":["projects/acme-prod/global/networks/default"]`)
@@ -381,6 +388,21 @@ func TestTargetResourcesAndType(t *testing.T) {
 	expect(t, judgement{inst: inst, eff: lb, port: tcp(443)}.run(t), isClosed)
 }
 
+// U1: a target network reference that does not parse cleanly (a numeric id, another
+// format) may name the interface's network: undetermined, never a clean "not mine".
+func TestTargetResourcesUnclear(t *testing.T) {
+	inst := nic0Only(ipv4Only(loadInstance(t)))
+	for _, ref := range []string{"1234567890123", "networks/default", "projects/acme-prod/regions/us-central1/networks/default"} {
+		eff := policyRule(`{"srcIpRanges":["0.0.0.0/0"],"layer4Configs":[{"ipProtocol":"tcp"}]}`, `,"targetResources":["`+ref+`"]`)
+		expect(t, judgement{inst: inst, eff: eff, port: tcp(443)}.run(t), isUndetermined, "cannot be matched cleanly")
+	}
+	// The interface's own network reference unclear: likewise.
+	odd := inst
+	odd.Interfaces = []Interface{inst.Interfaces[0]}
+	odd.Interfaces[0].Network = "12345"
+	eff := policyRule(`{"srcIpRanges":["0.0.0.0/0"],"layer4Configs":[{"ipProtocol":"tcp"}]}`, `,"targetResources":["projects/acme-prod/global/networks/backend"]`)
+	expect(t, judgement{inst: odd, eff: eff, port: tcp(443)}.run(t), isUndetermined)
+}
 func TestSecurityProfileGroupAllows(t *testing.T) {
 	inst := ipv4Only(loadInstance(t))
 	eff := strings.Replace(policyRule(`{"srcIpRanges":["0.0.0.0/0"],"layer4Configs":[{"ipProtocol":"tcp"}]}`, `,"securityProfileGroup":"//networksecurity.googleapis.com/organizations/1/locations/global/securityProfileGroups/ips"`),
@@ -409,38 +431,97 @@ func TestPriorityTieInPolicy(t *testing.T) {
 }
 
 func TestAgentLevelGate(t *testing.T) {
-	inst := ipv4Only(loadInstance(t))
+	inst := nic0Only(ipv4Only(loadInstance(t)))
 	p := tcp(443)
 	p.AgentLevel = cloud.LevelBound
+	// Below host_firewall_open the direct path does not count, but the host firewall may
+	// admit a load balancer's traffic: undetermined, not closed.
 	v := judgement{inst: inst, eff: vpcOnly(allowHTTPS), port: p}.run(t)
-	expect(t, v, isClosed, "direct path not counted")
-	// Undetermined is not reported below host_firewall_open either: the direct path needs it.
-	v = judgement{inst: inst, eff: policyRule(`{"srcFqdns":["example.com"],"layer4Configs":[{"ipProtocol":"tcp"}]}`, ""), port: p}.run(t)
-	if classify(v) != isClosed {
-		t.Fatalf("bound listener: %v", v)
-	}
+	expect(t, v, isUndetermined, "direct path not counted", "load balancer or forwarding rule")
+	// A firewall that blocks stays closed at any level.
+	expect(t, judgement{inst: inst, eff: vpcOnly(), port: p}.run(t), isClosed)
+}
+func nic1Only(inst Instance) Instance {
+	inst.Interfaces = []Interface{inst.Interfaces[1]} // no external address
+	return inst
 }
 
-func TestNoExternalAddress(t *testing.T) {
+func nic0Only(inst Instance) Instance {
+	inst.Interfaces = []Interface{inst.Interfaces[0]}
+	return inst
+}
+
+// B1: an interface without an external address is still judged: a passthrough network
+// load balancer or a forwarding rule can bring internet traffic (any source) to it.
+func TestNoExternalAddressNLBBackend(t *testing.T) {
+	inst := nic1Only(loadInstance(t))
+	v := judgement{inst: inst, eff: vpcOnly(allowHTTPS), port: tcp(443)}.run(t)
+	expect(t, v, isUndetermined, "nic1 (no external IPv4 address)", "only reachable via a load balancer or forwarding rule, not read")
+}
+
+// B1: a proxy load balancer's front ends (GFE, 35.191.0.0/16 and 130.211.0.0/22) are
+// public under the reach rule: an allow from them alone is undetermined, not closed.
+func TestNoExternalAddressGFEAllow(t *testing.T) {
+	inst := nic1Only(loadInstance(t))
+	gfe := `{"name":"allow-gfe","sourceRanges":["35.191.0.0/16","130.211.0.0/22"],"allowed":[{"IPProtocol":"tcp","ports":["443"]}]}`
+	v := judgement{inst: inst, eff: vpcOnly(gfe), port: tcp(443)}.run(t)
+	expect(t, v, isUndetermined, "only reachable via a load balancer")
+}
+
+// B1: complete closed is kept where the firewall itself blocks.
+func TestNoExternalAddressFirewallDenies(t *testing.T) {
+	inst := nic1Only(loadInstance(t))
+	deny := `{"name":"deny-all","priority":0,"sourceRanges":["0.0.0.0/0"],"denied":[{"IPProtocol":"all"}]}`
+	expect(t, judgement{inst: inst, eff: vpcOnly(deny, allowHTTPS), port: tcp(443)}.run(t), isClosed, "firewall deny-all")
+	expect(t, judgement{inst: inst, eff: vpcOnly(), port: tcp(443)}.run(t), isClosed, "implied deny")
+}
+
+func TestNoExternalAddressNotRead(t *testing.T) {
+	v := Evaluate(HostData{Instance: nic1Only(loadInstance(t))}, []cloud.Port{tcp(443)})[0]
+	expect(t, v, isUndetermined, "getEffectiveFirewalls not read")
+}
+
+// U2: an instance without network interfaces, and U3: more than 8, are undetermined.
+func TestInterfaceCount(t *testing.T) {
 	inst := loadInstance(t)
-	inst.Interfaces = inst.Interfaces[1:] // nic1 only: no external address
-	v := Evaluate(HostData{Instance: inst}, []cloud.Port{tcp(443)})[0]
-	expect(t, v, isClosed, "instance has no external IPv4 or IPv6 address")
+	none := inst
+	none.Interfaces = nil
+	expect(t, Evaluate(HostData{Instance: none, HierarchyConfirmed: true}, []cloud.Port{tcp(443)})[0], isUndetermined, "no network interfaces")
+	many := inst
+	many.Interfaces = nil
+	for i := range 9 {
+		nic := inst.Interfaces[1]
+		nic.Name = "nic" + itoa(i)
+		many.Interfaces = append(many.Interfaces, nic)
+	}
+	expect(t, Evaluate(HostData{Instance: many, HierarchyConfirmed: true}, []cloud.Port{tcp(443)})[0], isUndetermined, "9 network interfaces (more than 8)")
 }
 
+// U4: Google does not document whether getEffectiveFirewalls leaves out hierarchical
+// policies the caller cannot read. Without cloud.gcp.hierarchy_confirmed, a closed
+// interface whose response holds none is undetermined; with one present, or confirmed,
+// it stays closed. Open is never affected.
+func TestHierarchyUnconfirmed(t *testing.T) {
+	inst := nic0Only(ipv4Only(loadInstance(t)))
+	expect(t, judgement{inst: inst, eff: vpcOnly(), port: tcp(443), unconfirmed: true}.run(t), isUndetermined, "no hierarchical firewall policy was returned")
+	expect(t, judgement{inst: inst, eff: vpcOnly(allowHTTPS), port: tcp(443), unconfirmed: true}.run(t), isOpen)
+	withHier := `{"firewalls":[],"firewallPolicys":[` + hierarchy(`{"priority":100,"action":"goto_next","direction":"INGRESS","match":{"srcIpRanges":["0.0.0.0/0"],"layer4Configs":[{"ipProtocol":"all"}]}}`) + `]}`
+	expect(t, judgement{inst: inst, eff: withHier, port: tcp(443), unconfirmed: true}.run(t), isClosed)
+	expect(t, judgement{inst: inst, eff: vpcOnly(), port: tcp(443)}.run(t), isClosed)
+}
 func TestBindToOtherInterface(t *testing.T) {
 	inst := ipv4Only(loadInstance(t))
 	p := tcp(443)
 	p.Addr = "10.8.0.5" // nic1's internal address; nic1 has no external address
-	expect(t, judgement{inst: inst, eff: vpcOnly(allowHTTPS), port: p}.run(t), isClosed, "no external")
+	expect(t, judgement{inst: inst, eff: vpcOnly(allowHTTPS), port: p}.run(t), isUndetermined, "nic1 (no external IPv4 address)")
+	expect(t, judgement{inst: inst, eff: vpcOnly(), port: p}.run(t), isClosed)
 	p.Addr = "10.128.0.5" // nic0's
 	expect(t, judgement{inst: inst, eff: vpcOnly(allowHTTPS), port: p}.run(t), isOpen)
 }
-
 func TestMultiNIC(t *testing.T) {
 	inst := ipv4Only(loadInstance(t))
 	inst.Interfaces[1].AccessConfigs = []AccessConfig{{Type: "ONE_TO_ONE_NAT", NatIP: "34.68.10.21"}}
-	d := HostData{Instance: inst, Policy: reach.NewPolicy(nil), Effective: map[string]Effective{
+	d := HostData{Instance: inst, Policy: reach.NewPolicy(nil), HierarchyConfirmed: true, Effective: map[string]Effective{
 		"nic0": parseEffective(t, vpcOnly()),
 		"nic1": parseEffective(t, vpcOnly(allowHTTPS)),
 	}}

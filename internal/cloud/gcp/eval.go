@@ -22,6 +22,7 @@ package gcp
 import (
 	"fmt"
 	"net/netip"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -39,6 +40,10 @@ type HostData struct {
 	Effective    map[string]Effective
 	EffectiveErr map[string]string
 	Policy       reach.Policy
+	// HierarchyConfirmed: the operator confirms (cloud.gcp.hierarchy_confirmed) that a
+	// response without hierarchical policies means there are none. Otherwise a closed
+	// interface without one is undetermined.
+	HierarchyConfirmed bool
 }
 
 const (
@@ -48,6 +53,8 @@ const (
 	maxHierarchical = 5
 	// maxOrders bounds the orders evaluated per interface; beyond it, undetermined.
 	maxOrders = 1000
+	// maxInterfaces is GCP's own limit (nic0 … nic7); more is undetermined, never cut.
+	maxInterfaces = 8
 	// vpcDefaultPriority is a VPC rule's priority when the API omits it.
 	vpcDefaultPriority = 1000
 )
@@ -63,53 +70,74 @@ func Evaluate(d HostData, ports []cloud.Port) []cloud.Verdict {
 
 func evaluatePort(d HostData, p cloud.Port) cloud.Verdict {
 	v := cloud.Verdict{Key: p.Key, Complete: true}
-	res, lines := directPath(d, p)
-	switch {
-	case res == reach.Open && p.AgentLevel >= cloud.LevelHostFirewallOpen:
-		v.Open = true
-		v.Evidence = lines
-	case res == reach.Open:
-		v.Evidence = append(lines, "cloud: direct path not counted (host firewall does not allow 0/0)")
-	case res == reach.Undetermined && p.AgentLevel >= cloud.LevelHostFirewallOpen:
+	undecided := func(reason string) cloud.Verdict {
+		v.Complete = false
+		v.Evidence = []string{cloud.UndeterminedEvidence + " (" + reason + ")"}
+		return v
+	}
+	switch n := len(d.Instance.Interfaces); {
+	case n == 0:
+		return undecided("instances.get returned no network interfaces")
+	case n > maxInterfaces:
+		return undecided(fmt.Sprintf("instance has %d network interfaces (more than %d)", n, maxInterfaces))
+	}
+	var lines []string
+	reachable := false
+	for _, pa := range paths(d, p) {
+		lines = append(lines, pa.lines...)
+		switch {
+		case pa.res == reach.Open && pa.external && p.AgentLevel >= cloud.LevelHostFirewallOpen:
+			v.Open = true
+			v.Evidence = pa.lines
+			return v
+		case pa.res == reach.Closed:
+		case !pa.external:
+			reachable = true
+			lines = append(lines, cloud.UndeterminedEvidence+" ("+pa.id+": internet sources get through its firewall; only reachable via a load balancer or forwarding rule, not read)")
+		case p.AgentLevel < cloud.LevelHostFirewallOpen:
+			// The host firewall may admit only a load balancer's proxies or forwarded traffic.
+			reachable = true
+			lines = append(lines, cloud.UndeterminedEvidence+" ("+pa.id+": direct path not counted (host firewall does not allow 0/0); may be reachable via a load balancer or forwarding rule, not read)")
+		default:
+			reachable = true
+		}
+	}
+	v.Evidence = lines
+	if reachable {
 		v.Complete = false // undetermined: neither raises nor lowers
-		v.Evidence = lines
-	default:
-		v.Evidence = lines
 	}
 	return v
 }
 
-// directPath judges every interface with an external address, each family on its own:
-// open when one lets some internet address in for sure.
-func directPath(d HostData, p cloud.Port) (reach.Outcome, []string) {
-	var why, maybe []string
-	public := false
+// path is one interface and family's judgement. external: the interface has an external
+// address of the family (a direct path); otherwise only a load balancer or forwarding rule
+// can bring internet traffic to it.
+type path struct {
+	id       string
+	external bool
+	res      reach.Outcome
+	lines    []string
+}
+
+// paths judges the firewall on every interface the listener can be reached on, each
+// family on its own: IPv4 always, IPv6 when the interface has an IPv6 address.
+func paths(d HostData, p cloud.Port) []path {
+	var out []path
 	for _, nic := range interfacesFor(d.Instance, p.Addr) {
 		for _, fam := range []reach.Family{reach.V4, reach.V6} {
 			addr := externalAddress(nic, fam)
-			if addr == "" {
+			if fam == reach.V6 && addr == "" && nic.IPv6Address == "" {
 				continue
 			}
-			public = true
-			id := fmt.Sprintf("%s (%s)", nic.Name, addr)
-			res, lines := interfacePath(d, nic, id, fam, p)
-			switch res {
-			case reach.Open:
-				return reach.Open, lines
-			case reach.Undetermined:
-				maybe = append(maybe, lines...)
-			default:
-				why = append(why, lines...)
+			pa := path{id: fmt.Sprintf("%s (%s)", nic.Name, addr), external: addr != ""}
+			if addr == "" {
+				pa.id = fmt.Sprintf("%s (no external IPv%d address)", nic.Name, fam)
 			}
+			pa.res, pa.lines = interfacePath(d, nic, pa.id, fam, p)
+			out = append(out, pa)
 		}
 	}
-	if !public {
-		return reach.Closed, []string{"cloud: instance has no external IPv4 or IPv6 address"}
-	}
-	if len(maybe) > 0 {
-		return reach.Undetermined, append(maybe, why...)
-	}
-	return reach.Closed, why
+	return out
 }
 
 // interfacesFor returns the interfaces a listener can be reached on: the one whose
@@ -167,7 +195,13 @@ func interfacePath(d HostData, nic Interface, id string, fam reach.Family, p clo
 	for _, seq := range seqs {
 		acc.run(seq, start)
 	}
-	return acc.verdict(d.Policy, id, fam, p)
+	res, lines := acc.verdict(d.Policy, id, fam, p)
+	if res == reach.Closed && !d.HierarchyConfirmed && !slices.ContainsFunc(eff.Policies, func(pol Policy) bool { return strings.EqualFold(pol.Type, "HIERARCHY") }) {
+		// Google does not document whether getEffectiveFirewalls leaves out organisation or
+		// folder policies the caller cannot read; one left out could allow the port.
+		return reach.Undetermined, append(lines, cloud.UndeterminedEvidence+" ("+id+": no hierarchical firewall policy was returned, and one the role cannot see could allow it; set cloud.gcp.hierarchy_confirmed when the project has none or the role can read them)")
+	}
+	return res, lines
 }
 
 // rule is a compiled rule for one port: the source addresses it surely matches and the
@@ -610,34 +644,64 @@ func policyApplies(r Rule, inst Instance, nic Interface) (tri, string) {
 	if r.TargetType != "" && !strings.EqualFold(r.TargetType, "INSTANCES") {
 		return triNo, ""
 	}
-	if len(r.TargetResources) > 0 && !slices.ContainsFunc(r.TargetResources, func(n string) bool { return sameNetwork(n, nic.Network) }) {
-		return triNo, ""
-	}
-	if len(r.TargetServiceAccounts) > 0 && hasServiceAccount(inst, r.TargetServiceAccounts) {
-		return triYes, ""
-	}
-	if len(r.TargetSecureTags) > 0 {
-		if slices.ContainsFunc(r.TargetSecureTags, func(t SecureTag) bool { return !strings.EqualFold(t.State, "INEFFECTIVE") }) {
-			return triMaybe, "targets secure tags, which are not readable"
+	net, why := triYes, ""
+	if len(r.TargetResources) > 0 {
+		if net = targetsNetwork(r.TargetResources, nic.Network); net == triMaybe {
+			why = "names target networks that cannot be matched cleanly"
 		}
-		return triNo, ""
 	}
-	if len(r.TargetServiceAccounts) > 0 {
-		return triNo, ""
+	target, twhy := triYes, ""
+	switch {
+	case len(r.TargetServiceAccounts) > 0 && hasServiceAccount(inst, r.TargetServiceAccounts):
+	case len(r.TargetSecureTags) > 0:
+		target = triNo
+		if slices.ContainsFunc(r.TargetSecureTags, func(t SecureTag) bool { return !strings.EqualFold(t.State, "INEFFECTIVE") }) {
+			target, twhy = triMaybe, "targets secure tags, which are not readable"
+		}
+	case len(r.TargetServiceAccounts) > 0:
+		target = triNo
 	}
-	return triYes, ""
+	res := min(net, target)
+	if res != triMaybe {
+		return res, ""
+	}
+	return res, joinReason(why, twhy)
 }
 
-// sameNetwork compares network references by their projects/… path (full URLs and
-// relative names both occur).
-func sameNetwork(a, b string) bool {
-	norm := func(s string) string {
-		if i := strings.Index(s, "projects/"); i >= 0 {
-			s = s[i:]
-		}
-		return strings.TrimSuffix(s, "/")
+var networkRef = regexp.MustCompile(`^projects/[a-z0-9][a-z0-9.:-]*/global/networks/[a-z]([-a-z0-9]*[a-z0-9])?$`)
+
+// normNetwork reduces a network reference (a full URL or a relative name) to
+// projects/<p>/global/networks/<n>; "" when it does not have that shape (a numeric id,
+// another format).
+func normNetwork(s string) string {
+	s = strings.TrimSuffix(strings.TrimSpace(s), "/")
+	if i := strings.Index(s, "projects/"); i >= 0 {
+		s = s[i:]
 	}
-	return norm(a) != "" && norm(a) == norm(b)
+	if !networkRef.MatchString(s) {
+		return ""
+	}
+	return s
+}
+
+// targetsNetwork: yes when a reference names the interface's network, no only when every
+// reference and the interface's network parse cleanly and none matches, maybe otherwise.
+func targetsNetwork(refs []string, network string) tri {
+	own := normNetwork(network)
+	unclear := own == ""
+	for _, ref := range refs {
+		n := normNetwork(ref)
+		switch {
+		case n == "":
+			unclear = true
+		case n == own:
+			return triYes
+		}
+	}
+	if unclear {
+		return triMaybe
+	}
+	return triNo
 }
 
 // policySources: srcIpRanges are sure; FQDN, geolocation, threat-intelligence and

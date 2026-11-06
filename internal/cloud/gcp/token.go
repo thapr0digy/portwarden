@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Fixed Google endpoints (never taken from config, a key file or a host).
@@ -107,28 +108,61 @@ func (s *jwtSigner) assertion(now time.Time) (string, error) {
 	return signing + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
-// tokens hands out a cached access token, fetching a new one shortly before expiry.
+// tokens hands out a cached access token, fetching a new one shortly before expiry. One
+// fetch runs at a time; callers wait for it without holding the lock (each with its own
+// context).
 type tokens struct {
 	fetch func(ctx context.Context) (string, time.Duration, error)
 	now   func() time.Time
 
-	mu  sync.Mutex
-	tok string
-	exp time.Time
+	mu       sync.Mutex
+	tok      string
+	exp      time.Time
+	inflight *fetchCall
+}
+
+type fetchCall struct {
+	done chan struct{}
+	tok  string
+	err  error
 }
 
 func (t *tokens) token(ctx context.Context) (string, error) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.tok != "" && t.now().Before(t.exp) {
-		return t.tok, nil
+		tok := t.tok
+		t.mu.Unlock()
+		return tok, nil
 	}
-	tok, ttl, err := t.fetch(ctx)
+	c := t.inflight
+	if c == nil {
+		c = &fetchCall{done: make(chan struct{})}
+		t.inflight = c
+		go t.run(ctx, c)
+	}
+	t.mu.Unlock()
+	select {
+	case <-c.done:
+		return c.tok, c.err
+	case <-ctx.Done():
+		return "", fmt.Errorf("gcp: token: %w", ctx.Err())
+	}
+}
+
+// run fetches once for every waiter. It is bounded by the first caller's context and the
+// HTTP client's timeout.
+func (t *tokens) run(ctx context.Context, c *fetchCall) {
+	tok, ttl, err := t.fetch(context.WithoutCancel(ctx))
+	t.mu.Lock()
 	if err != nil {
-		return "", fmt.Errorf("gcp: token: %w", err)
+		c.err = fmt.Errorf("gcp: token: %w", err)
+	} else {
+		c.tok = tok
+		t.tok, t.exp = tok, t.now().Add(ttl-tokenSlack)
 	}
-	t.tok, t.exp = tok, t.now().Add(ttl-tokenSlack)
-	return tok, nil
+	t.inflight = nil
+	t.mu.Unlock()
+	close(c.done)
 }
 
 type tokenResponse struct {
@@ -205,9 +239,13 @@ func doToken(c *http.Client, req *http.Request, metadata bool) (string, time.Dur
 	return tr.AccessToken, ttl, nil
 }
 
+// truncate cuts s to at most n bytes without splitting a UTF-8 sequence.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }

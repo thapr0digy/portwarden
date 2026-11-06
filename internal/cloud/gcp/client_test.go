@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/thapr0digy/portwarden/internal/cloud"
 	"github.com/thapr0digy/portwarden/internal/cloud/reach"
@@ -192,8 +193,8 @@ func TestEvaluateEndToEnd(t *testing.T) {
 	expect(t, vs[0], isOpen, "nic0 (34.68.10.20): firewall allow-https-web (vpc, priority 1000) allows tcp/443 from 0.0.0.0/0")
 	expect(t, vs[1], isUndetermined, "disagree")
 	expect(t, vs[2], isClosed, "policy org-baseline rule 100 (hierarchy)")
-	// Only nic0 has an external address; nic1 is not asked about.
-	if len(f.effectivePaths) != 1 || f.effectivePaths[0] != "networkInterface=nic0" {
+	// Every interface is asked about, nic1 (no external address) too.
+	if len(f.effectivePaths) != 2 || f.effectivePaths[0] != "networkInterface=nic0" || f.effectivePaths[1] != "networkInterface=nic1" {
 		t.Errorf("effective firewall calls %v", f.effectivePaths)
 	}
 	if len(f.unexpectedPaths) > 0 {
@@ -401,12 +402,92 @@ func TestAssumptionNumericInstanceID(t *testing.T) {
 	if _, err := p.Evaluate(context.Background(), host, ports()); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.effectivePaths) != 1 {
+	if len(f.effectivePaths) != 2 {
 		t.Fatalf("getEffectiveFirewalls not called by name: %v (unexpected %v)", f.effectivePaths, f.unexpectedPaths)
 	}
 	f404 := &fakeGoogle{t: t, instanceStatus: 404}
 	_, err := newTestProvider(t, f404).Evaluate(context.Background(), host, ports())
 	if err == nil || !strings.Contains(err.Error(), "instances.get "+instNum) {
 		t.Fatalf("err %v", err)
+	}
+}
+
+// U2: a 200 answer holding neither firewalls nor firewallPolicys is not "no rules".
+func TestEffectiveFirewallsEmptyAnswer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getEffectiveFirewalls") {
+			w.Write([]byte(`{}`))
+			return
+		}
+		w.Write(mustRead(t, "testdata/instance.json"))
+	}))
+	defer srv.Close()
+	p := metadataProvider(t, srv)
+	p.opts.HierarchyConfirmed = true
+	vs, err := p.Evaluate(context.Background(), host, ports())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range vs {
+		expect(t, v, isUndetermined, "neither firewalls nor firewallPolicys")
+	}
+}
+
+// U3: more than 8 interfaces is undetermined, and no interface is read (never a cut list).
+func TestTooManyInterfacesNotCut(t *testing.T) {
+	var inst map[string]any
+	json.Unmarshal(mustRead(t, "testdata/instance.json"), &inst)
+	nics := inst["networkInterfaces"].([]any)
+	for len(nics) < 9 {
+		nics = append(nics, nics[1])
+	}
+	inst["networkInterfaces"] = nics
+	body, _ := json.Marshal(inst)
+	f := &fakeGoogle{t: t, instanceBody: body}
+	vs, err := newTestProvider(t, f).Evaluate(context.Background(), host, ports())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect(t, vs[0], isUndetermined, "9 network interfaces (more than 8)")
+	if len(f.effectivePaths) != 0 {
+		t.Errorf("read %v", f.effectivePaths)
+	}
+}
+
+// Nit: concurrent callers share one fetch, and a waiter whose context ends returns at
+// once instead of queueing behind the lock.
+func TestTokenSingleFetch(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int32
+	tk := &tokens{now: time.Now, fetch: func(context.Context) (string, time.Duration, error) {
+		calls.Add(1)
+		<-release
+		return "tok", time.Hour, nil
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	errs := make(chan error, 1)
+	go func() { _, err := tk.token(context.Background()); errs <- err }()
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := tk.token(ctx); err == nil {
+		t.Fatal("a cancelled waiter got a token")
+	}
+	close(release)
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	if tok, err := tk.token(context.Background()); err != nil || tok != "tok" {
+		t.Fatalf("%q %v", tok, err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("%d fetches", n)
+	}
+}
+
+func TestTruncateUTF8(t *testing.T) {
+	if got := truncate("ab€", 3); got != "ab…" {
+		t.Fatalf("%q", got)
 	}
 }

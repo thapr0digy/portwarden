@@ -23,8 +23,6 @@ const computeURL = "https://compute.googleapis.com/compute/v1"
 const (
 	maxInstanceBody  = 1 << 20
 	maxEffectiveBody = 16 << 20
-	// maxInterfaces is GCP's own limit (nic0 … nic7).
-	maxInterfaces = 8
 )
 
 // Options tune the provider.
@@ -37,6 +35,10 @@ type Options struct {
 	Projects []string
 	// Policy is the reach rule.
 	Policy reach.Policy
+	// HierarchyConfirmed: a response without hierarchical policies means there are none
+	// (cloud.gcp.hierarchy_confirmed). Otherwise closed interfaces without one are
+	// undetermined.
+	HierarchyConfirmed bool
 	// Timeout bounds one host's look-up (default 60 s); RequestTimeout one request
 	// (default 20 s).
 	Timeout, RequestTimeout time.Duration
@@ -164,14 +166,14 @@ func (p *Provider) Evaluate(ctx context.Context, h cloud.Host, ports []cloud.Por
 	if inst.Name == "" {
 		return nil, errors.New("gcp: instances.get returned no instance name")
 	}
+	d := HostData{Instance: inst, Effective: map[string]Effective{}, EffectiveErr: map[string]string{},
+		Policy: p.opts.Policy, HierarchyConfirmed: p.opts.HierarchyConfirmed}
 	if len(inst.Interfaces) > maxInterfaces {
-		inst.Interfaces = inst.Interfaces[:maxInterfaces]
+		return Evaluate(d, ports), nil // undetermined: never judged on a cut list
 	}
-	d := HostData{Instance: inst, Effective: map[string]Effective{}, EffectiveErr: map[string]string{}, Policy: p.opts.Policy}
+	// Every interface, with or without an external address: a load balancer or forwarding
+	// rule can bring internet traffic to one without.
 	for _, nic := range inst.Interfaces {
-		if externalAddress(nic, reach.V4) == "" && externalAddress(nic, reach.V6) == "" {
-			continue
-		}
 		var eff Effective
 		// The second call names the instance as the first returned it, so it does not rely
 		// on the number being accepted in place of the name a second time.
@@ -182,6 +184,10 @@ func (p *Provider) Evaluate(ctx context.Context, h cloud.Host, ports []cloud.Por
 				return nil, fmt.Errorf("gcp: getEffectiveFirewalls %s: %w", nic.Name, err)
 			}
 			d.EffectiveErr[nic.Name] = err.Error()
+			continue
+		}
+		if !eff.present {
+			d.EffectiveErr[nic.Name] = "the response holds neither firewalls nor firewallPolicys"
 			continue
 		}
 		d.Effective[nic.Name] = eff

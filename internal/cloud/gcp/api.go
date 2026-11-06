@@ -1,5 +1,7 @@
 package gcp
 
+import "encoding/json"
+
 // Response shapes of the two Compute Engine v1 calls, holding only the fields the judge
 // reads (unknown fields are ignored). Field names follow the REST reference
 // (docs.cloud.google.com/compute/docs/reference/rest/v1: instances/get,
@@ -47,6 +49,28 @@ type AccessConfig struct {
 type Effective struct {
 	Firewalls []Firewall `json:"firewalls"`
 	Policies  []Policy   `json:"firewallPolicys"`
+	// present: the response named firewalls or firewallPolicys (an answer with neither is
+	// not taken as "no rules").
+	present bool
+}
+
+// UnmarshalJSON records whether either list was in the response.
+func (e *Effective) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Firewalls *[]Firewall `json:"firewalls"`
+		Policies  *[]Policy   `json:"firewallPolicys"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*e = Effective{present: raw.Firewalls != nil || raw.Policies != nil}
+	if raw.Firewalls != nil {
+		e.Firewalls = *raw.Firewalls
+	}
+	if raw.Policies != nil {
+		e.Policies = *raw.Policies
+	}
+	return nil
 }
 
 // Firewall is a VPC firewall rule. Priority is a pointer because the API's default is

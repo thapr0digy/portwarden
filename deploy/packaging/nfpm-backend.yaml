@@ -69,6 +69,9 @@ contents:
   - src: deploy/aws-iam-policy.json
     dst: /usr/share/doc/portwarden-backend/examples/aws-iam-policy.json
     file_info: {mode: 0644}
+  - src: deploy/gcp-role.yaml
+    dst: /usr/share/doc/portwarden-backend/examples/gcp-role.yaml
+    file_info: {mode: 0644}
   - src: deploy/packaging/copyright
     dst: /usr/share/doc/portwarden-backend/copyright
     file_info: {mode: 0644}

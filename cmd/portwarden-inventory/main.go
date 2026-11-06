@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
 	"github.com/thapr0digy/portwarden/internal/cloud"
 	cloudaws "github.com/thapr0digy/portwarden/internal/cloud/aws"
+	cloudgcp "github.com/thapr0digy/portwarden/internal/cloud/gcp"
 	"github.com/thapr0digy/portwarden/internal/cloud/reach"
 	"github.com/thapr0digy/portwarden/internal/inventory"
 	"github.com/thapr0digy/portwarden/internal/inventory/api"
@@ -116,7 +118,8 @@ const adminTokenEnv = "PORTWARDEN_INVENTORY_ADMIN_TOKEN"
 // CloudConfig turns on the level 3 look-up.
 type CloudConfig struct {
 	// AWS enables the AWS look-up with the SDK's default credentials (instance role,
-	// environment, shared config). Hosts on GCP or Azure always get "unsupported".
+	// environment, shared config). Hosts of a cloud not enabled (Azure always) get
+	// "unsupported".
 	AWS      bool         `json:"aws"`
 	Refresh  svc.Duration `json:"refresh"`
 	Endpoint string       `json:"endpoint"`
@@ -129,6 +132,51 @@ type CloudConfig struct {
 	// AllowBroad accepts vpn_cidrs wider than /8 (IPv4) or /16 (IPv6); a /0 is never
 	// accepted.
 	AllowBroad bool `json:"allow_broad"`
+	// GCP enables the GCP look-up (M10 phase 2).
+	GCP GCPConfig `json:"gcp"`
+}
+
+// GCPConfig is cloud.gcp. The API, token and metadata endpoints are fixed; none is
+// configurable.
+type GCPConfig struct {
+	Enabled bool `json:"enabled"`
+	// KeyFile is a service-account JSON key (a systemd credential). Empty: the
+	// GOOGLE_APPLICATION_CREDENTIALS file when set, else the metadata server of the GCE
+	// machine the inventory runs on.
+	KeyFile string `json:"key_file"`
+	// Projects are the only projects looked up (required when enabled).
+	Projects []string `json:"projects"`
+}
+
+// keyFile resolves the service-account key file ("" for the metadata server).
+func (g GCPConfig) keyFile(getenv func(string) string) string {
+	if g.KeyFile != "" {
+		return g.KeyFile
+	}
+	return getenv("GOOGLE_APPLICATION_CREDENTIALS")
+}
+
+// providers builds the enabled cloud providers; none enabled is an empty map.
+func (c CloudConfig) providers(ctx context.Context, policy reach.Policy, getenv func(string) string) (map[string]cloud.Provider, []string, error) {
+	provs := map[string]cloud.Provider{}
+	var names []string
+	if c.AWS {
+		prov, err := cloudaws.New(ctx, cloudaws.Options{Endpoint: c.Endpoint, Regions: c.Regions, Policy: policy})
+		if err != nil {
+			return nil, nil, err
+		}
+		provs["aws"] = prov
+		names = append(names, "aws")
+	}
+	if c.GCP.Enabled {
+		prov, err := cloudgcp.New(cloudgcp.Options{KeyFile: c.GCP.keyFile(getenv), Projects: c.GCP.Projects, Policy: policy})
+		if err != nil {
+			return nil, nil, fmt.Errorf("cloud.%w", err)
+		}
+		provs["gcp"] = prov
+		names = append(names, "gcp ("+prov.Credential+", projects "+strings.Join(c.GCP.Projects, ",")+")")
+	}
+	return provs, names, nil
 }
 
 // policy parses vpn_cidrs into the reach rule; a bad, /0 or (without allow_broad) too
@@ -275,17 +323,17 @@ func run(path string) error {
 	ret := cfg.retention()
 	slog.Info("retention", "history", ret.History.String(), "quarantine", ret.Quarantine.String(), "interval", ret.Interval.String(), "batch", ret.Batch)
 	wg.Go(func() { ret.Run(ctx, store) })
-	if cfg.Cloud.AWS {
-		prov, err := cloudaws.New(ctx, cloudaws.Options{Endpoint: cfg.Cloud.Endpoint, Regions: cfg.Cloud.Regions, Policy: policy})
-		if err != nil {
-			return err
-		}
+	provs, names, err := cfg.Cloud.providers(ctx, policy, os.Getenv)
+	if err != nil {
+		return err
+	}
+	if len(provs) > 0 {
 		cpub := bus.NewPublisher(js, "cloud")
-		lookup := inventory.NewCloudLookup(store, map[string]cloud.Provider{"aws": prov}, cpub.Publish, cpub.RunID)
+		lookup := inventory.NewCloudLookup(store, provs, cpub.Publish, cpub.RunID)
 		lookup.Refresh = cfg.Cloud.Refresh.D(10 * time.Minute)
 		cons.Changed = lookup.Notify
 		wg.Go(func() { lookup.Run(ctx) })
-		slog.Info("cloud look-up on", "providers", "aws (gcp, azure: unsupported)", "refresh", lookup.Refresh.String())
+		slog.Info("cloud look-up on", "providers", strings.Join(names, "; ")+" (others: unsupported)", "refresh", lookup.Refresh.String())
 	}
 	wg.Go(func() {
 		t := time.NewTicker(5 * time.Second)

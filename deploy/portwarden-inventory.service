@@ -12,6 +12,9 @@ Type=simple
 LoadCredential=nats.nk:/etc/portwarden/nats/inventory.nk
 LoadCredential=dsn:/etc/portwarden/inventory.dsn
 LoadCredential=token:/etc/portwarden/inventory.token
+# GCP look-up with a service-account key (cloud.gcp.key_file =
+# /run/credentials/portwarden-inventory.service/gcp-key):
+#LoadCredential=gcp-key:/etc/portwarden/gcp-key.json
 ExecStart=/usr/bin/portwarden-inventory --config /etc/portwarden/inventory.json
 DynamicUser=yes
 NoNewPrivileges=yes

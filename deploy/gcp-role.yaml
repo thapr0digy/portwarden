@@ -1,0 +1,9 @@
+# Custom role for the inventory's GCP look-up (M10 phase 2): read an instance and the
+# firewall rules and policies in effect on its interfaces, nothing else.
+#   gcloud iam roles create portwardenFirewallReader --project <project> --file deploy/gcp-role.yaml
+title: Portwarden firewall reader
+description: Read-only access for the Portwarden inventory's cloud look-up (instances.get, instances.getEffectiveFirewalls).
+stage: GA
+includedPermissions:
+- compute.instances.get
+- compute.instances.getEffectiveFirewalls

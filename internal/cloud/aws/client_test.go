@@ -91,6 +91,16 @@ var responses = map[string]string{
   <item><cidr>10.20.0.0/16</cidr></item>
 </entrySet>
 </GetManagedPrefixListEntriesResponse>`,
+	// One gateway endpoint (S3) and one Gateway Load Balancer endpoint: the filter asks for
+	// gateways only, but the type is checked on every item.
+	"ec2:DescribeVpcEndpoints": `<DescribeVpcEndpointsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+<requestId>r3d</requestId>
+<vpcEndpointSet>
+  <item><vpcEndpointId>vpce-gw</vpcEndpointId><vpcEndpointType>Gateway</vpcEndpointType><vpcId>vpc-1</vpcId>
+    <serviceName>com.amazonaws.eu-west-1.s3</serviceName><state>available</state></item>
+  <item><vpcEndpointId>vpce-gwlb</vpcEndpointId><vpcEndpointType>GatewayLoadBalancer</vpcEndpointType><vpcId>vpc-1</vpcId><state>available</state></item>
+</vpcEndpointSet>
+</DescribeVpcEndpointsResponse>`,
 	"elbv2:DescribeLoadBalancers": `<DescribeLoadBalancersResponse xmlns="http://elasticloadbalancing.amazonaws.com/doc/2015-12-01/">
 <DescribeLoadBalancersResult><LoadBalancers>
   <member><LoadBalancerArn>arn:lb/web</LoadBalancerArn><LoadBalancerName>web-alb</LoadBalancerName><Scheme>internet-facing</Scheme>
@@ -151,6 +161,30 @@ type fakeAWS struct {
 	// failPrefixLists does the same for GetManagedPrefixListEntries.
 	failPrefixLists bool
 	prefixList      string // the PrefixListId seen
+	// overrides replace responses by key ("ec2:DescribeSecurityGroups").
+	overrides map[string]string
+	// throttlePrefixLists answers GetManagedPrefixListEntries with RequestLimitExceeded.
+	throttlePrefixLists bool
+	// pagePrefixLists answers every GetManagedPrefixListEntries page with a NextToken.
+	pagePrefixLists bool
+	// blockPrefixLists holds GetManagedPrefixListEntries until the client gives up.
+	blockPrefixLists bool
+	// failEndpoints answers DescribeVpcEndpoints with UnauthorizedOperation.
+	failEndpoints   bool
+	endpointsFilter string // the Filter.1 seen on DescribeVpcEndpoints
+}
+
+// count returns how many times key was called.
+func (f *fakeAWS) count(key string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.calls {
+		if c == key {
+			n++
+		}
+	}
+	return n
 }
 
 func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +206,32 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if action == "GetManagedPrefixListEntries" {
 		f.prefixList = r.Form.Get("PrefixListId")
 	}
+	if action == "DescribeVpcEndpoints" {
+		f.endpointsFilter = r.Form.Get("Filter.1.Name") + "=" + r.Form.Get("Filter.1.Value.1")
+	}
+	block := f.blockPrefixLists
 	f.mu.Unlock()
+	if action == "GetManagedPrefixListEntries" {
+		switch {
+		case block:
+			<-r.Context().Done()
+			return
+		case f.throttlePrefixLists:
+			w.WriteHeader(503)
+			_, _ = w.Write([]byte(`<Response><Errors><Error><Code>RequestLimitExceeded</Code><Message>Request limit exceeded.</Message></Error></Errors><RequestID>x</RequestID></Response>`))
+			return
+		case f.pagePrefixLists:
+			w.Header().Set("Content-Type", "text/xml")
+			_, _ = w.Write([]byte(`<GetManagedPrefixListEntriesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>p</requestId>
+<entrySet><item><cidr>81.2.69.160/28</cidr></item></entrySet><nextToken>more</nextToken></GetManagedPrefixListEntriesResponse>`))
+			return
+		}
+	}
+	if f.failEndpoints && action == "DescribeVpcEndpoints" {
+		w.WriteHeader(403)
+		_, _ = w.Write([]byte(`<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>not authorized</Message></Error></Errors><RequestID>x</RequestID></Response>`))
+		return
+	}
 	if (f.failRoutes && action == "DescribeRouteTables") || (f.failPrefixLists && action == "GetManagedPrefixListEntries") {
 		w.WriteHeader(403)
 		_, _ = w.Write([]byte(`<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>not authorized</Message></Error></Errors><RequestID>x</RequestID></Response>`))
@@ -183,7 +242,10 @@ func (f *fakeAWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`<ErrorResponse><Error><Code>ServiceUnavailable</Code><Message>down</Message></Error><RequestId>x</RequestId></ErrorResponse>`))
 		return
 	}
-	body, ok := responses[key]
+	body, ok := f.overrides[key]
+	if !ok {
+		body, ok = responses[key]
+	}
 	if !ok {
 		http.Error(w, "unexpected call "+key, 400)
 		return

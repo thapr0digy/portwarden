@@ -10,8 +10,8 @@ func TestValidResource(t *testing.T) {
 		{"aws", "i-0abc", ""},
 		{"gcp", "1234567890123", "projects/my-project-1/zones/europe-west1-b/instances/1234567890123"},
 		{"gcp", "42", "projects/example.com:legacy-proj/zones/us-central1-a/instances/42"},
-		{"azure", "vm-uuid", "/subscriptions/0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0/resourceGroups/rg-web_1(prod)/providers/Microsoft.Compute/virtualMachines/web-01"},
-		{"azure", "vm-uuid", "/subscriptions/0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0/resourcegroups/rg/providers/microsoft.compute/virtualmachines/web.01"},
+		{"azure", "02aab8a4-74ef-476e-8182-f6d2ba4166a6", "/subscriptions/0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0/resourceGroups/rg-web_1(prod)/providers/Microsoft.Compute/virtualMachines/web-01"},
+		{"azure", "02aab8a4-74ef-476e-8182-f6d2ba4166a6", "/subscriptions/0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0/resourcegroups/rg/providers/microsoft.compute/virtualmachines/web.01"},
 	}
 	for _, g := range good {
 		if err := ValidResource(g.cloud, g.id, g.r); err != nil {
@@ -33,6 +33,55 @@ func TestValidResource(t *testing.T) {
 	for _, b := range bad {
 		if err := ValidResource(b.cloud, b.id, b.r); err == nil {
 			t.Errorf("%q accepted", b.r)
+		}
+	}
+}
+
+const azureSub = "/subscriptions/0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0/resourceGroups/"
+const azureVM = "/providers/Microsoft.Compute/virtualMachines/web-01"
+const azureVMID = "02aab8a4-74ef-476e-8182-f6d2ba4166a6"
+
+// Item 5: Azure allows Unicode letters and digits in resource-group names (1-90
+// characters, not ending in "."); invisible, space and symbol characters stay refused.
+func TestItem5AzureUnicodeResourceGroup(t *testing.T) {
+	for _, rg := range []string{"rg-müller", "グループ", "组-1(prod)", "Ünïcödé_rg", strings.Repeat("é", 90)} {
+		if err := ValidResource("azure", azureVMID, azureSub+rg+azureVM); err != nil {
+			t.Errorf("%q refused: %v", rg, err)
+		}
+	}
+	for _, rg := range []string{"rg‮", "rg​", "rg grp", "rg/x", "rg€", strings.Repeat("é", 91), "rg.", "müller.", "rg\xff"} {
+		if err := ValidResource("azure", azureVMID, azureSub+rg+azureVM); err == nil {
+			t.Errorf("%q accepted", rg)
+		}
+	}
+	// The byte cap still applies: 90 four-byte letters and a 64-character VM name are a
+	// well-formed id of more than MaxResourceLen bytes.
+	long := azureSub + strings.Repeat("\U00020000", 90) + "/providers/Microsoft.Compute/virtualMachines/" + strings.Repeat("v", 64)
+	if len(long) <= MaxResourceLen {
+		t.Fatalf("fixture is %d bytes", len(long))
+	}
+	if err := ValidResource("azure", azureVMID, long); err == nil || !strings.Contains(err.Error(), "longer than") {
+		t.Errorf("value over the byte cap: %v", err)
+	}
+	// VM names stay ASCII.
+	if err := ValidResource("azure", azureVMID, azureSub+"rg/providers/Microsoft.Compute/virtualMachines/wéb"); err == nil {
+		t.Error("Unicode VM name accepted")
+	}
+}
+
+// Item 5: the Azure instance id (IMDS compute.vmId) must be a UUID when a resource is sent;
+// the look-up (phase 3) must still match it against the VM it reads.
+func TestItem5AzureInstanceIDMustBeUUID(t *testing.T) {
+	r := azureSub + "rg" + azureVM
+	if err := ValidResource("azure", azureVMID, r); err != nil {
+		t.Fatalf("UUID vmId refused: %v", err)
+	}
+	if err := ValidResource("azure", strings.ToUpper(azureVMID), r); err != nil {
+		t.Fatalf("upper-case UUID vmId refused: %v", err)
+	}
+	for _, id := range []string{"evil", "", "02aab8a4-74ef-476e-8182-f6d2ba4166a6/../x"} {
+		if err := ValidResource("azure", id, r); err == nil {
+			t.Errorf("instance id %q accepted", id)
 		}
 	}
 }

@@ -10,6 +10,7 @@
         "ec2:DescribeNetworkAcls",
         "ec2:DescribeRouteTables",
         "ec2:GetManagedPrefixListEntries",
+        "ec2:DescribeVpcEndpoints",
         "elasticloadbalancing:DescribeLoadBalancers",
         "elasticloadbalancing:DescribeListeners",
         "elasticloadbalancing:DescribeRules",

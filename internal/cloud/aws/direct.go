@@ -128,7 +128,7 @@ func familyPath(d HostData, e eniPath, fam reach.Family, p cloud.Port) (outcome,
 	if !ok {
 		return undecided(why)
 	}
-	rs := routeSets(rt, fam)
+	rs := routeSets(rt, fam, gateways{d.GatewayEndpoints, d.GatewayEndpointsErr})
 	if r := t.sure.Intersect(rs.igw); !r.IsEmpty() {
 		return open, append(evidence, rs.igwWhy, fmt.Sprintf("cloud: %s reachable from %s", e.id, pol.Describe(r, maxRanges)))
 	}
@@ -203,6 +203,9 @@ func sgAllowed(d HostData, groups []string, proto string, port int, fam reach.Fa
 				case pl.Err != "":
 					maybe = reach.All(fam)
 					unread = append(unread, "prefix list "+plID+" not read: "+pl.Err)
+				case slices.Contains(pl.CIDRs, ""):
+					maybe = reach.All(fam)
+					unread = append(unread, "prefix list "+plID+" not read: an entry has no CIDR")
 				default:
 					for _, c := range pl.CIDRs {
 						add(c, " (in "+plID+")")
@@ -477,12 +480,20 @@ const (
 	routeAppliance
 )
 
+// gateways is the region's confirmed gateway endpoints (see HostData.GatewayEndpoints).
+type gateways struct {
+	ids map[string]bool
+	err string
+}
+
 // routeTarget classifies where a route sends replies: an internet gateway; nowhere on
 // the internet (local, a NAT gateway — replies would leave from another address —, an
-// egress-only gateway, a peering, a blackhole); or anything else, which may forward them
-// to the internet (a firewall or gateway-LB endpoint, an appliance, a transit, VPN, local
-// or carrier gateway, a core network, a target this code does not know).
-func routeTarget(r ec2types.Route) (routeKind, string) {
+// egress-only gateway, a peering, a blackhole, a confirmed S3/DynamoDB gateway endpoint,
+// which delivers only to its service); or anything else, which may forward them to the
+// internet (any other vpce-: a firewall or Gateway Load Balancer endpoint, or a gateway
+// endpoint the region's endpoint read did not confirm; an appliance, a transit, VPN,
+// local or carrier gateway, a core network, a target this code does not know).
+func routeTarget(r ec2types.Route, gw gateways) (routeKind, string) {
 	if r.State == ec2types.RouteStateBlackhole {
 		return routeNone, "blackhole"
 	}
@@ -491,6 +502,10 @@ func routeTarget(r ec2types.Route) (routeKind, string) {
 		return routeIGW, g
 	case g == "local", strings.HasPrefix(g, "nat-"), strings.HasPrefix(g, "eigw-"):
 		return routeNone, g
+	case strings.HasPrefix(g, "vpce-") && gw.ids[g]:
+		return routeNone, g
+	case strings.HasPrefix(g, "vpce-") && gw.err != "":
+		return routeAppliance, g + " (gateway endpoints not read: " + gw.err + ")"
 	case g != "":
 		return routeAppliance, g // vpce-, vgw-, and any other gateway
 	}
@@ -515,12 +530,13 @@ type routes struct {
 	igwWhy, applianceWhy string
 }
 
-// routeSets judges rt by longest-prefix match. A prefix-list route to an internet
+// routeSets judges rt by longest-prefix match. A prefix-list route to a confirmed gateway
+// endpoint is not the internet (ignored, like one to a NAT gateway). One to an internet
 // gateway or an appliance may cover any destination, more specific than any CIDR route
 // (its ranges are not read), so it makes every destination an appliance one: the path is
 // then open only through a CIDR route to an internet gateway, otherwise undetermined. So
 // does a destination that does not parse.
-func routeSets(rt ec2types.RouteTable, fam reach.Family) routes {
+func routeSets(rt ec2types.RouteTable, fam reach.Family, gw gateways) routes {
 	type route struct {
 		bits   int
 		set    reach.Set
@@ -542,7 +558,7 @@ func routeSets(rt ec2types.RouteTable, fam reach.Family) routes {
 		if fam == reach.V6 {
 			dest = deref(r.DestinationIpv6CidrBlock)
 		}
-		kind, target := routeTarget(r)
+		kind, target := routeTarget(r, gw)
 		if dest == "" {
 			if pl := deref(r.DestinationPrefixListId); pl != "" && kind != routeNone {
 				anywhere(fmt.Sprintf("%s routes prefix list %s to %s (its ranges are not read)", id, pl, target))

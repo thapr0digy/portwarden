@@ -48,6 +48,12 @@ type HostData struct {
 	// PrefixLists are the managed prefix lists the security groups name, by id; a list
 	// missing here, or with Err set, was not read (rules naming it are undetermined).
 	PrefixLists map[string]PrefixList
+	// GatewayEndpoints are the region's VPC endpoints of type Gateway (S3, DynamoDB), which
+	// deliver only to their AWS service: a route to one is not the internet. Any other
+	// vpce- (a Gateway Load Balancer endpoint) may forward on. GatewayEndpointsErr, when
+	// set, says why the set may be incomplete (unread or truncated).
+	GatewayEndpoints    map[string]bool
+	GatewayEndpointsErr string
 	// Policy is the reach rule (the operator's VPN ranges).
 	Policy reach.Policy
 }

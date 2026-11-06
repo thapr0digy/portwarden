@@ -30,6 +30,7 @@ type EC2API interface {
 	ec2.DescribeNetworkAclsAPIClient
 	ec2.DescribeRouteTablesAPIClient
 	ec2.GetManagedPrefixListEntriesAPIClient
+	ec2.DescribeVpcEndpointsAPIClient
 }
 
 // ELBv2API is the read-only ELBv2 subset the look-up calls.
@@ -57,7 +58,8 @@ type Clients struct {
 type Options struct {
 	// Endpoint overrides every service's endpoint (tests, local stand-ins). Empty: AWS.
 	Endpoint string
-	// LBTTL is how long a region's load balancers are cached (default 5 minutes).
+	// LBTTL is how long a region's load balancers, gateway endpoints and prefix-list
+	// entries are cached (default 5 minutes).
 	LBTTL time.Duration
 	// MaxPages bounds every paginated call (default 50 pages).
 	MaxPages int
@@ -77,9 +79,12 @@ type Options struct {
 
 const maxRegions = 64
 
-// maxPrefixLists bounds the prefix lists read per host; rules naming one beyond it are
-// undetermined.
+// maxPrefixLists bounds the prefix lists read per host (the instance's own groups'
+// first, then its load balancers'); rules naming one beyond it are undetermined.
 const maxPrefixLists = 100
+
+// maxCachedPrefixLists bounds the prefix lists cached per region.
+const maxCachedPrefixLists = 1000
 
 var (
 	regionRe   = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-[0-9]+$`)
@@ -94,6 +99,7 @@ type Provider struct {
 	mu      sync.Mutex
 	clients map[string]Clients
 	lbs     map[string]lbEntry
+	pls     map[string]map[string]plEntry // region -> prefix-list id -> entries or error
 	now     func() time.Time
 }
 
@@ -101,6 +107,16 @@ type lbEntry struct {
 	at        time.Time
 	data      RegionLBs
 	truncated bool
+	// gateways are the region's gateway endpoints; gatewaysErr says why they may be
+	// incomplete.
+	gateways    map[string]bool
+	gatewaysErr string
+}
+
+// plEntry is a cached prefix list: its entries, or the error reading them.
+type plEntry struct {
+	at   time.Time
+	list PrefixList
 }
 
 // New loads the default AWS configuration (environment, shared config, an instance or
@@ -148,7 +164,8 @@ func NewWithClients(newClients func(region string) Clients, opts Options) *Provi
 	if opts.LBTimeout <= 0 {
 		opts.LBTimeout = 3 * time.Minute
 	}
-	return &Provider{newClients: newClients, opts: opts, clients: map[string]Clients{}, lbs: map[string]lbEntry{}, now: time.Now}
+	return &Provider{newClients: newClients, opts: opts, clients: map[string]Clients{}, lbs: map[string]lbEntry{},
+		pls: map[string]map[string]plEntry{}, now: time.Now}
 }
 
 func (p *Provider) regionClients(region string) (Clients, error) {
@@ -179,8 +196,9 @@ func (p *Provider) validHost(h cloud.Host) error {
 	return nil
 }
 
-// Evaluate fetches the instance, its security groups and subnet NACLs, and the region's
-// load balancers (cached), then judges ports.
+// Evaluate fetches the instance, its security groups, subnet NACLs and route tables, the
+// prefix lists the groups name, and the region's load balancers and gateway endpoints
+// (the last three cached per region), then judges ports.
 func (p *Provider) Evaluate(ctx context.Context, h cloud.Host, ports []cloud.Port) ([]cloud.Verdict, error) {
 	if err := p.validHost(h); err != nil {
 		return nil, err
@@ -191,7 +209,8 @@ func (p *Provider) Evaluate(ctx context.Context, h cloud.Host, ports []cloud.Por
 	}
 	// The region's load balancers are read (or taken from the cache) outside this host's
 	// budget; a failure leaves them incomplete, never fails the host.
-	lbs, incomplete := p.regionLBs(ctx, h.Region, c)
+	region := p.regionData(ctx, h.Region, c)
+	lbs, incomplete := region.data, region.reasons
 	hctx, cancel := context.WithTimeout(ctx, p.opts.Timeout)
 	defer cancel()
 	ctx = hctx
@@ -199,13 +218,15 @@ func (p *Provider) Evaluate(ctx context.Context, h cloud.Host, ports []cloud.Por
 	if err != nil {
 		return nil, err
 	}
-	groups := instanceGroups(inst)
+	own := instanceGroups(inst)
+	var lbGroups []string
 	for _, lb := range lbs.V2 {
-		groups = append(groups, lb.LB.SecurityGroups...)
+		lbGroups = append(lbGroups, lb.LB.SecurityGroups...)
 	}
 	for _, lb := range lbs.Classic {
-		groups = append(groups, lb.SecurityGroups...)
+		lbGroups = append(lbGroups, lb.SecurityGroups...)
 	}
+	groups := append(slices.Clone(own), lbGroups...)
 	sort.Strings(groups)
 	sgs, sgTrunc, err := p.securityGroups(ctx, c, slices.Compact(groups))
 	if err != nil {
@@ -222,9 +243,10 @@ func (p *Provider) Evaluate(ctx context.Context, h cloud.Host, ports []cloud.Por
 		incomplete = append(incomplete, "network ACLs truncated")
 	}
 	data := HostData{Instance: inst, SecurityGroups: sgs, NACLs: nacls, LBs: lbs, Policy: p.opts.Policy,
-		PrefixLists: p.prefixLists(ctx, c, sgs)}
+		GatewayEndpoints: region.gateways, GatewayEndpointsErr: region.gatewaysErr}
 	// Route tables are read after the M5 permissions: one that fails (an IAM policy without
 	// ec2:DescribeRouteTables) leaves the direct paths undetermined, never fails the host.
+	// They are read before the prefix lists, so slow list reads cannot use up their time.
 	rts, rtTrunc, err := p.routeTables(ctx, c, instanceVPCs(inst))
 	switch {
 	case err != nil:
@@ -233,6 +255,7 @@ func (p *Provider) Evaluate(ctx context.Context, h cloud.Host, ports []cloud.Por
 		incomplete = append(incomplete, "route tables truncated")
 	}
 	data.RouteTables = rts
+	data.PrefixLists = p.prefixLists(ctx, c, h.Region, sgs, own, lbGroups)
 	verdicts := Evaluate(data, ports)
 	if len(incomplete) > 0 {
 		for i := range verdicts {
@@ -322,13 +345,34 @@ func (p *Provider) routeTables(ctx context.Context, c Clients, vpcs []string) ([
 	return out, pg.HasMorePages(), nil
 }
 
-// prefixLists reads the entries of the managed prefix lists the groups' rules name (both
-// customer- and AWS-managed). A list that fails or is truncated is kept with its error, so
-// the rules naming it are undetermined; the host is never failed for it.
-func (p *Provider) prefixLists(ctx context.Context, c Clients, sgs map[string]ec2types.SecurityGroup) map[string]PrefixList {
+// prefixLists returns the entries of the managed prefix lists the groups' rules name
+// (both customer- and AWS-managed): the instance's own groups' lists first, then its load
+// balancers', at most maxPrefixLists of them. A list that fails or is truncated is kept
+// with its error, so the rules naming it are undetermined; the host is never failed for
+// it.
+func (p *Provider) prefixLists(ctx context.Context, c Clients, region string, sgs map[string]ec2types.SecurityGroup, own, lbGroups []string) map[string]PrefixList {
+	ids := listIDs(sgs, own)
+	seen := map[string]bool{}
+	for _, id := range ids {
+		seen[id] = true
+	}
+	for _, id := range listIDs(sgs, lbGroups) {
+		if !seen[id] {
+			ids = append(ids, id)
+		}
+	}
+	out := map[string]PrefixList{}
+	for _, id := range ids[:min(len(ids), maxPrefixLists)] { // the rest stay unread: undetermined
+		out[id] = p.cachedPrefixList(ctx, c, region, id)
+	}
+	return out
+}
+
+// listIDs returns the prefix-list ids the rules of groups name, sorted and unique.
+func listIDs(sgs map[string]ec2types.SecurityGroup, groups []string) []string {
 	var ids []string
-	for _, g := range sgs {
-		for _, perm := range g.IpPermissions {
+	for _, gid := range groups {
+		for _, perm := range sgs[gid].IpPermissions {
 			for _, ref := range perm.PrefixListIds {
 				if id := deref(ref.PrefixListId); id != "" {
 					ids = append(ids, id)
@@ -337,17 +381,47 @@ func (p *Provider) prefixLists(ctx context.Context, c Clients, sgs map[string]ec
 		}
 	}
 	sort.Strings(ids)
-	ids = slices.Compact(ids)
-	out := map[string]PrefixList{}
-	for i, id := range ids {
-		if i == maxPrefixLists {
-			break // the rest stay unread: undetermined
-		}
-		out[id] = p.prefixList(ctx, c, id)
-	}
-	return out
+	return slices.Compact(ids)
 }
 
+// cachedPrefixList returns the region's cached read of the list when younger than LBTTL,
+// else reads it and caches the result, a failed one too. A read this host's deadline
+// cut short is returned but not cached: it says nothing about the list.
+func (p *Provider) cachedPrefixList(ctx context.Context, c Clients, region, id string) PrefixList {
+	p.mu.Lock()
+	e, ok := p.pls[region][id]
+	p.mu.Unlock()
+	if ok && p.now().Sub(e.at) < p.opts.LBTTL {
+		return e.list
+	}
+	pl := p.prefixList(ctx, c, id)
+	if pl.Err != "" && ctx.Err() != nil {
+		return pl
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cache := p.pls[region]
+	if cache == nil {
+		cache = map[string]plEntry{}
+		p.pls[region] = cache
+	}
+	now := p.now()
+	if _, present := cache[id]; !present && len(cache) >= maxCachedPrefixLists {
+		for k, old := range cache {
+			if now.Sub(old.at) >= p.opts.LBTTL {
+				delete(cache, k)
+			}
+		}
+		if len(cache) >= maxCachedPrefixLists {
+			return pl // full of fresh entries: used for this host, not stored
+		}
+	}
+	cache[id] = plEntry{at: now, list: pl}
+	return pl
+}
+
+// prefixList reads one list's entries. An entry without a CIDR makes the whole list
+// unreadable (its entries are never quoted).
 func (p *Provider) prefixList(ctx context.Context, c Clients, id string) PrefixList {
 	var pl PrefixList
 	pg := ec2.NewGetManagedPrefixListEntriesPaginator(c.EC2, &ec2.GetManagedPrefixListEntriesInput{PrefixListId: awssdk.String(id)})
@@ -357,6 +431,9 @@ func (p *Provider) prefixList(ctx context.Context, c Clients, id string) PrefixL
 			return PrefixList{Err: fmt.Sprintf("GetManagedPrefixListEntries: %v", err)}
 		}
 		for _, e := range res.Entries {
+			if deref(e.Cidr) == "" {
+				return PrefixList{Err: "an entry has no CIDR"}
+			}
 			pl.CIDRs = append(pl.CIDRs, deref(e.Cidr))
 		}
 	}
@@ -366,29 +443,79 @@ func (p *Provider) prefixList(ctx context.Context, c Clients, id string) PrefixL
 	return pl
 }
 
-// regionLBs returns the region's internet-facing load balancers, cached for LBTTL and read
-// with their own deadline (LBTimeout), not the host's. What could not be read in full is
-// returned as reasons: a failed refresh keeps the last good data (stale) or none.
-func (p *Provider) regionLBs(ctx context.Context, region string, c Clients) (RegionLBs, []string) {
+// regionView is what the region cache gives one host: its load balancers, the reasons
+// they may be incomplete, and its gateway endpoints.
+type regionView struct {
+	data        RegionLBs
+	reasons     []string
+	gateways    map[string]bool
+	gatewaysErr string
+}
+
+// regionData returns the region's internet-facing load balancers and gateway endpoints,
+// cached for LBTTL and read with their own deadline (LBTimeout), not the host's. What
+// could not be read in full is returned as reasons: a failed load-balancer refresh keeps
+// the last good data (stale) or none. Gateway endpoints that could not be read leave
+// every vpce- route undetermined.
+func (p *Provider) regionData(ctx context.Context, region string, c Clients) regionView {
 	p.mu.Lock()
 	e, ok := p.lbs[region]
 	p.mu.Unlock()
 	if ok && p.now().Sub(e.at) < p.opts.LBTTL {
-		return e.data, e.reasons()
+		return e.view(nil)
 	}
 	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.opts.LBTimeout)
 	defer cancel()
+	gw, gwTrunc, gwErr := p.fetchGatewayEndpoints(lctx, c)
+	fresh := lbEntry{gateways: gw}
+	switch {
+	case gwErr != nil:
+		fresh.gatewaysErr = gwErr.Error()
+	case gwTrunc:
+		fresh.gatewaysErr = "truncated"
+	}
 	data, truncated, err := p.fetchLBs(lctx, c)
 	if err != nil {
 		if ok {
-			return e.data, append(e.reasons(), "load balancers stale ("+err.Error()+")")
+			e.gateways, e.gatewaysErr = fresh.gateways, fresh.gatewaysErr
+			return e.view([]string{"load balancers stale (" + err.Error() + ")"})
 		}
-		return RegionLBs{}, []string{"load balancers unreadable (" + err.Error() + ")"}
+		return fresh.viewNoLBs("load balancers unreadable (" + err.Error() + ")")
 	}
+	fresh.at, fresh.data, fresh.truncated = p.now(), data, truncated
 	p.mu.Lock()
-	p.lbs[region] = lbEntry{at: p.now(), data: data, truncated: truncated}
+	p.lbs[region] = fresh
 	p.mu.Unlock()
-	return data, p.lbs[region].reasons()
+	return fresh.view(nil)
+}
+
+func (e lbEntry) view(extra []string) regionView {
+	return regionView{data: e.data, reasons: append(e.reasons(), extra...), gateways: e.gateways, gatewaysErr: e.gatewaysErr}
+}
+
+func (e lbEntry) viewNoLBs(reason string) regionView {
+	return regionView{reasons: []string{reason}, gateways: e.gateways, gatewaysErr: e.gatewaysErr}
+}
+
+// fetchGatewayEndpoints returns the ids of the region's VPC endpoints of type Gateway
+// (S3, DynamoDB). The type is checked on every item, the filter notwithstanding.
+func (p *Provider) fetchGatewayEndpoints(ctx context.Context, c Clients) (map[string]bool, bool, error) {
+	out := map[string]bool{}
+	pg := ec2.NewDescribeVpcEndpointsPaginator(c.EC2, &ec2.DescribeVpcEndpointsInput{
+		Filters: []ec2types.Filter{{Name: awssdk.String("vpc-endpoint-type"), Values: []string{string(ec2types.VpcEndpointTypeGateway)}}},
+	})
+	for page := 0; pg.HasMorePages() && page < p.opts.MaxPages; page++ {
+		res, err := pg.NextPage(ctx)
+		if err != nil {
+			return out, false, fmt.Errorf("aws: DescribeVpcEndpoints: %w", err)
+		}
+		for _, ep := range res.VpcEndpoints {
+			if id := deref(ep.VpcEndpointId); ep.VpcEndpointType == ec2types.VpcEndpointTypeGateway && strings.HasPrefix(id, "vpce-") {
+				out[id] = true
+			}
+		}
+	}
+	return out, pg.HasMorePages(), nil
 }
 
 func (e lbEntry) reasons() []string {

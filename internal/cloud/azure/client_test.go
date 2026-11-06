@@ -559,3 +559,19 @@ func TestNewErrors(t *testing.T) {
 		t.Fatalf("%v %v", err, p)
 	}
 }
+
+// Review m579 minor: a rule whose direction is not understood is judged (as maybe), so the
+// service tags it names are read and its reason names the direction, not "tags not read".
+func TestTagsReadForUnknownDirection(t *testing.T) {
+	f := newFake(t)
+	nsg := strings.Replace(f.read("nsg-subnet.json"), `"priority": 310, "direction": "Inbound"`, `"priority": 310, "direction": "Both"`, 1)
+	f.bodies["/networkSecurityGroups/subnet-nsg"] = nsg
+	vs, err := f.provider(t, nil).Evaluate(context.Background(), host, []cloud.Port{ssh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := strings.Join(vs[0].Evidence, "\n")
+	if f.tagCalls.Load() == 0 || vs[0].Complete || !strings.Contains(ev, `direction "Both" not understood`) || strings.Contains(ev, "service tags not read") {
+		t.Fatalf("tag reads %d, %+v", f.tagCalls.Load(), vs[0])
+	}
+}

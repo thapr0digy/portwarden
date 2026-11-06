@@ -414,8 +414,8 @@ func tagNames(nsgs map[string]NSG) []string {
 	var out []string
 	for _, n := range nsgs {
 		for _, r := range slices.Concat(n.Properties.SecurityRules, n.Properties.DefaultSecurityRules) {
-			if !strings.EqualFold(r.Properties.Direction, "Inbound") {
-				continue
+			if strings.EqualFold(r.Properties.Direction, "Outbound") {
+				continue // an unknown direction is judged (as maybe), so its tags are needed
 			}
 			for _, s := range sources(r) {
 				if isTag(s) {

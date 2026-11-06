@@ -442,9 +442,10 @@ func TestIPv6(t *testing.T) {
 	check(t, w.data(t), ssh, wantOpen, "(2603:1020:1:2::5)", "reachable from ::/0")
 	w.nicRules = []string{allowSSH("star", 100, "*")}
 	check(t, w.data(t), ssh, wantOpen, "reachable from ::/0")
-	// An IPv4 public IP on an IPv6 configuration is not its address.
+	// An IPv4 public IP on an IPv6 configuration is not its address: no direct path, and
+	// what else may bring traffic is not read (review m579 B1).
 	w.publicIP = standardIP
-	check(t, w.data(t), ssh, wantClosed, "no public IPv6 address")
+	check(t, w.data(t), ssh, wantUndetermined, "no public IPv6 address")
 }
 
 // twoConfigs adds a second IP configuration (10.0.1.5) without a public IP.
@@ -463,7 +464,7 @@ func TestBindAddress(t *testing.T) {
 	d := twoConfigs(t, w.data(t))
 	bound := ssh
 	bound.Addr = "10.0.1.5"
-	v := check(t, d, bound, wantClosed, "web-nic/ipconfig2")
+	v := check(t, d, bound, wantUndetermined, "web-nic/ipconfig2")
 	if strings.Contains(strings.Join(v.Evidence, "\n"), "ipconfig1") {
 		t.Fatalf("a listener bound to ipconfig2's address is judged on ipconfig1: %v", v.Evidence)
 	}
@@ -502,28 +503,87 @@ func TestLBBackendUndetermined(t *testing.T) {
 			w.subnetRules = nil
 			w.ipconfigExtra = `,"` + member + `":[{"id":"` + rgPath + `Microsoft.Network/loadBalancers/lb/x/y"}]`
 			w.nicRules = []string{allowSSH("ssh", 100, "*")}
-			check(t, w.data(t), ssh, wantUndetermined, "load balancer, NAT rule or application gateway backend, not read")
-			// Firewalls closed: closed whatever is in front.
+			if member == "applicationGatewayBackendAddressPools" {
+				check(t, w.data(t), ssh, wantUndetermined, "application gateway backend")
+			} else {
+				check(t, w.data(t), ssh, wantUndetermined, "load balancer, NAT rule or application gateway backend, not read")
+			}
+			// Firewalls closed to the internet: closed whatever is in front, except that an
+			// application gateway connects from the virtual network (AllowVnetInBound).
 			w.nicRules = []string{}
+			if member == "applicationGatewayBackendAddressPools" {
+				check(t, w.data(t), ssh, wantUndetermined, "from the virtual network")
+				w.nicRules = []string{r("deny-all", 100, "Deny", "*", "*", "")}
+			}
 			check(t, w.data(t), ssh, wantClosed)
 		})
 	}
 }
 
-func TestNoPublicNoBackendClosed(t *testing.T) {
+// Review m579 B1: a Standard LB IP-based pool, an application gateway pool by IP or FQDN
+// and firewall or appliance DNAT leave nothing on the NIC, so a permitted path without a
+// public IP is undetermined, never closed.
+func TestNoPublicNoBackendUndetermined(t *testing.T) {
 	w := defaultWorld()
 	w.publicIP = ""
 	w.subnetRules = nil
-	w.nicRules = []string{allowSSH("ssh", 100, "*")}
-	check(t, w.data(t), ssh, wantClosed, "no public IPv4 address and in no load balancer", "VM has no public IPv4 or IPv6 address")
+	w.nicRules = []string{r("https", 100, "Allow", "Tcp", "443", "")}
+	https := ssh
+	https.Port, https.Key = 443, "tcp/0.0.0.0:443"
+	check(t, w.data(t), https, wantUndetermined, "IP-based load-balancer or application-gateway pool, or a firewall or appliance DNAT rule")
+	// Closed by its NSGs: closed.
+	w.nicRules = []string{}
+	check(t, w.data(t), https, wantClosed, "VM has no public IPv4 or IPv6 address")
 }
 
+// Review m579 B2: an application gateway connects from its subnet's private addresses, so
+// an allow from VirtualNetwork or a private range publishes its backend.
+func TestAppGatewayPrivateSources(t *testing.T) {
+	w := defaultWorld()
+	w.publicIP = ""
+	w.subnetRules = nil
+	w.ipconfigExtra = `,"applicationGatewayBackendAddressPools":[{"id":"` + rgPath + `Microsoft.Network/applicationGateways/agw/backendAddressPools/web"}]`
+	for _, src := range []string{"10.0.9.0/24", "VirtualNetwork"} {
+		w.nicRules = []string{allowSSH("from-agw", 100, src), r("deny", 200, "Deny", "*", "*", "")}
+		check(t, w.data(t), ssh, wantUndetermined, "application gateway backend")
+	}
+	// The same rules without the gateway: nothing from the internet gets in.
+	w.ipconfigExtra = ""
+	check(t, w.data(t), ssh, wantClosed)
+}
+
+// Review m579 B3: VirtualNetwork covers user-defined route prefixes; with a route table on
+// the subnet (0.0.0.0/0 to an appliance, say) it may be any address.
+func TestVirtualNetworkWithRouteTable(t *testing.T) {
+	w := defaultWorld()
+	w.subnetRules = nil
+	w.nicRules = []string{allowSSH("vnet", 100, "VirtualNetwork")}
+	check(t, w.data(t), ssh, wantClosed)
+	d := w.data(t)
+	sn := d.Subnets[key(subID)]
+	sn.Properties.RouteTable = &Ref{ID: rgPath + "Microsoft.Network/routeTables/force-tunnel"}
+	d.Subnets[key(subID)] = sn
+	check(t, d, ssh, wantUndetermined, "user-defined route prefixes")
+	// The default AllowVnetInBound alone makes it undetermined too.
+	n := d.NSGs[key(nnsgID)]
+	n.Properties.SecurityRules = nil
+	d.NSGs[key(nnsgID)] = n
+	check(t, d, ssh, wantUndetermined, "AllowVnetInBound")
+	// A deny before it still decides.
+	n.Properties.SecurityRules = []SecurityRule{decode[SecurityRule](t, r("deny", 100, "Deny", "*", "*", ""))}
+	d.NSGs[key(nnsgID)] = n
+	check(t, d, ssh, wantClosed)
+}
+
+// Review m579 minor: a public IP without an address (dynamic, VM stopped) may hold one again.
 func TestDynamicIPUnallocated(t *testing.T) {
 	w := defaultWorld()
 	w.publicIP = `{"id":"` + pipID + `","sku":{"name":"Basic"},"properties":{"publicIPAllocationMethod":"Dynamic"}}`
 	w.subnetRules = nil
 	w.nicRules = []string{allowSSH("ssh", 100, "*")}
-	check(t, w.data(t), ssh, wantClosed, "no public IPv4 address")
+	check(t, w.data(t), ssh, wantUndetermined, "public IP web-ip has no address")
+	w.nicRules = []string{}
+	check(t, w.data(t), ssh, wantClosed)
 }
 
 func TestLayerUnread(t *testing.T) {

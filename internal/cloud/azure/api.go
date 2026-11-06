@@ -77,6 +77,7 @@ type Subnet struct {
 	Name       string `json:"name"`
 	Properties struct {
 		NetworkSecurityGroup *Ref `json:"networkSecurityGroup"`
+		RouteTable           *Ref `json:"routeTable"`
 	} `json:"properties"`
 }
 

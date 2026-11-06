@@ -207,7 +207,9 @@ func publicOf(d HostData, c IPConfig, fam reach.Family) publicState {
 	}
 	a, err := netip.ParseAddr(pip.Properties.IPAddress)
 	if err != nil {
-		return publicState{} // not allocated (a dynamic IP of a stopped VM)
+		// Not allocated now (a dynamic IP of a stopped VM) or not understood: it may hold an
+		// address again before the next look-up.
+		return publicState{unread: fmt.Sprintf("public IP %s has no address (%q)", lastSegment(ref.ID), truncate(pip.Properties.IPAddress, 40))}
 	}
 	if (fam == reach.V6) != (a.Is6() && !a.Is4In6()) {
 		return publicState{}
@@ -239,20 +241,12 @@ func judgeConfig(d HostData, t target, p cloud.Port) path {
 	default:
 		pa.id += fmt.Sprintf(" (no public IPv%d address)", fam)
 	}
-	private, _ := netip.ParseAddr(t.cfg.Properties.PrivateIPAddress)
 	start := d.Policy.Internet(fam)
-
-	var subnet, nic layer
-	if t.cfg.Properties.Subnet == nil {
-		subnet = unreadLayer("subnet", "the IP configuration names no subnet", start)
-	} else if e, failed := d.Errs[key(t.cfg.Properties.Subnet.ID)]; failed {
-		subnet = unreadLayer("subnet", "subnet not read: "+e, start)
-	} else if s, ok := d.Subnets[key(t.cfg.Properties.Subnet.ID)]; !ok {
-		subnet = unreadLayer("subnet", "subnet not read", start)
-	} else {
-		subnet = nsgLayer(d, "subnet", s.Properties.NetworkSecurityGroup, t.cfg, private, fam, p, start)
+	vnet := vnetNotInternet
+	if routed(d, t.cfg) {
+		vnet = vnetMaybe
 	}
-	nic = nsgLayer(d, "NIC", t.nic.Properties.NetworkSecurityGroup, t.cfg, private, fam, p, start)
+	subnet, nic := layers(d, t, fam, p, start, vnet)
 
 	what := fmt.Sprintf("%s/%d", p.Proto, p.Port)
 	if subnet.absent && nic.absent && pub.has {
@@ -284,6 +278,16 @@ func judgeConfig(d HostData, t target, p cloud.Port) path {
 	default:
 		pa.res = reach.Closed
 	}
+	if pa.cfgAppGW(t) && !(pub.has && pa.res == reach.Open) {
+		// An application gateway connects from its own subnet's private addresses, which the
+		// internet-only judgement above leaves out.
+		vs, vn := layers(d, t, fam, p, reach.All(fam), vnetAll)
+		if !vs.sure.Union(vs.maybe).Intersect(vn.sure.Union(vn.maybe)).IsEmpty() {
+			pa.res = reach.Undetermined
+			pa.lines = []string{fmt.Sprintf("%s (%s: in an application gateway backend, and its NSGs let in %s from the virtual network, where the gateway connects from; the gateway is not read)", cloud.UndeterminedEvidence, pa.id, what)}
+			return pa
+		}
+	}
 	if pa.res == reach.Closed {
 		var by []string
 		for _, l := range []layer{subnet, nic} {
@@ -312,8 +316,10 @@ func judgeConfig(d HostData, t target, p cloud.Port) path {
 		pa.lines = []string{fmt.Sprintf("%s (%s: internet sources get through its NSGs; it is in a load balancer, NAT rule or application gateway backend, not read)", cloud.UndeterminedEvidence, pa.id)}
 		return pa
 	default:
-		pa.res = reach.Closed
-		pa.lines = []string{fmt.Sprintf("cloud: %s: no public IPv%d address and in no load balancer or application gateway backend", pa.id, fam)}
+		// Nothing on the NIC says how traffic would come, but IP-based load-balancer and
+		// application-gateway pools and firewall or appliance DNAT leave no trace on it.
+		pa.res = reach.Undetermined
+		pa.lines = []string{fmt.Sprintf("%s (%s: internet sources get through its NSGs; it has no public IPv%d address, but an IP-based load-balancer or application-gateway pool, or a firewall or appliance DNAT rule (none read), may still bring them)", cloud.UndeterminedEvidence, pa.id, fam)}
 		return pa
 	}
 	if pa.res == reach.Open {
@@ -347,13 +353,64 @@ func judgeConfig(d HostData, t target, p cloud.Port) path {
 	return pa
 }
 
+// cfgAppGW: the configuration is in an application gateway's backend pool.
+func (path) cfgAppGW(t target) bool {
+	return len(t.cfg.Properties.ApplicationGatewayBackendAddressPools) > 0
+}
+
+// routed: the configuration's subnet has a route table. Azure's VirtualNetwork tag also
+// covers the prefixes of user-defined routes, so with one (0.0.0.0/0 to an appliance,
+// say) VirtualNetwork may be any address; route tables are not read.
+func routed(d HostData, c IPConfig) bool {
+	if c.Properties.Subnet == nil {
+		return false
+	}
+	s, ok := d.Subnets[key(c.Properties.Subnet.ID)]
+	return ok && s.Properties.RouteTable != nil
+}
+
+// layers judges the subnet's and the NIC's NSG for a path from start.
+func layers(d HostData, t target, fam reach.Family, p cloud.Port, start reach.Set, vnet vnetMode) (subnet, nic layer) {
+	private, _ := netip.ParseAddr(t.cfg.Properties.PrivateIPAddress)
+	switch s, ok := d.Subnets[key(refID(t.cfg.Properties.Subnet))]; {
+	case t.cfg.Properties.Subnet == nil:
+		subnet = unreadLayer("subnet", "the IP configuration names no subnet", start)
+	case d.Errs[key(t.cfg.Properties.Subnet.ID)] != "":
+		subnet = unreadLayer("subnet", "subnet not read: "+d.Errs[key(t.cfg.Properties.Subnet.ID)], start)
+	case !ok:
+		subnet = unreadLayer("subnet", "subnet not read", start)
+	default:
+		subnet = nsgLayer(d, "subnet", s.Properties.NetworkSecurityGroup, t.cfg, private, fam, p, start, vnet)
+	}
+	nic = nsgLayer(d, "NIC", t.nic.Properties.NetworkSecurityGroup, t.cfg, private, fam, p, start, vnet)
+	return subnet, nic
+}
+
+func refID(r *Ref) string {
+	if r == nil {
+		return ""
+	}
+	return r.ID
+}
+
+// vnetMode is how the VirtualNetwork source tag counts: never the internet (the M10
+// decision), maybe any address (the subnet has user-defined routes), or every address
+// (judging an application gateway's private sources).
+type vnetMode int
+
+const (
+	vnetNotInternet vnetMode = iota
+	vnetMaybe
+	vnetAll
+)
+
 func unreadLayer(where, reason string, start reach.Set) layer {
 	return layer{name: where, maybe: start, why: []labelled{{where + " " + reason, start}}}
 }
 
 // nsgLayer judges one layer: no NSG (allows everything), an NSG not read (maybe), or
 // the NSG's rules.
-func nsgLayer(d HostData, where string, ref *Ref, cfg IPConfig, private netip.Addr, fam reach.Family, p cloud.Port, start reach.Set) layer {
+func nsgLayer(d HostData, where string, ref *Ref, cfg IPConfig, private netip.Addr, fam reach.Family, p cloud.Port, start reach.Set, vnet vnetMode) layer {
 	if ref == nil {
 		return layer{name: "no NSG on the " + where, absent: true, sure: start}
 	}
@@ -370,7 +427,7 @@ func nsgLayer(d HostData, where string, ref *Ref, cfg IPConfig, private netip.Ad
 		name = lastSegment(ref.ID)
 	}
 	l := layer{name: where + " NSG " + name}
-	rules := compileNSG(d, where+" NSG "+name, nsg, cfg, private, fam, p)
+	rules := compileNSG(d, where+" NSG "+name, nsg, cfg, private, fam, p, vnet)
 	l.walk(rules, start)
 	return l
 }
@@ -404,7 +461,7 @@ const (
 	triYes
 )
 
-func compileNSG(d HostData, label string, nsg NSG, cfg IPConfig, private netip.Addr, fam reach.Family, p cloud.Port) []rule {
+func compileNSG(d HostData, label string, nsg NSG, cfg IPConfig, private netip.Addr, fam reach.Family, p cloud.Port, vnet vnetMode) []rule {
 	var out []rule
 	for _, sr := range slices.Concat(nsg.Properties.SecurityRules, nsg.Properties.DefaultSecurityRules) {
 		pr := sr.Properties
@@ -436,7 +493,7 @@ func compileNSG(d HostData, label string, nsg NSG, cfg IPConfig, private netip.A
 			continue
 		}
 		var srcTags []string
-		r.sure, r.maybe, srcTags = sourceSets(d, r.label, sr, fam, &r.reason)
+		r.sure, r.maybe, srcTags = sourceSets(d, r.label, sr, fam, vnet, &r.reason)
 		if len(srcTags) > 0 {
 			r.label += " (service tag " + strings.Join(srcTags, ", ") + ")"
 		}
@@ -555,7 +612,7 @@ func sources(r SecurityRule) []string {
 // sourceSets is the rule's source addresses of the family: the sure part and the part
 // that may match (a tag not listed, a list not read, a range that does not parse), and
 // the service tags it resolved through the list.
-func sourceSets(d HostData, label string, r SecurityRule, fam reach.Family, reason *string) (sure, maybe reach.Set, tags []string) {
+func sourceSets(d HostData, label string, r SecurityRule, fam reach.Family, vnet vnetMode, reason *string) (sure, maybe reach.Set, tags []string) {
 	all := reach.All(fam)
 	note := func(why string) {
 		maybe = all
@@ -572,6 +629,14 @@ func sourceSets(d HostData, label string, r SecurityRule, fam reach.Family, reas
 	// sourceApplicationSecurityGroups name VMs: never internet traffic.
 	for _, s := range srcs {
 		s = strings.TrimSpace(s)
+		if strings.EqualFold(s, "VirtualNetwork") && vnet != vnetNotInternet {
+			if vnet == vnetAll {
+				sure = sure.Union(all)
+			} else {
+				note("VirtualNetwork, which covers the subnet's user-defined route prefixes (route table not read)")
+			}
+			continue
+		}
 		if isAll, ok := builtinSource(s); ok {
 			if isAll {
 				sure = sure.Union(all)

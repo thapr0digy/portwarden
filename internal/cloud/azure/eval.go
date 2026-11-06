@@ -242,10 +242,7 @@ func judgeConfig(d HostData, t target, p cloud.Port) path {
 		pa.id += fmt.Sprintf(" (no public IPv%d address)", fam)
 	}
 	start := d.Policy.Internet(fam)
-	vnet := vnetNotInternet
-	if routed(d, t.cfg) {
-		vnet = vnetMaybe
-	}
+	vnet := vnetOf(d, t.cfg)
 	subnet, nic := layers(d, t, fam, p, start, vnet)
 
 	what := fmt.Sprintf("%s/%d", p.Proto, p.Port)
@@ -358,15 +355,24 @@ func (path) cfgAppGW(t target) bool {
 	return len(t.cfg.Properties.ApplicationGatewayBackendAddressPools) > 0
 }
 
-// routed: the configuration's subnet has a route table. Azure's VirtualNetwork tag also
-// covers the prefixes of user-defined routes, so with one (0.0.0.0/0 to an appliance,
-// say) VirtualNetwork may be any address; route tables are not read.
-func routed(d HostData, c IPConfig) bool {
+// vnetOf says how VirtualNetwork sources count for the configuration. Azure's
+// VirtualNetwork tag also covers the prefixes of user-defined routes, so with a route table
+// on the subnet (0.0.0.0/0 to an appliance, say) VirtualNetwork may be any address; route
+// tables are not read. A subnet that is not known (unnamed, not read) may have one.
+func vnetOf(d HostData, c IPConfig) vnetMode {
 	if c.Properties.Subnet == nil {
-		return false
+		return vnetMaybeSubnetUnknown
 	}
-	s, ok := d.Subnets[key(c.Properties.Subnet.ID)]
-	return ok && s.Properties.RouteTable != nil
+	k := key(c.Properties.Subnet.ID)
+	s, ok := d.Subnets[k]
+	switch {
+	case d.Errs[k] != "" || !ok:
+		return vnetMaybeSubnetUnknown
+	case s.Properties.RouteTable != nil:
+		return vnetMaybe
+	default:
+		return vnetNotInternet
+	}
 }
 
 // layers judges the subnet's and the NIC's NSG for a path from start.
@@ -394,13 +400,14 @@ func refID(r *Ref) string {
 }
 
 // vnetMode is how the VirtualNetwork source tag counts: never the internet (the M10
-// decision), maybe any address (the subnet has user-defined routes), or every address
-// (judging an application gateway's private sources).
+// decision), maybe any address (the subnet has user-defined routes, or the subnet is not
+// known so it may), or every address (judging an application gateway's private sources).
 type vnetMode int
 
 const (
 	vnetNotInternet vnetMode = iota
 	vnetMaybe
+	vnetMaybeSubnetUnknown
 	vnetAll
 )
 
@@ -630,9 +637,12 @@ func sourceSets(d HostData, label string, r SecurityRule, fam reach.Family, vnet
 	for _, s := range srcs {
 		s = strings.TrimSpace(s)
 		if strings.EqualFold(s, "VirtualNetwork") && vnet != vnetNotInternet {
-			if vnet == vnetAll {
+			switch vnet {
+			case vnetAll:
 				sure = sure.Union(all)
-			} else {
+			case vnetMaybeSubnetUnknown:
+				note("VirtualNetwork, which covers the subnet's user-defined route prefixes (subnet not read, so its route table is not known)")
+			default:
 				note("VirtualNetwork, which covers the subnet's user-defined route prefixes (route table not read)")
 			}
 			continue

@@ -541,6 +541,14 @@ func TestLayerUnread(t *testing.T) {
 			check(t, w.data(t), ssh, wantUndetermined, c.evidence)
 		})
 	}
+	t.Run("public IP not read, NSGs closed", func(t *testing.T) {
+		w := defaultWorld()
+		w.errs = map[string]string{pipID: "429 Too Many Requests"}
+		v := check(t, w.data(t), ssh, wantClosed, "through both NSG layers")
+		if strings.Contains(strings.Join(v.Evidence, "\n"), "VM has no public") {
+			t.Fatalf("an unread public IP is reported as none: %v", v.Evidence)
+		}
+	})
 	t.Run("unread layer, the other one closed", func(t *testing.T) {
 		w := defaultWorld()
 		w.nicRules = []string{}

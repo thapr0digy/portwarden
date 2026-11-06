@@ -94,7 +94,7 @@ func evaluatePort(d HostData, p cloud.Port) cloud.Verdict {
 	reachable, public := false, false
 	for _, pa := range paths(d, p) {
 		lines = append(lines, pa.lines...)
-		public = public || pa.public || pa.backend
+		public = public || pa.public || pa.backend || pa.unreadPublic
 		switch {
 		case pa.res == reach.Open && pa.public && p.AgentLevel >= cloud.LevelHostFirewallOpen:
 			v.Open = true
@@ -120,13 +120,14 @@ func evaluatePort(d HostData, p cloud.Port) cloud.Verdict {
 }
 
 // path is one IP configuration's judgement (each configuration has one family).
-// public: it has a public IP of its family (a direct path); backend: it is in a load
-// balancer, NAT rule or application gateway backend.
+// public: it has a public IP of its family (a direct path); unreadPublic: it names one
+// that was not read; backend: it is in a load balancer, NAT rule or application gateway
+// backend.
 type path struct {
-	id              string
-	public, backend bool
-	res             reach.Outcome
-	lines           []string
+	id                            string
+	public, unreadPublic, backend bool
+	res                           reach.Outcome
+	lines                         []string
 }
 
 // target is an IP configuration and its NIC.
@@ -229,7 +230,7 @@ func judgeConfig(d HostData, t target, p cloud.Port) path {
 	if nicName == "" {
 		nicName = lastSegment(t.nic.ID)
 	}
-	pa := path{id: nicName + "/" + t.cfg.Name, public: pub.has, backend: t.cfg.inBackend()}
+	pa := path{id: nicName + "/" + t.cfg.Name, public: pub.has, unreadPublic: pub.unread != "", backend: t.cfg.inBackend()}
 	switch {
 	case pub.has:
 		pa.id += " (" + pub.addr + ")"

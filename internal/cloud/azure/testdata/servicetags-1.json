@@ -1,0 +1,11 @@
+{
+  "name": "Public",
+  "id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/providers/Microsoft.Network/serviceTags/Public",
+  "type": "Microsoft.Network/serviceTags",
+  "changeNumber": "123",
+  "cloud": "Public",
+  "values": [
+    {"name": "AzureCloud", "id": "AzureCloud", "properties": {"changeNumber": "70", "region": "", "systemService": "", "addressPrefixes": ["13.64.0.0/11", "20.0.0.0/8", "2603:1000::/24"]}}
+  ],
+  "nextLink": "NEXT"
+}

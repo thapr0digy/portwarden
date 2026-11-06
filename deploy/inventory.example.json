@@ -19,6 +19,13 @@
       "hierarchy_confirmed": false,
       "key_file": "/run/credentials/portwarden-inventory.service/gcp-key"
     },
+    "azure": {
+      "enabled": true,
+      "subscriptions": ["0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0"],
+      "tenant_id": "72f988bf-86f1-41af-91ab-2d7cd011db47",
+      "client_id": "a1b2c3d4-e5f6-4789-8abc-def012345678",
+      "client_secret_file": "/run/credentials/portwarden-inventory.service/azure-secret"
+    },
     "vpn_cidrs": ["81.2.69.160/28"]
   },
   "retention": {

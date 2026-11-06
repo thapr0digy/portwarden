@@ -1,0 +1,22 @@
+{
+  "id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/web-rg/providers/Microsoft.Network/networkInterfaces/web-nic",
+  "name": "web-nic",
+  "location": "westeurope",
+  "properties": {
+    "networkSecurityGroup": {"id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/web-rg/providers/Microsoft.Network/networkSecurityGroups/nic-nsg"},
+    "ipConfigurations": [{
+      "id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/web-rg/providers/Microsoft.Network/networkInterfaces/web-nic/ipConfigurations/ipconfig1",
+      "name": "ipconfig1",
+      "properties": {
+        "privateIPAddress": "10.0.1.4",
+        "privateIPAllocationMethod": "Dynamic",
+        "privateIPAddressVersion": "IPv4",
+        "primary": true,
+        "publicIPAddress": {"id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/web-rg/providers/Microsoft.Network/publicIPAddresses/web-ip"},
+        "subnet": {"id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/web-rg/providers/Microsoft.Network/virtualNetworks/vnet1/subnets/web"},
+        "applicationSecurityGroups": [{"id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/web-rg/providers/Microsoft.Network/applicationSecurityGroups/web-asg"}]
+      }
+    }],
+    "virtualMachine": {"id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/web-rg/providers/Microsoft.Compute/virtualMachines/web1"}
+  }
+}

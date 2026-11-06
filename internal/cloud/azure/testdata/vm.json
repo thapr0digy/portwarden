@@ -1,0 +1,12 @@
+{
+  "id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/web-rg/providers/Microsoft.Compute/virtualMachines/web1",
+  "name": "web1",
+  "type": "Microsoft.Compute/virtualMachines",
+  "location": "westeurope",
+  "properties": {
+    "vmId": "6F1D2C3B-4A59-4E8F-9D7C-1B2A3C4D5E6F",
+    "hardwareProfile": {"vmSize": "Standard_B2s"},
+    "networkProfile": {"networkInterfaces": [{"id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/web-rg/providers/Microsoft.Network/networkInterfaces/web-nic", "properties": {"primary": true}}]},
+    "provisioningState": "Succeeded"
+  }
+}

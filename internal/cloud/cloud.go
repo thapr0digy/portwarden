@@ -3,10 +3,10 @@
 // a listener's port in from anywhere. Cloud credentials stay in the backend; servers
 // never hold them.
 //
-// AWS (package aws) and GCP (package gcp, M10 phase 2) are implemented. Azure is
-// recognised but unsupported: its hosts get the status "unsupported provider" and no
-// level 3 evidence, so their listeners keep the level the agent judged (never lowered,
-// never raised by guesswork).
+// AWS (package aws), GCP (package gcp, M10 phase 2) and Azure (package azure, M10 phase
+// 3) are implemented. A cloud whose look-up is not enabled is unsupported: its hosts get
+// the status "unsupported provider" and no level 3 evidence, so their listeners keep the
+// level the agent judged (never lowered, never raised by guesswork).
 package cloud
 
 import (

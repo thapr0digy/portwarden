@@ -46,7 +46,8 @@ type sentVerdict struct {
 	evidence []string
 }
 
-// NewCloudLookup returns a look-up with GCP and Azure registered as unsupported.
+// NewCloudLookup returns a look-up with GCP and Azure registered as unsupported unless
+// providers holds their look-ups (cloud.gcp, cloud.azure enabled).
 func NewCloudLookup(state CloudState, providers map[string]cloud.Provider, publish PublishFunc, runID string) *CloudLookup {
 	all := map[string]cloud.Provider{"gcp": cloud.Unsupported{Name: "gcp"}, "azure": cloud.Unsupported{Name: "azure"}}
 	for k, v := range providers {

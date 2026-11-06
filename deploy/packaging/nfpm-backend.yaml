@@ -72,6 +72,9 @@ contents:
   - src: deploy/gcp-role.yaml
     dst: /usr/share/doc/portwarden-backend/examples/gcp-role.yaml
     file_info: {mode: 0644}
+  - src: deploy/azure-role.json
+    dst: /usr/share/doc/portwarden-backend/examples/azure-role.json
+    file_info: {mode: 0644}
   - src: deploy/packaging/copyright
     dst: /usr/share/doc/portwarden-backend/copyright
     file_info: {mode: 0644}

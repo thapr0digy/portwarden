@@ -30,6 +30,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
 	"github.com/thapr0digy/portwarden/internal/cloud"
 	cloudaws "github.com/thapr0digy/portwarden/internal/cloud/aws"
+	cloudazure "github.com/thapr0digy/portwarden/internal/cloud/azure"
 	cloudgcp "github.com/thapr0digy/portwarden/internal/cloud/gcp"
 	"github.com/thapr0digy/portwarden/internal/cloud/reach"
 	"github.com/thapr0digy/portwarden/internal/inventory"
@@ -118,8 +119,7 @@ const adminTokenEnv = "PORTWARDEN_INVENTORY_ADMIN_TOKEN"
 // CloudConfig turns on the level 3 look-up.
 type CloudConfig struct {
 	// AWS enables the AWS look-up with the SDK's default credentials (instance role,
-	// environment, shared config). Hosts of a cloud not enabled (Azure always) get
-	// "unsupported".
+	// environment, shared config). Hosts of a cloud not enabled get "unsupported".
 	AWS      bool         `json:"aws"`
 	Refresh  svc.Duration `json:"refresh"`
 	Endpoint string       `json:"endpoint"`
@@ -134,6 +134,45 @@ type CloudConfig struct {
 	AllowBroad bool `json:"allow_broad"`
 	// GCP enables the GCP look-up (M10 phase 2).
 	GCP GCPConfig `json:"gcp"`
+	// Azure enables the Azure look-up (M10 phase 3).
+	Azure AzureConfig `json:"azure"`
+}
+
+// AzureConfig is cloud.azure. The ARM, login and IMDS endpoints are fixed (public Azure);
+// none is configurable. The credential is the client secret when client_secret_file is
+// set, else the federated token when federated_token_file (or AZURE_FEDERATED_TOKEN_FILE)
+// is set, else the managed identity of the Azure VM the inventory runs on.
+type AzureConfig struct {
+	Enabled bool `json:"enabled"`
+	// Subscriptions are the only subscriptions looked up (required when enabled).
+	Subscriptions []string `json:"subscriptions"`
+	// TenantID and ClientID name the app registration (AZURE_TENANT_ID and
+	// AZURE_CLIENT_ID when empty); with a managed identity ClientID picks a user-assigned
+	// one.
+	TenantID string `json:"tenant_id"`
+	ClientID string `json:"client_id"`
+	// ClientSecretFile holds the app's client secret (a systemd credential).
+	ClientSecretFile string `json:"client_secret_file"`
+	// FederatedTokenFile holds a federated (OIDC) token, re-read at every exchange.
+	FederatedTokenFile string `json:"federated_token_file"`
+}
+
+// options resolves the environment fallbacks (what AKS workload identity injects).
+func (a AzureConfig) options(policy reach.Policy, getenv func(string) string) cloudazure.Options {
+	o := cloudazure.Options{TenantID: a.TenantID, ClientID: a.ClientID, ClientSecretFile: a.ClientSecretFile,
+		FederatedTokenFile: a.FederatedTokenFile, Subscriptions: a.Subscriptions, Policy: policy}
+	if o.ClientSecretFile == "" && o.FederatedTokenFile == "" {
+		o.FederatedTokenFile = getenv("AZURE_FEDERATED_TOKEN_FILE")
+	}
+	if o.FederatedTokenFile != "" || o.ClientSecretFile != "" {
+		if o.TenantID == "" {
+			o.TenantID = getenv("AZURE_TENANT_ID")
+		}
+	}
+	if o.ClientID == "" && (o.FederatedTokenFile != "" || o.ClientSecretFile != "") {
+		o.ClientID = getenv("AZURE_CLIENT_ID")
+	}
+	return o
 }
 
 // GCPConfig is cloud.gcp. The API, token and metadata endpoints are fixed; none is
@@ -181,6 +220,14 @@ func (c CloudConfig) providers(ctx context.Context, policy reach.Policy, getenv 
 		}
 		provs["gcp"] = prov
 		names = append(names, "gcp ("+prov.Credential+", projects "+strings.Join(c.GCP.Projects, ",")+")")
+	}
+	if c.Azure.Enabled {
+		prov, err := cloudazure.New(c.Azure.options(policy, getenv))
+		if err != nil {
+			return nil, nil, fmt.Errorf("cloud.%w", err)
+		}
+		provs["azure"] = prov
+		names = append(names, "azure ("+prov.Credential+", subscriptions "+strings.Join(c.Azure.Subscriptions, ",")+")")
 	}
 	return provs, names, nil
 }

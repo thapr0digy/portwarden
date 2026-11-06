@@ -15,6 +15,9 @@ LoadCredential=token:/etc/portwarden/inventory.token
 # GCP look-up with a service-account key (cloud.gcp.key_file =
 # /run/credentials/portwarden-inventory.service/gcp-key):
 #LoadCredential=gcp-key:/etc/portwarden/gcp-key.json
+# Azure look-up with an app registration's client secret (cloud.azure.client_secret_file =
+# /run/credentials/portwarden-inventory.service/azure-secret):
+#LoadCredential=azure-secret:/etc/portwarden/azure-secret
 ExecStart=/usr/bin/portwarden-inventory --config /etc/portwarden/inventory.json
 DynamicUser=yes
 NoNewPrivileges=yes

@@ -1,0 +1,8 @@
+{
+  "name": "Public",
+  "type": "Microsoft.Network/serviceTags",
+  "cloud": "Public",
+  "values": [
+    {"name": "AzureFrontDoor.Backend", "id": "AzureFrontDoor.Backend", "properties": {"region": "", "systemService": "AzureFrontDoor", "addressPrefixes": ["147.243.0.0/16", "2a01:111:2050::/44"]}}
+  ]
+}

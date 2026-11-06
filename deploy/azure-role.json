@@ -1,0 +1,19 @@
+{
+  "Name": "Portwarden NSG reader",
+  "IsCustom": true,
+  "Description": "Read-only access for the Portwarden inventory's Azure look-up (M10 phase 3): a VM, its NICs, public IPs, subnets and network security groups, and the location's service tags. Create with: az role definition create --role-definition @deploy/azure-role.json (set AssignableScopes to your subscriptions first).",
+  "Actions": [
+    "Microsoft.Compute/virtualMachines/read",
+    "Microsoft.Network/networkInterfaces/read",
+    "Microsoft.Network/publicIPAddresses/read",
+    "Microsoft.Network/virtualNetworks/subnets/read",
+    "Microsoft.Network/networkSecurityGroups/read",
+    "Microsoft.Network/locations/serviceTags/read"
+  ],
+  "NotActions": [],
+  "DataActions": [],
+  "NotDataActions": [],
+  "AssignableScopes": [
+    "/subscriptions/00000000-0000-0000-0000-000000000000"
+  ]
+}

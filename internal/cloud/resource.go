@@ -3,6 +3,7 @@ package cloud
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // MaxResourceLen caps a host-supplied cloud_resource.
@@ -27,11 +28,11 @@ const uuidPattern = `[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}
 // ValidResource checks a host-supplied cloud_resource (M10) before it is stored: the
 // shape of its cloud's full instance name, at most MaxResourceLen bytes, for GCP the
 // instance number equal to instanceID, and for Azure instanceID a UUID (the VM's vmId).
-// "" is valid (older agents, AWS). The phase 2/3 look-ups must still parse it into parts
+// "" is valid (older agents, AWS). The GCP and Azure look-ups parse it again into parts
 // and build their API paths from those (path-escaped). The Azure resource id carries the
-// VM's name, not its vmId, so the instance cannot be matched here: the phase 3 look-up
-// must read the VM by the parsed id and require its properties.vmId to equal instanceID
-// (case-insensitive), else judge nothing (undetermined).
+// VM's name, not its vmId, so the instance cannot be matched here: the Azure look-up reads
+// the VM by the parsed id and requires its properties.vmId to equal instanceID
+// (case-insensitive), else the host is an error and nothing is judged.
 func ValidResource(cloudName, instanceID, r string) error {
 	if r == "" {
 		return nil
@@ -49,8 +50,8 @@ func ValidResource(cloudName, instanceID, r string) error {
 			return fmt.Errorf("cloud_resource names instance %s, the host block %q", inst, instanceID)
 		}
 	case "azure":
-		if !azureResourceRe.MatchString(r) {
-			return fmt.Errorf("cloud_resource is not /subscriptions/<uuid>/resourceGroups/<rg>/providers/Microsoft.Compute/virtualMachines/<name>")
+		if _, _, _, err := ParseAzureResource(r); err != nil {
+			return err
 		}
 		if !azureVMIDRe.MatchString(instanceID) {
 			return fmt.Errorf("the host block's Azure instance id is not a vmId (UUID)")
@@ -72,4 +73,19 @@ func ParseGCPResource(r string) (project, zone, instance string, err error) {
 		return "", "", "", fmt.Errorf("cloud_resource is not projects/<id>/zones/<zone>/instances/<number>")
 	}
 	return m[1], m[2], m[3], nil
+}
+
+// ParseAzureResource splits an Azure cloud_resource
+// (/subscriptions/<uuid>/resourceGroups/<rg>/providers/Microsoft.Compute/virtualMachines/<name>)
+// into its validated parts; the subscription is lowercased. Callers build API paths from
+// these, never from r itself.
+func ParseAzureResource(r string) (subscription, group, vm string, err error) {
+	if len(r) > MaxResourceLen {
+		return "", "", "", fmt.Errorf("cloud_resource longer than %d bytes", MaxResourceLen)
+	}
+	m := azureResourceRe.FindStringSubmatch(r)
+	if m == nil {
+		return "", "", "", fmt.Errorf("cloud_resource is not /subscriptions/<uuid>/resourceGroups/<rg>/providers/Microsoft.Compute/virtualMachines/<name>")
+	}
+	return strings.ToLower(m[1]), m[2], m[3], nil
 }

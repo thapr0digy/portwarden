@@ -1,0 +1,15 @@
+{
+  "id": "/subscriptions/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0/resourceGroups/web-rg/providers/Microsoft.Network/networkSecurityGroups/subnet-nsg",
+  "name": "subnet-nsg",
+  "properties": {
+    "securityRules": [
+      {"name": "allow-https", "properties": {"protocol": "Tcp", "sourcePortRange": "*", "destinationPortRanges": ["80", "443"], "sourceAddressPrefix": "Internet", "destinationAddressPrefix": "VirtualNetwork", "access": "Allow", "priority": 300, "direction": "Inbound"}},
+      {"name": "allow-ssh-frontdoor", "properties": {"protocol": "Tcp", "sourcePortRange": "*", "destinationPortRange": "22", "sourceAddressPrefix": "AzureFrontDoor.Backend", "destinationAddressPrefix": "*", "access": "Allow", "priority": 310, "direction": "Inbound"}}
+    ],
+    "defaultSecurityRules": [
+      {"name": "AllowVnetInBound", "properties": {"protocol": "*", "sourcePortRange": "*", "destinationPortRange": "*", "sourceAddressPrefix": "VirtualNetwork", "destinationAddressPrefix": "VirtualNetwork", "access": "Allow", "priority": 65000, "direction": "Inbound"}},
+      {"name": "AllowAzureLoadBalancerInBound", "properties": {"protocol": "*", "sourcePortRange": "*", "destinationPortRange": "*", "sourceAddressPrefix": "AzureLoadBalancer", "destinationAddressPrefix": "*", "access": "Allow", "priority": 65001, "direction": "Inbound"}},
+      {"name": "DenyAllInBound", "properties": {"protocol": "*", "sourcePortRange": "*", "destinationPortRange": "*", "sourceAddressPrefix": "*", "destinationAddressPrefix": "*", "access": "Deny", "priority": 65500, "direction": "Inbound"}}
+    ]
+  }
+}

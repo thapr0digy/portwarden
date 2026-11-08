@@ -263,12 +263,14 @@ func run(opts options, log *slog.Logger) error {
 		slog.Warn("run counter unavailable; consumers order runs by run id", "err", err)
 		runNumber = 0
 	}
+	self := selfIdentity(log)
 	pub, err := publish.New(ctx, publish.Config{
 		URL: opts.natsURL, CredsFile: opts.natsCreds, NkeyFile: opts.natsNkey,
 		CAFile: opts.tlsCA, CertFile: opts.tlsCert, KeyFile: opts.tlsKey,
 		HostID:   host,
 		SpoolDir: opts.spoolDir, SpoolMax: opts.spoolMax,
 		BootID: publish.ReadBootID(publish.BootIDPath), RunNumber: runNumber,
+		AgentVersion: version.Version, ExeSHA256: self.hash,
 		LocalAddr: hostInfo.SetIngestLocal,
 		OnDenied: func(subject string) {
 			if strings.HasSuffix(subject, "."+bus.KindTamper) {
@@ -333,7 +335,7 @@ func run(opts options, log *slog.Logger) error {
 	}
 
 	if opts.tamperInterval > 0 {
-		mon := newTamperMonitor(extraFiles, opts.tamperDropRate, pr, proxyConns, hardenErr, log)
+		mon := newTamperMonitor(self, extraFiles, opts.tamperDropRate, pr, proxyConns, hardenErr, log)
 		beats.Add(1)
 		go func() {
 			defer beats.Done()
@@ -360,6 +362,11 @@ func run(opts options, log *slog.Logger) error {
 			log.Warn("closing proxy connection probes", "error", err.Error())
 		}
 	}
+	if runErr == nil {
+		// Asked to stop: the clean-shutdown marker goes first in the drain below, so the
+		// alerter does not read this restart as unclean. Error exits never send it.
+		pub.Stopping()
+	}
 	if err := pub.Close(); err != nil {
 		log.Warn("closing publisher", "error", err.Error())
 	}
@@ -367,6 +374,21 @@ func run(opts options, log *slog.Logger) error {
 		log.Info("stopped")
 	}
 	return runErr
+}
+
+// exeIdentity is the agent's executable as hashed once at start.
+type exeIdentity struct{ path, hash string }
+
+// selfIdentity hashes the running executable once, off the event loop (before the agent
+// loop starts). A failure leaves the hash empty for the run (heartbeats then carry "")
+// and is logged; the self_exe tamper check then takes its own baseline.
+func selfIdentity(log *slog.Logger) exeIdentity {
+	path, hash, err := tamper.SelfExeHash()
+	if err != nil {
+		log.Warn("agent executable not hashed; heartbeats carry no exe_sha256 this run", "err", err.Error())
+		return exeIdentity{}
+	}
+	return exeIdentity{path: path, hash: hash}
 }
 
 // offerLatest hands j to the agent loop, replacing a judge it has not taken yet: only

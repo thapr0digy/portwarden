@@ -114,6 +114,12 @@ message Heartbeat {
   // The firewall fingerprint as of the agent's latest exposure view (M7), the same value
   // as HostInfo.firewall_fingerprint. Unset from agents without it.
   optional string firewall_fingerprint = 12;
+  // The agent's identity (M11): its release version (internal/version, "dev" in a plain
+  // build) and the lowercase hex SHA-256 of its executable, hashed once at start. Empty
+  // from older agents; exe_sha256 is also empty when the agent could not read its own
+  // executable. Self-reported: a visibility aid, not attestation (root can forge both).
+  string agent_version = 13;
+  string exe_sha256 = 14;
 }
 
 // TamperFlag is one tamper signal the agent's self-checks (design §9) currently see.
@@ -223,6 +229,10 @@ message HostInfo {
   // ("/subscriptions/<id>/resourceGroups/<group>/providers/Microsoft.Compute/virtualMachines/<name>").
   // Empty on AWS (instance_id and region suffice), off-cloud, and from older agents.
   string cloud_resource = 7;
+  // The agent's identity (M11), as on Heartbeat: version and executable SHA-256. Empty
+  // from older agents. Self-reported, not attestation.
+  string agent_version = 8;
+  string exe_sha256 = 9;
 }
 
 // ExposureEvent is published on asm.<host>.exposure.changed when a listener's level
@@ -299,6 +309,11 @@ message HostEvent {
   // (boot_id, run_number) instead of the run_id's wall-clock time.
   string boot_id = 8;
   uint64 run_number = 9;
+  // The agent's clean-shutdown marker (M11): the last message of a run that stopped on
+  // SIGTERM/SIGINT, with host == previous (the host block did not change). A run whose
+  // successor starts without one ended uncleanly (crash, kill, power loss). False from
+  // older agents, which never send one.
+  bool stopping = 10;
 }
 
 // Proxy is a reverse proxy instance (nginx, Apache, HAProxy, or an observed-only kind).

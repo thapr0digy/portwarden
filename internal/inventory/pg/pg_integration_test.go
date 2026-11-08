@@ -384,3 +384,63 @@ func TestFirewallFingerprint(t *testing.T) {
 		t.Fatalf("X, \"\", Y: %+v", hv)
 	}
 }
+
+// Migration 0006: a host row has the identity columns with their defaults; heartbeats,
+// snapshots and host.changed set them (cleaned); the stop marker sets agent_stopped_at
+// and the next message of a running agent clears it.
+func TestAgentIdentity(t *testing.T) {
+	s := open(t)
+	c := &inventory.Consumer{Store: s}
+	ctx := context.Background()
+	t0 := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
+	var n uint64
+	send := func(kind string, m proto.Message, at time.Time) {
+		t.Helper()
+		n++
+		b, _ := proto.Marshal(m)
+		if err := c.Handle(ctx, "asm."+h1+"."+kind, b, inventory.Meta{StreamSeq: 3000 + n, StreamTime: at}); err != nil {
+			t.Fatalf("%s: %v", kind, err)
+		}
+	}
+	host := func() inventory.HostView {
+		t.Helper()
+		hv, ok, err := s.Host(ctx, h1)
+		if err != nil || !ok {
+			t.Fatalf("host %v %v", ok, err)
+		}
+		return hv
+	}
+	hash := strings.Repeat("e", 64)
+	hi := &asmv1.HostInfo{Cloud: "aws", AgentVersion: "1.4.0", ExeSha256: hash}
+
+	// An older agent: defaults.
+	send("snapshot", &asmv1.Snapshot{HostId: h1, RunId: "01A", Seq: 1, BootId: "b1", RunNumber: 1, Host: &asmv1.HostInfo{Cloud: "aws"}}, t0)
+	if hv := host(); hv.AgentVersion != "" || hv.AgentExeSHA256 != "" || hv.AgentStoppedAt != nil {
+		t.Fatalf("older agent: %+v", hv)
+	}
+	send("snapshot", &asmv1.Snapshot{HostId: h1, RunId: "01B", Seq: 1, BootId: "b1", RunNumber: 2, Host: hi}, t0.Add(time.Minute))
+	if hv := host(); hv.AgentVersion != "1.4.0" || hv.AgentExeSHA256 != hash {
+		t.Fatalf("snapshot identity: %+v", hv)
+	}
+	// Hostile values from a heartbeat: cut and dropped, never an error.
+	send("heartbeat", &asmv1.Heartbeat{HostId: h1, RunId: "01B", Seq: 2, BootId: "b1", RunNumber: 2,
+		AgentVersion: strings.Repeat("x", 4096) + "\x00", ExeSha256: "NOT-A-HASH"}, t0.Add(2*time.Minute))
+	if hv := host(); len(hv.AgentVersion) != inventory.MaxAgentVersionBytes || hv.AgentExeSHA256 != "" {
+		t.Fatalf("hostile heartbeat stored %d bytes, hash %q", len(hv.AgentVersion), hv.AgentExeSHA256)
+	}
+	send("heartbeat", &asmv1.Heartbeat{HostId: h1, RunId: "01B", Seq: 3, BootId: "b1", RunNumber: 2, AgentVersion: "1.4.0", ExeSha256: hash}, t0.Add(3*time.Minute))
+	stopAt := t0.Add(4 * time.Minute)
+	send("host.changed", &asmv1.HostEvent{HostId: h1, RunId: "01B", Seq: 4, BootId: "b1", RunNumber: 2, Host: hi, Previous: hi, Stopping: true}, stopAt)
+	if hv := host(); hv.AgentStoppedAt == nil || !hv.AgentStoppedAt.Equal(stopAt) || hv.AgentVersion != "1.4.0" || hv.Cloud != "aws" {
+		t.Fatalf("after the stop marker: %+v", hv)
+	}
+	send("heartbeat", &asmv1.Heartbeat{HostId: h1, RunId: "01C", Seq: 1, BootId: "b1", RunNumber: 3, AgentVersion: "1.5.0", ExeSha256: hash}, t0.Add(5*time.Minute))
+	if hv := host(); hv.AgentStoppedAt != nil || hv.AgentVersion != "1.5.0" {
+		t.Fatalf("a running agent must clear agent_stopped_at: %+v", hv)
+	}
+	var cols int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'hosts'
+		AND column_name IN ('agent_version', 'agent_exe_sha256', 'agent_stopped_at')`).Scan(&cols); err != nil || cols != 3 {
+		t.Fatalf("identity columns: %d %v", cols, err)
+	}
+}

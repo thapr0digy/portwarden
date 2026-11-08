@@ -30,6 +30,7 @@ func clampLimit(n int) int {
 const hostColumns = `h.host_id, h.cloud, h.instance_id, h.region, h.cloud_resource, h.public_ips, h.conditions, h.run_id, h.last_seq,
 	h.needs_resync, h.last_snapshot_at, h.last_heartbeat, h.ringbuf_drops, h.queue_drops, h.silent_since, h.cloud_status,
 	h.cloud_checked_at, h.first_seen, h.updated_at, h.firewall_fingerprint, h.firewall_changed_at, h.tamper, h.tamper_at,
+	h.agent_version, h.agent_exe_sha256, h.agent_stopped_at,
 	(SELECT count(*) FROM listeners l WHERE l.host_id = h.host_id)`
 
 func scanHost(row pgx.Row) (inventory.HostView, error) {
@@ -39,7 +40,8 @@ func scanHost(row pgx.Row) (inventory.HostView, error) {
 	var n int64
 	err := row.Scan(&v.ID, &v.Cloud, &v.InstanceID, &v.Region, &v.CloudResource, &ips, &conds, &v.RunID, &last, &v.NeedsResync,
 		&v.LastSnapshotAt, &v.LastHeartbeat, &rb, &qd, &v.SilentSince, &v.CloudStatus, &v.CloudCheckedAt,
-		&v.FirstSeen, &v.UpdatedAt, &v.FirewallFingerprint, &v.FirewallChangedAt, &tamper, &v.TamperAt, &n)
+		&v.FirstSeen, &v.UpdatedAt, &v.FirewallFingerprint, &v.FirewallChangedAt, &tamper, &v.TamperAt,
+		&v.AgentVersion, &v.AgentExeSHA256, &v.AgentStoppedAt, &n)
 	v.PublicIPs, v.Conditions = json.RawMessage(ips), json.RawMessage(conds)
 	if tamper != nil {
 		v.Tamper = json.RawMessage(tamper)

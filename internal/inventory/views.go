@@ -41,11 +41,19 @@ type HostView struct {
 	// Tamper is the agent's latest tamper status (a TamperView: raised flags, the checks
 	// that ran, those that could not read their evidence), from its last tamper event or
 	// heartbeat; null until an agent sent one. TamperAt is that message's stream time.
-	Tamper    json.RawMessage `json:"tamper"`
-	TamperAt  *time.Time      `json:"tamper_at"`
-	Listeners int             `json:"listeners"`
-	FirstSeen time.Time       `json:"first_seen"`
-	UpdatedAt time.Time       `json:"updated_at"`
+	Tamper   json.RawMessage `json:"tamper"`
+	TamperAt *time.Time      `json:"tamper_at"`
+	// AgentVersion and AgentExeSHA256 are the agent's identity from its latest heartbeat,
+	// snapshot or host.changed (M11; "" from older agents, and the hash when unread or
+	// malformed). Self-reported by the host: a visibility aid, not attestation.
+	// AgentStoppedAt is the stream time of the run's clean-shutdown marker, null while
+	// the agent runs.
+	AgentVersion   string     `json:"agent_version"`
+	AgentExeSHA256 string     `json:"agent_exe_sha256"`
+	AgentStoppedAt *time.Time `json:"agent_stopped_at"`
+	Listeners      int        `json:"listeners"`
+	FirstSeen      time.Time  `json:"first_seen"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // ListenerView is a listener with its exposure from every source.

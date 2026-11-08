@@ -166,13 +166,13 @@ func TestExitCode(t *testing.T) {
 // newApp builds the app as run does, around an in-memory store.
 func newApp(t *testing.T, store *fakeStore, hook *alerter.Webhook) *app {
 	t.Helper()
-	rules := alerter.Rules{PageOnConfirmed: true, PageOnSilence: true, PageOnTamper: true}
+	rules := alerter.Rules{PageOnConfirmed: true, PageOnSilence: true, PageOnTamper: true, PageOnUncleanRestart: true}
 	if err := rules.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	a := &app{engine: alerter.NewEngine(rules, bus.NewEventID), store: store, live: liveness.New(time.Minute),
 		feed: liveness.NewFeed(time.Minute, time.Now()), hook: hook, maxAttempts: 20,
-		tamperSig: map[string]string{}, noSilence: map[string]bool{}, out: io.Discard,
+		tamperSig: map[string]string{}, noSilence: map[string]bool{}, runSig: map[string]string{}, out: io.Discard,
 		forgotten: alerter.NewForgotten(nil), stream: time.Unix(1700000000, 0)}
 	return a
 }
@@ -203,9 +203,11 @@ func TestHeartbeatAndTamper(t *testing.T) {
 	hb := marshal(t, &asmv1.Heartbeat{HostId: host, RunId: "r1", At: timestamppb.Now()})
 	subj := bus.Subject(host, bus.KindHeartbeat)
 
-	// A replayed heartbeat seeds liveness only.
-	if err := a.heartbeat(ctx, fakeMsg{subject: subj, data: hb, seq: 5}); err != nil || store.txs != 0 {
-		t.Fatalf("replay: %v, %d transactions", err, store.txs)
+	// A replayed heartbeat seeds liveness and records the host's run (M11, one
+	// transaction: a restart while the alerter was down is judged from the replay); it
+	// pages nothing.
+	if err := a.heartbeat(ctx, fakeMsg{subject: subj, data: hb, seq: 5}); err != nil || store.txs != 1 || store.runs[host].ID != "r1" {
+		t.Fatalf("replay: %v, %d transactions, run %+v", err, store.txs, store.runs[host])
 	}
 	// A live one checks for an outstanding silence page once, then no more.
 	for range 2 {
@@ -213,7 +215,7 @@ func TestHeartbeatAndTamper(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if store.txs != 1 || !a.noSilence[host] {
+	if store.txs != 2 || !a.noSilence[host] {
 		t.Fatalf("live heartbeats: %d transactions, quiet %v", store.txs, a.noSilence[host])
 	}
 	// Forged, undecodable and foreign messages.
@@ -240,7 +242,7 @@ func TestHeartbeatAndTamper(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if k := store.kinds(); len(k) != 1 || k[0] != alerter.KindTamper || store.txs != 2 {
+	if k := store.kinds(); len(k) != 1 || k[0] != alerter.KindTamper || store.txs != 3 {
 		t.Fatalf("tamper: pages %v, %d transactions", k, store.txs)
 	}
 	// An empty tamper event clears it.
@@ -252,6 +254,46 @@ func TestHeartbeatAndTamper(t *testing.T) {
 	delete(a.noSilence, host)
 	if err := a.heartbeat(ctx, fakeMsg{subject: subj, data: hb, seq: 15}); err == nil || svc.IsPermanent(err) {
 		t.Fatalf("outage: %v", err)
+	}
+}
+
+// M11: a stop marker (host.changed with stopping) before the next run's heartbeat is a
+// clean restart; a new run without one raises one informational alert; heartbeats of a
+// stored run touch no database.
+func TestCleanAndUncleanRestart(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	a := newApp(t, store, nil)
+	subj := bus.Subject(host, bus.KindHeartbeat)
+	beat := func(run string, n uint64, seq uint64) {
+		t.Helper()
+		b := marshal(t, &asmv1.Heartbeat{HostId: host, RunId: run, BootId: "b1", RunNumber: n, AgentVersion: "1.4.0", At: timestamppb.Now()})
+		if err := a.heartbeat(ctx, fakeMsg{subject: subj, data: b, seq: seq}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	beat("r1", 1, 1)
+	txs := store.txs
+	beat("r1", 1, 2)
+	if store.txs != txs {
+		t.Fatalf("a heartbeat of the stored run used %d transactions", store.txs-txs)
+	}
+	hi := &asmv1.HostInfo{AgentVersion: "1.4.0"}
+	stop := marshal(t, &asmv1.HostEvent{HostId: host, RunId: "r1", BootId: "b1", RunNumber: 1, Host: hi, Previous: hi, Stopping: true})
+	if err := a.heartbeat(ctx, fakeMsg{subject: bus.Subject(host, bus.KindHostChanged), data: stop, seq: 3}); err != nil {
+		t.Fatal(err)
+	}
+	beat("r2", 2, 4)
+	if k := store.kinds(); len(k) != 0 {
+		t.Fatalf("clean restart paged %v", k)
+	}
+	beat("r3", 3, 5)
+	if k := store.kinds(); len(k) != 1 || k[0] != alerter.KindAgentRestartedUnclean {
+		t.Fatalf("unclean restart: pages %v", k)
+	}
+	forged := marshal(t, &asmv1.HostEvent{HostId: "other", RunId: "r3", Stopping: true})
+	if err := a.heartbeat(ctx, fakeMsg{subject: bus.Subject(host, bus.KindHostChanged), data: forged, seq: 6}); !svc.IsPermanent(err) {
+		t.Fatalf("forged stop marker: %v (want permanent)", err)
 	}
 }
 

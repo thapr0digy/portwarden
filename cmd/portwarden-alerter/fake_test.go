@@ -22,6 +22,7 @@ type fakeStore struct {
 	paged      map[string]time.Time
 	probes     map[string]string
 	marks      map[string]alerter.ForgetMark
+	runs       map[string]alerter.Run
 	outbox     []*fakePage
 	closed     bool
 	afterClose int
@@ -42,7 +43,8 @@ type fakePage struct {
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{paged: map[string]time.Time{}, probes: map[string]string{}, marks: map[string]alerter.ForgetMark{}}
+	return &fakeStore{paged: map[string]time.Time{}, probes: map[string]string{}, marks: map[string]alerter.ForgetMark{},
+		runs: map[string]alerter.Run{}}
 }
 
 func (f *fakeStore) touch() {
@@ -247,4 +249,19 @@ func (m fakeMsg) Metadata() (*jetstream.MsgMetadata, error) {
 		return nil, jetstream.ErrNotJSMessage
 	}
 	return &jetstream.MsgMetadata{Sequence: jetstream.SequencePair{Stream: m.seq}}, nil
+}
+
+func (t memTx) Run(_ context.Context, host string) (alerter.Run, bool, error) {
+	r, ok := t.f.runs[host]
+	return r, ok, nil
+}
+
+func (t memTx) SetRun(_ context.Context, host string, r alerter.Run) error {
+	t.f.runs[host] = r
+	return nil
+}
+
+func (t memTx) ClearRun(_ context.Context, host string) error {
+	delete(t.f.runs, host)
+	return nil
 }

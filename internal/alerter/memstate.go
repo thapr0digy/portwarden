@@ -12,12 +12,14 @@ type MemState struct {
 	Paged     map[string]time.Time
 	Probes    map[string]string
 	Forgotten map[string]ForgetMark
+	Runs      map[string]Run
 	Queue     []*Alert
 }
 
 // NewMemState returns an empty state.
 func NewMemState() *MemState {
-	return &MemState{Paged: map[string]time.Time{}, Probes: map[string]string{}, Forgotten: map[string]ForgetMark{}}
+	return &MemState{Paged: map[string]time.Time{}, Probes: map[string]string{}, Forgotten: map[string]ForgetMark{},
+		Runs: map[string]Run{}}
 }
 func (m *MemState) ClearProbes(_ context.Context, prefix string) error {
 	for k := range m.Probes {
@@ -77,5 +79,17 @@ func (m *MemState) SetProbeResult(_ context.Context, key, result string, _ time.
 }
 func (m *MemState) Enqueue(_ context.Context, a *Alert) error {
 	m.Queue = append(m.Queue, a)
+	return nil
+}
+func (m *MemState) Run(_ context.Context, host string) (Run, bool, error) {
+	r, ok := m.Runs[host]
+	return r, ok, nil
+}
+func (m *MemState) SetRun(_ context.Context, host string, r Run) error {
+	m.Runs[host] = r
+	return nil
+}
+func (m *MemState) ClearRun(_ context.Context, host string) error {
+	delete(m.Runs, host)
 	return nil
 }

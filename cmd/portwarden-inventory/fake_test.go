@@ -19,6 +19,7 @@ type fakeStore struct {
 	pings       int
 	closed      bool
 	afterClose  int // calls made after Close (a worker outliving the store)
+	dsn         string
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{cursors: map[string]inventory.Cursor{}} }
@@ -140,13 +141,19 @@ func (f *fakeStore) Close() {
 }
 
 // opener returns an openStoreFunc that hands out s and records the DSN it was given.
-func opener(s *fakeStore, dsn *string) openStoreFunc {
+func opener(s *fakeStore) openStoreFunc {
 	return func(_ context.Context, d string) (invStore, error) {
-		if dsn != nil {
-			*dsn = d
-		}
+		s.mu.Lock()
+		s.dsn = d
+		s.mu.Unlock()
 		return s, nil
 	}
+}
+
+func (f *fakeStore) openedWith() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dsn
 }
 
 func failingOpener(context.Context, string) (invStore, error) {

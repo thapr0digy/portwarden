@@ -181,7 +181,9 @@ func (t memTx) PagedKeys(_ context.Context, prefix string) ([]string, error) {
 	return out, nil
 }
 
-func (t memTx) ProbeResult(_ context.Context, key string) (string, error) { return t.f.probes[key], nil }
+func (t memTx) ProbeResult(_ context.Context, key string) (string, error) {
+	return t.f.probes[key], nil
+}
 
 func (t memTx) SetProbeResult(_ context.Context, key, result string, _ time.Time) error {
 	t.f.probes[key] = result

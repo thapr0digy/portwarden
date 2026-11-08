@@ -31,7 +31,7 @@ import (
 // PW_TEST_ARGS (separated by newlines).
 func TestMain(m *testing.M) {
 	if os.Getenv("PW_TEST_HELPER") == "1" {
-		openStore = opener(newFakeStore(), nil)
+		openStore = opener(newFakeStore())
 		os.Args = append([]string{os.Args[0]}, strings.Split(os.Getenv("PW_TEST_ARGS"), "\n")...)
 		main()
 		return
@@ -209,7 +209,7 @@ func TestRunStartFailures(t *testing.T) {
 		open := c.open
 		store := newFakeStore()
 		if open == nil {
-			open = opener(store, nil)
+			open = opener(store)
 		}
 		if name == "gcp without project" {
 			ts.CreateStream(t)
@@ -276,12 +276,11 @@ func TestRunWiringAndShutdown(t *testing.T) {
 	cfg.API.AdminTokenFile = writeFile(t, "admin", adminTok)
 	cfg.Cloud.GCP = GCPConfig{Enabled: true, Projects: []string{"acme-prod"}}
 	store := newFakeStore()
-	var dsn string
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, configFile(t, cfg), opener(store, &dsn)) }()
+	go func() { done <- run(ctx, configFile(t, cfg), opener(store)) }()
 
 	base := "http://" + addr
 	waitFor(t, "the API", func() bool {
@@ -291,7 +290,7 @@ func TestRunWiringAndShutdown(t *testing.T) {
 		}
 		return err == nil
 	})
-	if dsn != fakeDSNEnv {
+	if dsn := store.openedWith(); dsn != fakeDSNEnv {
 		t.Fatalf("store opened with %q", dsn)
 	}
 	// The constant-time token check, through the real wiring.
@@ -354,7 +353,7 @@ func TestRunShutdownWhileWaitingForStream(t *testing.T) {
 	store := newFakeStore()
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	if err := run(ctx, configFile(t, goodConfig(t, ts, freeAddr(t))), opener(store, nil)); !errors.Is(err, context.DeadlineExceeded) {
+	if err := run(ctx, configFile(t, goodConfig(t, ts, freeAddr(t))), opener(store)); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("%v", err)
 	}
 	if _, _, _, closed, _ := store.snapshot(); !closed {

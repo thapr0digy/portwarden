@@ -14,8 +14,13 @@ import (
 // one note; nothing grows past them, however hostile the config.
 const (
 	// MaxFiles bounds the files a load tries to read (failures count too).
-	MaxFiles      = 4096
-	MaxTotalBytes = 16 << 20
+	MaxFiles = 4096
+	// MaxTotalBytes bounds the bytes read. A load's heap peaks at up to 27 times the bytes
+	// it reads (HAProxy's routes, nginx's directive tree), and any container's image
+	// controls its proxy config: 2 MiB keeps one load near 55 MiB, well inside the agent's
+	// 256 MiB Kubernetes limit (16 MiB took 276 MiB). Stock configs are 10 to 60 KiB, and
+	// only the first 500 routes are published (proxy.MaxRoutes).
+	MaxTotalBytes = 2 << 20
 	MaxDepth      = 32
 	// MaxOps bounds the filesystem operations of one load: every read, stat and
 	// directory entry looked at.

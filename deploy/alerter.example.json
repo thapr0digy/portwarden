@@ -11,6 +11,7 @@
     "page_on_silence": true,
     "page_on_tamper": true,
     "tamper_ignore": [],
+    "page_on_unclean_restart": true,
     "silent_after": "90s",
     "dedupe_window": "1h",
     "ignore": [

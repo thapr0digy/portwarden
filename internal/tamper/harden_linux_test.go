@@ -12,9 +12,9 @@ import (
 	"testing"
 )
 
-// hardenChildEnv makes the test binary run hardenedChild instead of the tests: Harden is
-// one-way for a process, so each assertion runs in a fresh child and the test binary
-// itself stays dumpable.
+// hardenChildEnv makes the test binary run hardenedChild instead of the tests: Harden
+// changes the whole process, so each assertion runs in a fresh child and the test binary
+// itself stays dumpable (the control test needs that).
 const hardenChildEnv = "PORTWARDEN_TAMPER_HARDEN_CHILD"
 
 func TestMain(m *testing.M) {

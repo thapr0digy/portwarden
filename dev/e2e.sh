@@ -986,6 +986,13 @@ sudo tee "$UNIT_DROPIN_DIR/e2e.conf" >/dev/null <<UNIT
 [Service]
 Environment="PORTWARDEN_AGENT_ARGS=--nats-url $nats_url --nats-nkey $UNIT_CRED_DIR/host.nk --heartbeat 1s --recheck ${RECHECK_S}s --tamper-interval 1s --spool-dir $UNIT_SPOOL"
 UNIT
+# The run counter lives in the spool directory: carry the e2e agent's over, as one shared
+# spool would, so the inventory orders the unit's run after it instead of skipping its
+# messages as an earlier run's.
+sudo install -d -m 0700 -o portwarden-agent -g portwarden-agent /var/lib/portwarden "$UNIT_SPOOL"
+if sudo test -f "$work/spool/run-number"; then
+	sudo install -m 0600 -o portwarden-agent -g portwarden-agent "$work/spool/run-number" "$UNIT_SPOOL/run-number"
+fi
 sudo systemctl daemon-reload
 sudo systemctl start portwarden-agent
 unit_pid() { systemctl show -p MainPID --value portwarden-agent; }
@@ -1085,9 +1092,11 @@ wait_for "a tamper page for ptraced" 15 has_tamper_page "ptraced:self"
 echo "tamper ptrace: $(grep -m1 'TAMPER raised=ptraced' "$work/watch.log" | cut -d' ' -f4-)"
 # The tamper events above carry the hardened agent's full status: every check ran, the
 # dumpable one included, and none is degraded to unknown.
-hardened_status() { api "/v1/hosts/$host_id" | jq -e '.tamper | (.checks | index("dumpable")) != null and .unknown == []' >/dev/null; }
-wait_for "the hardened agent's status in the inventory (dumpable checked, nothing unknown)" 15 hardened_status
-echo "hardening: tamper checks $(api "/v1/hosts/$host_id" | jq -c .tamper.checks), unknown $(api "/v1/hosts/$host_id" | jq -c .tamper.unknown)"
+hardened_status() { api "/v1/hosts/$host_id" | jq -e '.tamper.checks | index("dumpable") != null' >/dev/null; }
+wait_for "the hardened agent's status in the inventory (with the dumpable check)" 15 hardened_status
+hardened=$(api "/v1/hosts/$host_id" | jq -c '.tamper | {checks, unknown}')
+jq -e '.unknown == []' <<<"$hardened" >/dev/null || fail "a tamper check of the hardened agent is degraded: $hardened"
+echo "hardening: tamper checks $(jq -c .checks <<<"$hardened"), unknown $(jq -c .unknown <<<"$hardened")"
 
 log "tamper: unit file edited"
 unit_file=/etc/systemd/system/portwarden-agent.service

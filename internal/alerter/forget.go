@@ -15,12 +15,17 @@ type ForgetMark struct {
 	Back   bool
 }
 
-// Forget drops a forgotten host's state (M8): its silence, tamper and listener dedupe
-// marks and its listeners' probe results, and records the mark, in the caller's
-// transaction. Afterwards the host is new: a heartbeat pages no recovery, and once it has
+// Forget drops a forgotten host's state (M8): its silence, tamper, restart and listener
+// dedupe marks, its agent run (M11) and its listeners' probe results, and records the
+// mark, in the caller's transaction. Afterwards the host is new: a heartbeat pages no recovery, and once it has
 // come back a later silence pages again. Pages already in the outbox are still delivered.
 func (e *Engine) Forget(ctx context.Context, st State, host string, mark ForgetMark) error {
-	if err := st.ClearPaged(ctx, "silent:"+host); err != nil {
+	for _, key := range []string{"silent:" + host, RestartPrefix(host)} {
+		if err := st.ClearPaged(ctx, key); err != nil {
+			return err
+		}
+	}
+	if err := st.ClearRun(ctx, host); err != nil {
 		return err
 	}
 	for _, prefix := range []string{TamperPrefix(host), "listener:" + host + "/"} {

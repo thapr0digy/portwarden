@@ -286,6 +286,9 @@ func (c *Consumer) handleAgent(ctx context.Context, m Meta, msg agentMsg) error 
 	if err := c.Store.Apply(ctx, Event{Meta: m, Cursor: &next, Msg: msg}); err != nil {
 		return err
 	}
+	if ev, ok := msg.(*asmv1.HostEvent); ok && ev.GetStopping() {
+		return nil // the clean-shutdown marker: the host block did not change
+	}
 	c.changed(m.Host, m.Kind, bus.OriginAgent)
 	if ev, ok := msg.(*asmv1.ExposureEvent); ok {
 		c.exposed(m.Host, ev.GetListener())

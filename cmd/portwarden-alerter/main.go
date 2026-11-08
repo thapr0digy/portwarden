@@ -13,6 +13,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -63,33 +64,82 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	path := flag.String("config", "/etc/portwarden/alerter.json", "config file (JSON)")
 	flag.Parse()
-	if err := run(*path); err != nil && !errors.Is(err, context.Canceled) {
-		slog.Error("portwarden-alerter", "err", err)
-		os.Exit(1)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	err := run(ctx, *path, openStore)
+	stop()
+	os.Exit(exitCode(err))
+}
+
+// exitCode is the process's exit status for run's result: 0 for a clean stop (nil, or the
+// signal's context.Canceled), else 1 after logging the error.
+func exitCode(err error) int {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return 0
 	}
+	slog.Error("portwarden-alerter", "err", err)
+	return 1
 }
 
 func orTrue(b *bool) bool { return b == nil || *b }
 
-func run(path string) error {
+// stateStore is what the alerter uses of its PostgreSQL state; tests pass an in-memory
+// one.
+type stateStore interface {
+	InTx(ctx context.Context, f func(alerter.State) error) error
+	Forgotten(ctx context.Context) (map[string]alerter.ForgetMark, error)
+	PruneForgotten(ctx context.Context, stream time.Time, lastSeq uint64) (int64, error)
+	Due(ctx context.Context, now time.Time, limit int) ([]pgstate.Page, error)
+	Delivered(ctx context.Context, id string, at time.Time) error
+	Failed(ctx context.Context, id string, next time.Time, giveUp bool, why string) error
+	Prune(ctx context.Context, now time.Time, window time.Duration) error
+	Close()
+}
+
+var _ stateStore = (*pgstate.Store)(nil)
+
+// openStoreFunc opens the state database at dsn.
+type openStoreFunc func(ctx context.Context, dsn string) (stateStore, error)
+
+// openStore is the store main uses (tests running main in a child process replace it).
+var openStore openStoreFunc = openPG
+
+func openPG(ctx context.Context, dsn string) (stateStore, error) {
+	s, err := pgstate.Open(ctx, dsn)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// settings is the config after loading and checking, with its secrets read.
+type settings struct {
+	cfg   Config
+	rules alerter.Rules
+	hook  *alerter.Webhook
+	dsn   string
+}
+
+// load reads and checks the config and reads the webhook secret and the DSN, in this
+// order (the first problem is the one reported).
+func load(path string) (settings, error) {
 	var cfg Config
 	if err := svc.Load(path, &cfg); err != nil {
-		return err
+		return settings{}, err
 	}
 	rules := alerter.Rules{PageLevel: cfg.Rules.PageLevel, PageOnConfirmed: orTrue(cfg.Rules.PageOnConfirmed),
 		PageOnSilence: orTrue(cfg.Rules.PageOnSilence), DedupeWindow: cfg.Rules.DedupeWindow.D(time.Hour), Ignore: cfg.Rules.Ignore,
 		PageOnTamper: orTrue(cfg.Rules.PageOnTamper), TamperIgnore: cfg.Rules.TamperIgnore}
 	if err := rules.Validate(); err != nil {
-		return err
+		return settings{}, err
 	}
 	var hook *alerter.Webhook
 	if cfg.Webhook.URL != "" {
 		if err := alerter.CheckURL(cfg.Webhook.URL, cfg.Webhook.AllowInsecure); err != nil {
-			return err
+			return settings{}, err
 		}
 		secret, err := svc.Secret("PORTWARDEN_ALERTER_WEBHOOK_SECRET", cfg.Webhook.SecretFile)
 		if err != nil {
-			return fmt.Errorf("webhook secret: %w", err)
+			return settings{}, fmt.Errorf("webhook secret: %w", err)
 		}
 		hook = alerter.NewWebhook(cfg.Webhook.URL, []byte(secret), cfg.Webhook.Timeout.D(5*time.Second), 1)
 	} else {
@@ -97,12 +147,22 @@ func run(path string) error {
 	}
 	dsn, err := svc.Secret("PORTWARDEN_ALERTER_DSN", cfg.PostgresDSNFile)
 	if err != nil {
-		return fmt.Errorf("postgres dsn: %w", err)
+		return settings{}, fmt.Errorf("postgres dsn: %w", err)
 	}
+	return settings{cfg: cfg, rules: rules, hook: hook, dsn: dsn}, nil
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+// run loads the config, opens the store with openStore and consumes the stream until ctx
+// ends (then it returns ctx's error) or the heartbeat consumer stops.
+func run(ctx context.Context, path string, openStore openStoreFunc) error {
+	st, err := load(path)
+	if err != nil {
+		return err
+	}
+	cfg, rules, hook := st.cfg, st.rules, st.hook
+	ctx, stop := context.WithCancel(ctx)
 	defer stop()
-	store, err := pgstate.Open(ctx, dsn)
+	store, err := openStore(ctx, st.dsn)
 	if err != nil {
 		return err
 	}
@@ -111,7 +171,7 @@ func run(path string) error {
 	silentAfter := cfg.Rules.SilentAfter.D(90 * time.Second)
 	a := &app{engine: alerter.NewEngine(rules, bus.NewEventID), store: store, live: liveness.New(silentAfter),
 		feed: liveness.NewFeed(silentAfter, time.Now()), hook: hook, maxAttempts: cfg.Webhook.MaxAttempts,
-		tamperSig: map[string]string{}, noSilence: map[string]bool{}}
+		tamperSig: map[string]string{}, noSilence: map[string]bool{}, out: os.Stdout}
 	if a.maxAttempts <= 0 {
 		a.maxAttempts = 20
 	}
@@ -183,10 +243,11 @@ func heartbeatConsumer(ctx context.Context, js jetstream.JetStream, stream jetst
 
 type app struct {
 	engine      *alerter.Engine
-	store       *pgstate.Store
+	store       stateStore
 	hook        *alerter.Webhook
 	maxAttempts int
 	replayUpTo  uint64
+	out         io.Writer // where deliver prints each page (stdout)
 
 	mu   sync.Mutex // guards live, feed, tamperSig and noSilence (all on the alerter's own clock)
 	live *liveness.Tracker
@@ -516,7 +577,7 @@ func (a *app) exposure(ctx context.Context, m jetstream.Msg) error {
 // webhook with retries (backoff 1 s doubling to 5 min, at most maxAttempts, across
 // restarts); a permanent webhook error gives up at once.
 func (a *app) deliver(ctx context.Context) {
-	enc := json.NewEncoder(os.Stdout)
+	enc := json.NewEncoder(a.out)
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	printed := map[string]bool{}

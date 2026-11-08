@@ -62,8 +62,13 @@ type Config struct {
 	// NextRunNumber); stamped on every message.
 	BootID    string
 	RunNumber uint64
-	SpoolDir  string
-	SpoolMax  int64
+	// AgentVersion and ExeSHA256 are the agent's identity (version.Version and the hex
+	// SHA-256 of its executable, "" when unread), stamped on every heartbeat and host
+	// block. Fixed for the run.
+	AgentVersion string
+	ExeSHA256    string
+	SpoolDir     string
+	SpoolMax     int64
 	// LocalAddr, when set, is called with the local address of every TCP connection
 	// made to NATS (the agent's own view of its outbound address). It must not block.
 	LocalAddr func(netip.Addr)
@@ -80,9 +85,12 @@ type Publisher struct {
 	runID     string
 	bootID    string
 	runNumber uint64
-	nc        *nats.Conn
-	js        jetstream.JetStream
-	q         *spool.Spool
+	// agentVersion and exeSHA256 are Config.AgentVersion and Config.ExeSHA256.
+	agentVersion string
+	exeSHA256    string
+	nc           *nats.Conn
+	js           jetstream.JetStream
+	q            *spool.Spool
 
 	mu       sync.Mutex // orders seq assignment with q.Push
 	seq      uint64
@@ -157,6 +165,7 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 		proxies: make(map[string]model.ProxyRoutes),
 		runID:   ulid.Make().String(),
 		bootID:  cfg.BootID, runNumber: cfg.RunNumber,
+		agentVersion: cfg.AgentVersion, exeSHA256: cfg.ExeSHA256,
 		onDenied: cfg.OnDenied,
 		q:        q,
 		wake:     make(chan struct{}, 1),
@@ -367,7 +376,27 @@ func (p *Publisher) SetHost(h model.HostInfo) {
 		Seq:        seq,
 		ObservedAt: timestamppb.Now(),
 		Host:       p.hostProtoLocked(),
-		Previous:   hostToProto(prev),
+		Previous:   p.withIdentity(hostToProto(prev)),
+	})
+}
+
+// Stopping enqueues the run's clean-shutdown marker: a host.changed with stopping set
+// and host == previous. The agent calls it on SIGTERM/SIGINT, before Close drains the
+// spool; whatever Close cannot send goes out first on the next run, still ahead of that
+// run's messages. Never called on an error exit, which consumers see as unclean.
+func (p *Publisher) Stopping() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	id, seq := p.nextIDLocked()
+	p.enqueueLocked("host.changed", id, seq, &asmv1.HostEvent{
+		EventId: id,
+		HostId:  p.hostID,
+		RunId:   p.runID, BootId: p.bootID, RunNumber: p.runNumber,
+		Seq:        seq,
+		ObservedAt: timestamppb.Now(),
+		Host:       p.hostProtoLocked(),
+		Previous:   p.hostProtoLocked(),
+		Stopping:   true,
 	})
 }
 
@@ -385,8 +414,14 @@ func (p *Publisher) hostProtoLocked() *asmv1.HostInfo {
 	if !p.hostSet {
 		return nil
 	}
-	h := hostToProto(p.host)
+	h := p.withIdentity(hostToProto(p.host))
 	h.FirewallFingerprint = p.firewallLocked()
+	return h
+}
+
+// withIdentity stamps the agent's version and executable hash on a host block.
+func (p *Publisher) withIdentity(h *asmv1.HostInfo) *asmv1.HostInfo {
+	h.AgentVersion, h.ExeSha256 = p.agentVersion, p.exeSHA256
 	return h
 }
 
@@ -417,6 +452,8 @@ func (p *Publisher) Heartbeat(ringbufDrops uint64) {
 		Tamper:       p.tamperLocked(),
 
 		FirewallFingerprint: p.firewallLocked(),
+		AgentVersion:        p.agentVersion,
+		ExeSha256:           p.exeSHA256,
 	})
 }
 

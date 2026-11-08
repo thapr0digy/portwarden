@@ -17,7 +17,9 @@ import (
 // executable, its systemd unit files, extra files, and the ring buffer's drop counter.
 // A check whose baseline cannot be taken yet is retried every pass (reported unknown
 // meanwhile), never dropped. extra (--tamper-files) may be nil.
-func newTamperMonitor(extra *tamper.FileSet, dropRate float64, pr *probes.Probes, proxyConns *probes.ProxyConns, log *slog.Logger) *tamper.Monitor {
+// self is the executable path and hash taken at start (selfIdentity); when the hash is
+// empty the check takes its own baseline, retrying every pass.
+func newTamperMonitor(self exeIdentity, extra *tamper.FileSet, dropRate float64, pr *probes.Probes, proxyConns *probes.ProxyConns, log *slog.Logger) *tamper.Monitor {
 	checks := []tamper.Check{tamper.NewAttachments("probes", pr.Attachments)}
 	if proxyConns != nil {
 		checks = append(checks, tamper.NewAttachments("proxy_probes", proxyConns.Attachments))
@@ -27,6 +29,11 @@ func newTamperMonitor(extra *tamper.FileSet, dropRate float64, pr *probes.Probes
 	// that apart from tampering (ruling R-b).
 	pkgs := tamper.NewDpkg("portwarden-agent")
 	checks = append(checks, &tamper.Lazy{CheckName: "self_exe", Init: func() (tamper.Check, error) {
+		if self.hash != "" {
+			exe := tamper.NewSelfExe(self.path, self.hash)
+			exe.Packages = pkgs
+			return exe, nil
+		}
 		exe, err := tamper.SelfExeCheck()
 		if err != nil {
 			return nil, err

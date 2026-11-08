@@ -40,6 +40,10 @@ contents:
     type: config|noreplace
     file_info:
       mode: 0644
+  - src: deploy/portwarden-agent-iptables-legacy.example.conf
+    dst: /usr/share/doc/portwarden-agent/examples/iptables-legacy.conf
+    file_info:
+      mode: 0644
   - src: deploy/packaging/copyright
     dst: /usr/share/doc/portwarden-agent/copyright
     file_info:

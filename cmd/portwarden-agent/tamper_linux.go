@@ -14,15 +14,16 @@ import (
 )
 
 // newTamperMonitor builds the agent's self-checks (design §9): its links, ptrace, its
-// executable, its systemd unit files, extra files, and the ring buffer's drop counter.
+// executable, its systemd unit files, extra files, the ring buffer's drop counter, and
+// that it is still not dumpable (hardenErr is why clearing that at start failed, if it did).
 // A check whose baseline cannot be taken yet is retried every pass (reported unknown
 // meanwhile), never dropped. extra (--tamper-files) may be nil.
-func newTamperMonitor(extra *tamper.FileSet, dropRate float64, pr *probes.Probes, proxyConns *probes.ProxyConns, log *slog.Logger) *tamper.Monitor {
+func newTamperMonitor(extra *tamper.FileSet, dropRate float64, pr *probes.Probes, proxyConns *probes.ProxyConns, hardenErr error, log *slog.Logger) *tamper.Monitor {
 	checks := []tamper.Check{tamper.NewAttachments("probes", pr.Attachments)}
 	if proxyConns != nil {
 		checks = append(checks, tamper.NewAttachments("proxy_probes", proxyConns.Attachments))
 	}
-	checks = append(checks, tamper.SelfTracer())
+	checks = append(checks, tamper.SelfTracer(), tamper.SelfDumpable(hardenErr))
 	// The package upgrade replaces the executable and unit file; dpkg's records tell
 	// that apart from tampering (ruling R-b).
 	pkgs := tamper.NewDpkg("portwarden-agent")

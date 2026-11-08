@@ -494,3 +494,31 @@ func tracerPid(path string) (int, error) {
 	}
 	return 0, fmt.Errorf("%s has no TracerPid line", path)
 }
+
+// Dumpable checks that the agent is still not dumpable (it clears the flag at start, so
+// its memory and /proc files are closed to its own user). A dumpable agent is reported as
+// unknown, never as a flag: the hardening is degraded, and every pass says so.
+type Dumpable struct {
+	// Get returns the process's dumpable value (PR_GET_DUMPABLE; 0 is hardened).
+	Get func() (int, error)
+	// StartErr is why clearing the flag at start failed (nil when it succeeded).
+	StartErr error
+}
+
+// Name implements Check.
+func (*Dumpable) Name() string { return "dumpable" }
+
+// Run implements Check.
+func (d *Dumpable) Run() ([]Flag, error) {
+	v, err := d.Get()
+	if err != nil {
+		return nil, fmt.Errorf("read the dumpable flag: %w", err)
+	}
+	if v == 0 {
+		return nil, nil
+	}
+	if d.StartErr != nil {
+		return nil, fmt.Errorf("the agent is dumpable (%d): clearing it at start failed: %w", v, d.StartErr)
+	}
+	return nil, fmt.Errorf("the agent is dumpable again (%d) though it was cleared at start", v)
+}

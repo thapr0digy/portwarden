@@ -260,42 +260,99 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	path := flag.String("config", "/etc/portwarden/inventory.json", "config file (JSON)")
 	flag.Parse()
-	if err := run(*path); err != nil && !errors.Is(err, context.Canceled) {
-		slog.Error("portwarden-inventory", "err", err)
-		os.Exit(1)
-	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	err := run(ctx, *path, openStore)
+	stop()
+	os.Exit(exitCode(err))
 }
 
-func run(path string) error {
+// exitCode is the process's exit status for run's result: 0 for a clean stop (nil, or the
+// signal's context.Canceled), else 1 after logging the error.
+func exitCode(err error) int {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return 0
+	}
+	slog.Error("portwarden-inventory", "err", err)
+	return 1
+}
+
+// invStore is what run uses of the PostgreSQL store; tests pass an in-memory one.
+type invStore interface {
+	inventory.Store
+	inventory.Reader
+	inventory.CloudState
+	inventory.ProbeState
+	inventory.Pruner
+	Quarantine(ctx context.Context, streamSeq uint64, subject, why string, data []byte) error
+	Close()
+}
+
+var _ invStore = (*pg.Store)(nil)
+
+// openStoreFunc opens the state database at dsn.
+type openStoreFunc func(ctx context.Context, dsn string) (invStore, error)
+
+// openStore is the store main uses (tests running main in a child process replace it).
+var openStore openStoreFunc = openPG
+
+func openPG(ctx context.Context, dsn string) (invStore, error) {
+	s, err := pg.Open(ctx, dsn)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// settings is the config after loading and checking, with its secrets read.
+type settings struct {
+	cfg        Config
+	policy     reach.Policy
+	dsn, token string
+}
+
+// load reads and checks the config and reads the DSN and API token, in this order (the
+// first problem is the one reported). The admin token is read later, by run, as before.
+func load(path string) (settings, error) {
 	var cfg Config
 	if err := svc.Load(path, &cfg); err != nil {
-		return err
+		return settings{}, err
 	}
 	if cfg.Listen == "" {
 		cfg.Listen = defaultListen
 	}
 	if err := cfg.Retention.validate(); err != nil {
-		return err
+		return settings{}, err
 	}
 	policy, err := cfg.Cloud.policy()
 	if err != nil {
-		return err
+		return settings{}, err
 	}
 	if err := checkListen(cfg.Listen, cfg.AllowInsecureListen); err != nil {
-		return err
+		return settings{}, err
 	}
 	dsn, err := svc.Secret("PORTWARDEN_INVENTORY_DSN", cfg.PostgresDSNFile)
 	if err != nil {
-		return fmt.Errorf("postgres dsn: %w", err)
+		return settings{}, fmt.Errorf("postgres dsn: %w", err)
 	}
 	token, err := svc.Secret("PORTWARDEN_INVENTORY_TOKEN", cfg.TokenFile)
 	if err != nil {
-		return fmt.Errorf("api token: %w", err)
+		return settings{}, fmt.Errorf("api token: %w", err)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	return settings{cfg: cfg, policy: policy, dsn: dsn, token: token}, nil
+}
+
+// run loads the config, opens the store with openStore, serves the API and consumes the
+// stream until ctx ends (then it returns ctx's error) or the API server fails.
+func run(ctx context.Context, path string, openStore openStoreFunc) error {
+	st, err := load(path)
+	if err != nil {
+		return err
+	}
+	cfg, policy, dsn, token := st.cfg, st.policy, st.dsn, st.token
+	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 
-	store, err := pg.Open(ctx, dsn)
+	store, err := openStore(ctx, dsn)
 	if err != nil {
 		return err
 	}

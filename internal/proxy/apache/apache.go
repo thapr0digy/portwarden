@@ -51,6 +51,9 @@ type vhost struct {
 	addrs  []string
 	names  []string
 	source string
+	// via is the macro use the virtual host was expanded from ("" when written out);
+	// apache2 -S names such a host by the macro and its Use line.
+	via string
 }
 
 func load(fsys conf.FS, o Options) (conf.Result, []vhost) {
@@ -91,7 +94,7 @@ func load(fsys conf.FS, o Options) (conf.Result, []vhost) {
 		if d.name != "virtualhost" || !d.container {
 			continue
 		}
-		v := vhost{source: d.source()}
+		v := vhost{source: d.source(), via: d.via}
 		for _, a := range d.args {
 			v.addrs = append(v.addrs, normVhostAddr(a))
 		}

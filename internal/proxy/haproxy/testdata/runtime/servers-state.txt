@@ -1,0 +1,8 @@
+1
+# be_id be_name srv_id srv_name srv_addr srv_op_state srv_admin_state srv_uweight srv_iweight srv_time_since_last_change srv_check_status srv_check_result srv_check_health srv_check_state srv_agent_state bk_f_forced_id srv_f_forced_id srv_fqdn srv_port srvrecord srv_use_ssl srv_check_port srv_check_addr srv_agent_addr srv_agent_port
+3 app 1 s1 127.0.0.1 0 1 1 1 0 1 0 0 0 0 0 0 - 7001 - 0 0 - - 0
+3 app 2 s2 127.0.0.9 2 0 1 1 0 1 0 2 0 0 0 0 - 7009 - 0 0 - - 0
+3 app 4 web1 127.0.0.1 2 0 1 1 0 1 0 2 0 0 0 0 - 7100 - 0 0 - - 0
+3 app 5 web2 127.0.0.1 2 0 1 1 0 1 0 2 0 0 0 0 - 7100 - 0 0 - - 0
+3 app 6 extra 127.0.0.1 0 1 1 1 0 1 0 0 0 0 0 0 - 7300 - 0 0 - - 0
+

@@ -1,0 +1,18 @@
+*:7580 names=app.example.com,www.app.example.com path="/api/*" proxy "127.0.0.1:9000 [::1]:9001"
+    -> 127.0.0.1:9000 127.0.0.1:9000
+    -> [::1]:9001 [::1]:9001
+    @ 127.0.0.1:2019/config/apps/http/servers/srv0/routes/0/handle/0/routes/0/handle/0/routes/0/handle/0
+*:7580 names=app.example.com,www.app.example.com path="" static "/srv/www" root=/srv/www
+    @ 127.0.0.1:2019/config/apps/http/servers/srv0/routes/0/handle/0/routes/1/handle/0/routes/0/handle/1
+*:7581 names= path="/sock/*" proxy "unix//run/app.sock"
+    -> unix//run/app.sock unix=/run/app.sock
+    @ 127.0.0.1:2019/config/apps/http/servers/srv1/routes/0/handle/0
+*:7581 names= path="" return "308"
+    note: matcher file
+    note: matcher not
+    @ 127.0.0.1:2019/config/apps/http/servers/srv1/routes/1/handle/0
+*:7581 names= path="*.php" fastcgi "unix//run/php/php-fpm.sock"
+    -> unix//run/php/php-fpm.sock unix=/run/php/php-fpm.sock
+    @ 127.0.0.1:2019/config/apps/http/servers/srv1/routes/3/handle/0
+*:7582 names= path="" return "404"
+    @ 127.0.0.1:2019/config/apps/http/servers/srv2/routes/0/handle/0

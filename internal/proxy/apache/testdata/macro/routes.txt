@@ -1,0 +1,20 @@
+*:80 names=a.example,www.a.example path="/" proxy "http://127.0.0.1:7001/"
+    -> 127.0.0.1:7001 127.0.0.1:7001
+    note: from macro Backend (Use at /etc/pw-macro/macros/defs.conf:10) in macro AppHost (Use at /etc/pw-macro/sites-enabled/apps.conf:1)
+    @ /etc/pw-macro/macros/defs.conf:2
+*:80 names=a.example,www.a.example path="/admin" proxy "http://127.0.0.1:7101/"
+    -> 127.0.0.1:7101 127.0.0.1:7101
+    note: from macro Backend (Use at /etc/pw-macro/macros/defs.conf:11) in macro AppHost (Use at /etc/pw-macro/sites-enabled/apps.conf:1)
+    @ /etc/pw-macro/macros/defs.conf:2
+*:80 names=b.example,www.b.example path="/" proxy "http://127.0.0.1:7002/"
+    -> 127.0.0.1:7002 127.0.0.1:7002
+    note: from macro Backend (Use at /etc/pw-macro/macros/defs.conf:10) in macro AppHost (Use at /etc/pw-macro/sites-enabled/apps.conf:2)
+    @ /etc/pw-macro/macros/defs.conf:2
+*:80 names=b.example,www.b.example path="/admin" proxy "http://127.0.0.1:7102/"
+    -> 127.0.0.1:7102 127.0.0.1:7102
+    note: from macro Backend (Use at /etc/pw-macro/macros/defs.conf:11) in macro AppHost (Use at /etc/pw-macro/sites-enabled/apps.conf:2)
+    @ /etc/pw-macro/macros/defs.conf:2
+127.0.0.1:8085 names=internal.local path="/api" proxy "http://127.0.0.1:7200/"
+    -> 127.0.0.1:7200 127.0.0.1:7200
+    note: from macro Backend (Use at /etc/pw-macro/sites-enabled/apps.conf:6)
+    @ /etc/pw-macro/macros/defs.conf:2

@@ -81,9 +81,13 @@ func TestLoaderReadsWhatApacheIncludes(t *testing.T) {
 }
 
 // Every (address, file:line) pair `apache2 -S` lists is a virtual host the loader found,
-// and the other way round.
+// and the other way round. A host from a macro is listed by the macro's name and the
+// line of its Use: `(macro 'name' (defined on line 6 of "defs.conf") used on line 1 of
+// "apps.conf":1)`.
 func TestVirtualHostsMatchApacheS(t *testing.T) {
 	src := regexp.MustCompile(`\((/[^)]+:\d+)\)`)
+	macroSrc := regexp.MustCompile(`\(macro '([^']+)' \(defined on line \d+ of "[^"]+"\) used on line (\d+) of "([^"]+)":\d+\)`)
+	viaRe := regexp.MustCompile(`^macro (\S+) \(Use at (/\S+):(\d+)\)$`)
 	for _, fx := range fixtures(t) {
 		t.Run(filepath.Base(fx.dir), func(t *testing.T) {
 			var want []string
@@ -95,14 +99,24 @@ func TestVirtualHostsMatchApacheS(t *testing.T) {
 				if line[0] != ' ' {
 					addr = strings.Fields(line)[0]
 				}
-				if m := src.FindStringSubmatch(line); m != nil && !slices.Contains(want, addr+" "+m[1]) {
-					want = append(want, addr+" "+m[1])
+				key := ""
+				if m := macroSrc.FindStringSubmatch(line); m != nil {
+					key = addr + " macro " + strings.ToLower(m[1]) + " used at " + m[3] + ":" + m[2]
+				} else if m := src.FindStringSubmatch(line); m != nil {
+					key = addr + " " + m[1]
+				}
+				if key != "" && !slices.Contains(want, key) {
+					want = append(want, key)
 				}
 			}
 			_, vhosts := load(rootfs.Walker(filepath.Join(fx.dir, "root")), fx.opts)
 			var got []string
 			for _, v := range vhosts {
 				for _, a := range v.addrs {
+					if m := viaRe.FindStringSubmatch(v.via); m != nil {
+						got = append(got, a+" macro "+strings.ToLower(m[1])+" used at "+m[2]+":"+m[3])
+						continue
+					}
 					got = append(got, a+" "+v.source)
 				}
 			}

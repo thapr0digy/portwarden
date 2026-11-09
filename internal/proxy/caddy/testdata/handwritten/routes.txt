@@ -1,0 +1,26 @@
+*:443,127.0.0.1:8443,udp/*:443 names=app.example.com,www.app.example.com path="/api/*" proxy "localhost:9000 [::1]:9001"
+    -> localhost:9000 127.0.0.1:9000 [::1]:9000
+    -> [::1]:9001 [::1]:9001
+    @ 127.0.0.1:2019/config/apps/http/servers/srv0/routes/0/handle/0/routes/0/handle/0
+*:443,127.0.0.1:8443,udp/*:443 names=app.example.com,www.app.example.com path="*.php" fastcgi "unix//run/php/php-fpm.sock"
+    -> unix//run/php/php-fpm.sock unix=/run/php/php-fpm.sock
+    @ 127.0.0.1:2019/config/apps/http/servers/srv0/routes/0/handle/0/routes/1/handle/0
+*:443,127.0.0.1:8443,udp/*:443 names=app.example.com,www.app.example.com path="" static "/srv/www" root=/srv/www
+    @ 127.0.0.1:2019/config/apps/http/servers/srv0/routes/0/handle/0/routes/2/handle/2
+*:443,127.0.0.1:8443,udp/*:443 names=dyn.example.com path="" proxy "(dynamic upstreams)"
+    -> (dynamic) (unresolved: dynamic upstreams)
+    note: matcher header
+    note: matcher remote_ip
+    note: unresolved: dynamic upstreams
+    @ 127.0.0.1:2019/config/apps/http/servers/srv0/routes/1/handle/0
+*:443,127.0.0.1:8443,udp/*:443 names=ph.example.com path="" proxy "{http.request.host}:8080 backend.internal:8080 127.0.0.1"
+    -> {http.request.host}:8080 (unresolved: placeholder in {http.request.host}:8080)
+    -> backend.internal:8080 (unresolved: hostname backend.internal (no DNS lookups))
+    -> 127.0.0.1 (unresolved: no port)
+    @ 127.0.0.1:2019/config/apps/http/servers/srv0/routes/2/handle/0
+*:443,127.0.0.1:8443,udp/*:443 names= path="" return "404"
+    @ 127.0.0.1:2019/config/apps/http/servers/srv0/routes/3/handle/0
+unix:/run/caddy/app.sock names= path="" proxy "unix//run/app.sock"
+    -> unix//run/app.sock unix=/run/app.sock
+    @ 127.0.0.1:2019/config/apps/http/servers/srv1/routes/0/handle/0
+config note: app layer4 not read

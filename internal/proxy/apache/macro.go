@@ -129,6 +129,9 @@ func (l *loader) use(d *directive, depth int) []*directive {
 	prevVia := l.macros.via
 	l.macros.active = append(l.macros.active, key)
 	l.macros.via = fmt.Sprintf("macro %s (Use at %s)", m.name, d.source())
+	if prevVia != "" {
+		l.macros.via += " in " + prevVia
+	}
 	defer func() {
 		l.macros.active = l.macros.active[:len(l.macros.active)-1]
 		l.macros.via = prevVia

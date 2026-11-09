@@ -1,0 +1,25 @@
+# Hand-written: dev/proxy-fixtures.sh runs Caddy with this file and records its admin
+# API's /config/ answer (the JSON the Caddyfile adapts to) in config.json.
+{
+	admin 127.0.0.1:7019
+	auto_https off
+}
+
+http://app.example.com:7580, http://www.app.example.com:7580 {
+	handle /api/* {
+		reverse_proxy 127.0.0.1:9000 [::1]:9001
+	}
+	handle {
+		root * /srv/www
+		file_server
+	}
+}
+
+http://:7581 {
+	reverse_proxy /sock/* unix//run/app.sock
+	php_fastcgi unix//run/php/php-fpm.sock
+}
+
+http://:7582 {
+	respond "not here" 404
+}

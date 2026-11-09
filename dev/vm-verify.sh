@@ -2,7 +2,7 @@
 # Runs the kernel test matrix (dev/matrix.sh) on the Lima VMs for the checkout this script
 # sits in, from anywhere: a Flowryn worktree, a verify checkout, the main checkout.
 #
-#   dev/vm-verify.sh [--legs "2404 2604 amd64"]
+#   dev/vm-verify.sh [--legs "2404 2604 amd64 next"]
 #   dev/vm-verify.sh --list-files    # prints the files the copy would hold, and exits
 #   dev/vm-verify.sh --copy-only     # makes the copy, prints its path, keeps it, and exits
 #
@@ -25,7 +25,9 @@
 # <root>/.vmverify/logs/<short-sha>-<UTC time>/ (the newest 20 such directories are
 # kept), whose path is printed, and the last 40 lines of each failing log are printed,
 # so a caller that keeps only stdout (Flowryn's verify) still sees why. Prints the
-# matrix's per-leg summary; exits non-zero when any leg fails.
+# matrix's per-leg summary; exits non-zero when any blocking leg fails. An advisory leg's
+# failure (WARN in the summary, dev/matrix.sh) keeps the exit status 0, but the tail of
+# its failing logs is printed all the same, so the warning can be read where it shows.
 set -euo pipefail
 # One brace group, read whole before it runs: the checkout under test may be edited (or
 # its branch switched) during the hour this runs, and bash reads a script as it goes.
@@ -33,11 +35,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 src=$PWD
 root=${VMVERIFY_ROOT:-$HOME/projects/portwarden}
-legs="2404 2604 amd64"
+legs="2404 2604 amd64 next"
 list_only=false
 copy_only=false
 
-usage() { echo "usage: dev/vm-verify.sh [--legs \"2404 2604 amd64\"] | --list-files | --copy-only" >&2; }
+usage() { echo "usage: dev/vm-verify.sh [--legs \"2404 2604 amd64 next\"] | --list-files | --copy-only" >&2; }
 while [ $# -gt 0 ]; do
 	case $1 in
 	--legs) [ $# -ge 2 ] || { usage; exit 2; }; legs=$2; shift 2 ;;
@@ -48,7 +50,7 @@ while [ $# -gt 0 ]; do
 	esac
 done
 for leg in $legs; do
-	case $leg in 2404 | 2604 | amd64) ;; *) echo "vm-verify: unknown leg $leg" >&2; exit 2 ;; esac
+	case $leg in 2404 | 2604 | amd64 | next) ;; *) echo "vm-verify: unknown leg $leg" >&2; exit 2 ;; esac
 done
 [ -n "${legs// /}" ] || { echo "vm-verify: no legs given" >&2; exit 2; }
 
@@ -122,10 +124,20 @@ failing_logs() {
 	done < <(tail -n +2 "$m/summary.txt")
 }
 
+# print_log_tails: the last 40 lines of each log failing_logs names, from directory $1.
+print_log_tails() {
+	local dir=$1 f
+	while IFS= read -r f; do
+		[ -f "$dir/$f" ] || continue
+		echo "vm-verify: ---- last 40 lines of $f ----"
+		tail -n 40 "$dir/$f"
+	done < <(failing_logs)
+}
+
 # keep_failure_logs: copies the copy's logs to <base>/logs/<sha>-<time>/, prints that
 # path and the tail of each failing log, and prunes the log directories to the newest 20.
 keep_failure_logs() {
-	local logs="$base/logs" dir f
+	local logs="$base/logs" dir
 	[ -d "$copy/.matrix" ] || return 0
 	mkdir -p "$logs"
 	dir="$logs/$sha-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -133,11 +145,7 @@ keep_failure_logs() {
 	(cd "$copy/.matrix" && find . -type f \( -name '*.log' -o -name 'summary.txt' \) -print0) |
 		tar -C "$copy/.matrix" --null -T - -cf - | tar -C "$dir" -xf -
 	echo "vm-verify: failed; logs kept in $dir"
-	while IFS= read -r f; do
-		[ -f "$dir/$f" ] || continue
-		echo "vm-verify: ---- last 40 lines of $f ----"
-		tail -n 40 "$dir/$f"
-	done < <(failing_logs)
+	print_log_tails "$dir"
 	echo "vm-verify: ---- end of logs (all of them in $dir) ----"
 	prune_failure_logs "$logs"
 }
@@ -155,6 +163,10 @@ cleanup() {
 	save_logs || { echo "vm-verify: could not copy the logs from $copy/.matrix" >&2; status=1; }
 	if [ "$status" != 0 ] && ! $copy_only; then
 		keep_failure_logs || { echo "vm-verify: could not keep the logs from $copy/.matrix" >&2; }
+	elif [ "$status" = 0 ] && grep -q 'WARN (advisory' "$copy/.matrix/summary.txt" 2>/dev/null; then
+		echo "vm-verify: an advisory leg failed (WARN; the run still passes); its logs are in $src/.matrix/"
+		print_log_tails "$copy/.matrix"
+		echo "vm-verify: ---- end of advisory logs ----"
 	fi
 	if [ "${VMVERIFY_KEEP:-0}" = 1 ] || { $copy_only && [ "$status" = 0 ]; }; then
 		$copy_only || echo "vm-verify: kept the copy at $copy" >&2

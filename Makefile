@@ -71,8 +71,9 @@ dist-lint:
 lint-deploy:
 	dev/lint-deploy.sh
 
-# Kernel matrix on the host: Ubuntu 24.04 and 26.04 VMs (itest + e2e) and an x86_64 VM
-# (cross-compiled tests, the amd64 .deb). MATRIX_LEGS="2604" picks legs (dev/matrix.sh).
+# Kernel matrix on the host: Ubuntu 24.04 and 26.04 VMs (itest + e2e), an x86_64 VM
+# (cross-compiled tests, the amd64 .deb) and the advisory newest-Ubuntu leg "next".
+# MATRIX_LEGS="2604" picks legs (dev/matrix.sh).
 matrix:
 	dev/matrix.sh
 
@@ -80,4 +81,4 @@ matrix:
 # not mount): copies it under ~/projects/portwarden/.vmverify/ and runs dev/matrix.sh
 # there (dev/vm-verify.sh). MATRIX_LEGS="2604" picks legs.
 vm-verify:
-	dev/vm-verify.sh --legs "$(or $(MATRIX_LEGS),2404 2604 amd64)"
+	dev/vm-verify.sh --legs "$(or $(MATRIX_LEGS),2404 2604 amd64 next)"

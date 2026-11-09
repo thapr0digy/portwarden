@@ -69,10 +69,13 @@ jobs:
     needs: unit
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    # "next" (the newest Ubuntu release) is an early warning for kernel drift: its failure
+    # shows in the run without failing it.
+    continue-on-error: ${{ matrix.leg == 'next' }}
     strategy:
       fail-fast: false
       matrix:
-        leg: ["2404", "2604"]
+        leg: ["2404", "2604", "next"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -101,6 +104,9 @@ jobs:
         env:
           MATRIX_LEGS: ${{ matrix.leg }}
           MATRIX_MOUNT: ${{ github.workspace }}
+          # Each leg is its own job: let "next" fail its job (continue-on-error above
+          # keeps the workflow green) rather than hide a WARN in a green one.
+          MATRIX_ADVISORY: ""
         run: dev/matrix.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()

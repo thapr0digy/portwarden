@@ -1,6 +1,6 @@
 #!/bin/bash
-# Installs the toolchain for kernel-touching work (make itest, make e2e) on Ubuntu 24.04
-# and 26.04. Idempotent; run as root. PROVISION_E2E=0 skips the e2e-only packages (nginx,
+# Installs the toolchain for kernel-touching work (make itest, make e2e) on Ubuntu 24.04,
+# 26.04 and 26.10. Idempotent; run as root. PROVISION_E2E=0 skips the e2e-only packages (nginx,
 # PostgreSQL, Docker, lintian).
 set -euo pipefail
 

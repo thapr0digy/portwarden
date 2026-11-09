@@ -2,9 +2,15 @@
 # Kernel test matrix (make matrix): runs the kernel-touching tests on each leg's Lima VM
 # and prints one summary line per leg. Runs on the host (macOS or Linux) with limactl.
 #
-# Legs (MATRIX_LEGS, default "2404 2604 amd64"):
+# Legs (MATRIX_LEGS, default "2404 2604 amd64 next"):
 #   2404   Ubuntu 24.04 (kernel 6.8), VM "portwarden" (dev/lima.yaml): itest + e2e.
 #   2604   Ubuntu 26.04 (kernel 7.0), VM "portwarden-2604" (dev/lima-2604.yaml): itest + e2e.
+#   next   the newest Ubuntu release (26.10, kernel 7.3), VM "portwarden-next"
+#          (dev/lima-next.yaml): itest + e2e. An early warning for kernel drift (a renamed
+#          or inlined traced function), so it is advisory: a failure prints WARN and does
+#          not fail the run. MATRIX_ADVISORY (default "next") names the advisory legs;
+#          MATRIX_ADVISORY= makes every leg blocking. Its VM is stopped after the leg
+#          (MATRIX_STOP_AFTER, default "next"), since only this leg uses it.
 #   amd64  Ubuntu 24.04 on x86_64, VM "portwarden-amd64" (dev/lima-amd64.yaml; QEMU TCG on
 #          an arm64 host, KVM on an x86_64 one): every package's unit tests and the
 #          integration tests, cross-compiled for amd64 on the host and run as root in the
@@ -22,7 +28,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 repo=$PWD
-legs=${MATRIX_LEGS:-2404 2604 amd64}
+legs=${MATRIX_LEGS:-2404 2604 amd64 next}
+advisory=${MATRIX_ADVISORY-next}
+stop_after=${MATRIX_STOP_AFTER-next}
 out="$repo/.matrix"
 mkdir -p "$out"
 # shellcheck source=dev/vmlock.sh
@@ -33,8 +41,9 @@ trap 'exit 143' TERM
 VMLOCK_COMMAND=${VMLOCK_COMMAND:-"dev/matrix.sh ($legs) in $repo"}
 vmlock_acquire
 
-vm_of() { case $1 in 2404) echo portwarden ;; 2604) echo portwarden-2604 ;; amd64) echo portwarden-amd64 ;; *) return 1 ;; esac; }
-yaml_of() { case $1 in 2404) echo dev/lima.yaml ;; 2604) echo dev/lima-2604.yaml ;; amd64) echo dev/lima-amd64.yaml ;; esac; }
+vm_of() { case $1 in 2404) echo portwarden ;; 2604) echo portwarden-2604 ;; amd64) echo portwarden-amd64 ;; next) echo portwarden-next ;; *) return 1 ;; esac; }
+yaml_of() { case $1 in 2404) echo dev/lima.yaml ;; 2604) echo dev/lima-2604.yaml ;; amd64) echo dev/lima-amd64.yaml ;; next) echo dev/lima-next.yaml ;; esac; }
+in_list() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }
 
 # vm_up <leg>: starts the leg's VM, creating and provisioning it first if needed.
 vm_up() {
@@ -136,7 +145,18 @@ for leg in $legs; do
 	else
 		result=$(run_full "$leg")
 	fi
-	case $result in *FAIL*) rc=1 ;; esac
+	case $result in
+	*FAIL*)
+		if in_list "$leg" "$advisory"; then
+			result="$result WARN (advisory: does not fail the run)"
+		else
+			rc=1
+		fi
+		;;
+	esac
+	if in_list "$leg" "$stop_after"; then
+		limactl stop "$vm" >>"$out/$leg/vm.log" 2>&1 || echo "matrix: could not stop VM $vm (see .matrix/$leg/vm.log)" >&2
+	fi
 	line="$leg | $info | $result | $(($(date +%s) - start))s"
 	echo "matrix: $line"
 	summary+=("$line")

@@ -14,7 +14,7 @@ import (
 
 // Budget is what one parse of one input may spend.
 type Budget struct {
-	// Time bounds the wall time of the call.
+	// Time bounds the wall time of the call (0: unchecked).
 	Time time.Duration
 	// Base and PerByte bound the bytes allocated: Base + PerByte*len(input).
 	Base, PerByte uint64
@@ -76,7 +76,7 @@ func PeakHeap(fn func()) (peak, before uint64) {
 func Bounded(t testing.TB, b Budget, n int, fn func()) Spent {
 	t.Helper()
 	s := Measure(fn)
-	if s.Time > b.Time {
+	if b.Time > 0 && s.Time > b.Time {
 		t.Errorf("parse of %d bytes took %v, budget %v", n, s.Time, b.Time)
 	}
 	if limit := b.Alloc(n); s.Bytes > limit {

@@ -23,12 +23,15 @@ var ProxyBudget = Budget{Time: 2 * time.Second, Base: 100 * conf.MaxTotalBytes}
 const ProxyHeapLimit = 85 << 20
 
 // AtReadLimit runs load, which must read up to conf.MaxTotalBytes and be cut off there,
-// and fails t when it exceeds ProxyBudget or grows the heap past ProxyHeapLimit.
+// and fails t when it allocates past ProxyBudget or grows the heap past ProxyHeapLimit.
+// Its wall time is only logged: a load at the limit takes 40 ms natively but over 7 s on
+// the emulated x86_64 leg of the kernel matrix, so time says more about the machine.
 func AtReadLimit(t testing.TB, load func() conf.Result) {
 	t.Helper()
 	var res conf.Result
 	var s Spent
-	peak, before := PeakHeap(func() { s = Bounded(t, ProxyBudget, conf.MaxTotalBytes, func() { res = load() }) })
+	allocOnly := Budget{Base: ProxyBudget.Base, PerByte: ProxyBudget.PerByte}
+	peak, before := PeakHeap(func() { s = Bounded(t, allocOnly, conf.MaxTotalBytes, func() { res = load() }) })
 	if !strings.Contains(strings.Join(res.Notes, "\n"), "cut off") {
 		t.Fatalf("the load must reach the read limit; notes = %q", res.Notes)
 	}

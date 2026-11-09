@@ -27,11 +27,15 @@ import (
 )
 
 // TestMain doubles as the inventory binary for the child-process tests: with
-// PW_TEST_HELPER set it runs the real main (with an in-memory store) on the arguments in
+// PW_TEST_HELPER set it runs the real main (with an in-memory store, or PostgreSQL with
+// PW_TEST_REAL_PG) on the arguments in
 // PW_TEST_ARGS (separated by newlines).
 func TestMain(m *testing.M) {
 	if os.Getenv("PW_TEST_HELPER") == "1" {
 		openStore = opener(newFakeStore())
+		if os.Getenv("PW_TEST_REAL_PG") == "1" {
+			openStore = openPG // the two-instance tests (handover_integration_test.go)
+		}
 		os.Args = append([]string{os.Args[0]}, strings.Split(os.Getenv("PW_TEST_ARGS"), "\n")...)
 		main()
 		return

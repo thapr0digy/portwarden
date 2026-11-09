@@ -272,7 +272,7 @@ func (s *Store) CloudHost(ctx context.Context, host string) (inventory.CloudHost
 
 // SetCloudStatus records the cloud look-up's outcome for a host.
 func (s *Store) SetCloudStatus(ctx context.Context, host, status string, at time.Time) error {
-	_, err := s.pool.Exec(ctx, "UPDATE hosts SET cloud_status = $2, cloud_checked_at = $3 WHERE host_id = $1", host, status, at)
+	_, err := s.exec(ctx, "UPDATE hosts SET cloud_status = $2, cloud_checked_at = $3 WHERE host_id = $1", host, status, at)
 	return err
 }
 

@@ -70,7 +70,7 @@ func classify(err error) error {
 
 // Quarantine stores a message the inventory will not apply.
 func (s *Store) Quarantine(ctx context.Context, streamSeq uint64, subject, why string, data []byte) error {
-	_, err := s.pool.Exec(ctx, "INSERT INTO quarantine (stream_seq, subject, error, data) VALUES ($1, $2, $3, $4)",
+	_, err := s.exec(ctx, "INSERT INTO quarantine (stream_seq, subject, error, data) VALUES ($1, $2, $3, $4)",
 		int64(streamSeq), clean(subject), clean(why), data)
 	return err
 }

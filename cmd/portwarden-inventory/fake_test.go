@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thapr0digy/portwarden/internal/backend/leader"
+	"github.com/thapr0digy/portwarden/internal/backend/svc"
 	"github.com/thapr0digy/portwarden/internal/inventory"
 )
 
@@ -20,6 +22,74 @@ type fakeStore struct {
 	closed      bool
 	afterClose  int // calls made after Close (a worker outliving the store)
 	dsn         string
+	// standby, when set, holds Elect until it is closed; lease is what Elect hands out.
+	standby chan struct{}
+	lease   *fakeLease
+}
+
+// fakeLease is a held leadership the test can lose (lose) and watch released.
+type fakeLease struct {
+	lost     chan struct{}
+	once     sync.Once
+	mu       sync.Mutex
+	err      error
+	released bool
+}
+
+func (l *fakeLease) Epoch() int64          { return 1 }
+func (l *fakeLease) Lost() <-chan struct{} { return l.lost }
+func (l *fakeLease) Err() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.err
+}
+
+func (l *fakeLease) Release(context.Context) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.released = true
+	return nil
+}
+
+func (l *fakeLease) isReleased() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.released
+}
+
+func (l *fakeLease) lose(err error) {
+	l.once.Do(func() {
+		l.mu.Lock()
+		l.err = err
+		l.mu.Unlock()
+		close(l.lost)
+	})
+}
+
+func (f *fakeStore) Elect(ctx context.Context, _ svc.Leader, state *leader.State) (leader.Lease, error) {
+	f.mu.Lock()
+	wait := f.standby
+	if f.lease == nil {
+		f.lease = &fakeLease{lost: make(chan struct{})}
+	}
+	l := f.lease
+	f.mu.Unlock()
+	state.Set(leader.Standby, 0)
+	if wait != nil {
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	state.Set(leader.Leader, l.Epoch())
+	return l, nil
+}
+
+func (f *fakeStore) currentLease() *fakeLease {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lease
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{cursors: map[string]inventory.Cursor{}} }

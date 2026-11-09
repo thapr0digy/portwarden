@@ -14,14 +14,18 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
+	"github.com/thapr0digy/portwarden/internal/backend/leader"
+	"github.com/thapr0digy/portwarden/internal/backend/svc"
 	"github.com/thapr0digy/portwarden/internal/cloud"
 	"github.com/thapr0digy/portwarden/internal/inventory"
 )
@@ -32,11 +36,30 @@ var migrations embed.FS
 // migrationLock is the advisory lock key held while migrating ("pwinv" in ASCII).
 const migrationLock = 0x7077696e76
 
+// LeaderLock is the advisory lock key the leading inventory holds ("pwinvL"), distinct
+// from the migration lock and from the alerter's.
+const LeaderLock = 0x7077696e764c
+
 // Store implements inventory.Store, inventory.Reader and inventory.CloudState.
 type Store struct {
 	pool *pgxpool.Pool
 	// badFirewall holds the hosts already logged for an invalid firewall fingerprint.
 	badFirewall sync.Map
+	// lease, once set by Elect, fences every write (leader.PGLease.Fence).
+	lease atomic.Pointer[leader.PGLease]
+}
+
+// Elect waits as a standby until this instance holds the inventory's leader lock (state
+// shows the role), then fences every later write with the lease. Only ctx ending stops
+// the wait.
+func (s *Store) Elect(ctx context.Context, cfg svc.Leader, state *leader.State) (leader.Lease, error) {
+	l, err := leader.Wait(ctx, s.pool.Config().ConnConfig, leader.Options{Service: "inventory", Key: LeaderLock,
+		Table: "inventory_leader", Poll: time.Duration(cfg.Poll), Check: time.Duration(cfg.Check)}, state)
+	if err != nil {
+		return nil, err
+	}
+	s.lease.Store(l)
+	return l, nil
 }
 
 // Open connects and migrates. The DSN is a libpq URL or key=value string; keep the
@@ -144,7 +167,7 @@ func (s *Store) SetSilent(ctx context.Context, host string, since time.Time) err
 	if !since.IsZero() {
 		arg = since
 	}
-	_, err := s.pool.Exec(ctx, "UPDATE hosts SET silent_since = $2, updated_at = now() WHERE host_id = $1", host, arg)
+	_, err := s.exec(ctx, "UPDATE hosts SET silent_since = $2, updated_at = now() WHERE host_id = $1", host, arg)
 	return err
 }
 
@@ -167,16 +190,35 @@ func (s *Store) LastHeartbeats(ctx context.Context) (map[string]time.Time, error
 	return out, rows.Err()
 }
 
+// tx runs f in one transaction, committed when f succeeds; with a lease (Elect), the
+// epoch is checked first (leader.ErrFenced: another instance leads now). Every write goes
+// through it.
 func (s *Store) tx(ctx context.Context, f func(pgx.Tx) error) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if l := s.lease.Load(); l != nil {
+		if err := l.Fence(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if err := f(tx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// exec runs one write statement through tx.
+func (s *Store) exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	var tag pgconn.CommandTag
+	err := s.tx(ctx, func(tx pgx.Tx) error {
+		var err error
+		tag, err = tx.Exec(ctx, sql, args...)
+		return err
+	})
+	return tag, err
 }
 
 func ensureHost(ctx context.Context, tx pgx.Tx, host string) error {

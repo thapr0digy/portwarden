@@ -1,7 +1,9 @@
 // portwarden-inventory keeps the current state of every host, listener, exposure and
 // proxy route in PostgreSQL from the ASM_EVENTS stream, raises "host silent" when a
 // host's heartbeats stop, runs the cloud look-up (level 3) and serves a read-only JSON
-// API. See README "Backend".
+// API. Several instances may run: the one holding the database's leader lock consumes and
+// runs the workers, the others wait as hot standbys that serve reads (README "Running a
+// standby"). See README "Backend".
 package main
 
 import (
@@ -26,6 +28,7 @@ import (
 	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
 
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
+	"github.com/thapr0digy/portwarden/internal/backend/leader"
 	"github.com/thapr0digy/portwarden/internal/backend/liveness"
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
 	"github.com/thapr0digy/portwarden/internal/cloud"
@@ -61,6 +64,9 @@ type Config struct {
 	// this are requested again (default 24h).
 	Reprobe   svc.Duration    `json:"reprobe"`
 	Retention RetentionConfig `json:"retention"`
+	// Leader tunes the standby's poll and the leader's lock check (README "Running a
+	// standby").
+	Leader svc.Leader `json:"leader"`
 }
 
 // APIConfig configures the API's admin side.
@@ -284,6 +290,9 @@ type invStore interface {
 	inventory.ProbeState
 	inventory.Pruner
 	Quarantine(ctx context.Context, streamSeq uint64, subject, why string, data []byte) error
+	// Elect waits as a standby until this instance leads (state shows the role), then
+	// fences the store's writes with the lease.
+	Elect(ctx context.Context, cfg svc.Leader, state *leader.State) (leader.Lease, error)
 	Close()
 }
 
@@ -323,6 +332,9 @@ func load(path string) (settings, error) {
 	if err := cfg.Retention.validate(); err != nil {
 		return settings{}, err
 	}
+	if err := cfg.Leader.Validate(); err != nil {
+		return settings{}, err
+	}
 	policy, err := cfg.Cloud.policy()
 	if err != nil {
 		return settings{}, err
@@ -341,18 +353,20 @@ func load(path string) (settings, error) {
 	return settings{cfg: cfg, policy: policy, dsn: dsn, token: token}, nil
 }
 
-// run loads the config, opens the store with openStore, serves the API and consumes the
-// stream until ctx ends (then it returns ctx's error) or the API server fails.
+// run loads the config, opens the store with openStore and serves the API (reads on a
+// standby too), waits as a standby until this instance leads, then consumes the stream
+// until ctx ends (then it returns ctx's error), the API server fails, or the lead is lost
+// (an error: the process exits 1 and systemd restarts it as a standby).
 func run(ctx context.Context, path string, openStore openStoreFunc) error {
 	st, err := load(path)
 	if err != nil {
 		return err
 	}
-	cfg, policy, dsn, token := st.cfg, st.policy, st.dsn, st.token
+	cfg, token := st.cfg, st.token
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 
-	store, err := openStore(ctx, dsn)
+	store, err := openStore(ctx, st.dsn)
 	if err != nil {
 		return err
 	}
@@ -360,22 +374,12 @@ func run(ctx context.Context, path string, openStore openStoreFunc) error {
 
 	silentAfter := cfg.SilentAfter.D(90 * time.Second)
 	cons := &inventory.Consumer{Store: store, Liveness: liveness.New(silentAfter), Feed: liveness.NewFeed(silentAfter, time.Now())}
-	// Connect retries in the background, so the API comes up even with NATS down.
-	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleInventory, "portwarden-inventory", cons.SetConnected))
-	if err != nil {
-		return err
-	}
-	defer nc.Close()
-	pub := bus.NewPublisher(js, "inventory")
-	cons.Announce = func(ctx context.Context, host string) (uint64, error) {
-		id := bus.NewEventID()
-		return pub.PublishSeq(ctx, bus.ForgottenSubject(host), id, &asmv1.HostForgotten{EventId: id, HostId: host, At: timestamppb.Now()})
-	}
-
+	var role leader.State
 	apiSrv, err := api.New(store, token)
 	if err != nil {
 		return err
 	}
+	apiSrv.SetRole(&role)
 	if admin, err := adminToken(cfg); err != nil {
 		return fmt.Errorf("api admin token: %w", err)
 	} else if admin == "" {
@@ -401,6 +405,55 @@ func run(ctx context.Context, path string, openStore openStoreFunc) error {
 		defer cancel()
 		_ = httpSrv.Shutdown(sctx)
 	}()
+	lease, err := store.Elect(ctx, cfg.Leader, &role)
+	if err != nil {
+		return err
+	}
+	return lead(ctx, st, store, cons, lease)
+}
+
+// lead does the leader's work until ctx ends or the lease is lost. Its workers stop
+// before the lock is released, so the next leader never overlaps them.
+func lead(ctx context.Context, st settings, store invStore, cons *inventory.Consumer, lease leader.Lease) (err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-lease.Lost():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	defer func() {
+		rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer rcancel()
+		if lerr := lease.Err(); lerr != nil {
+			_ = lease.Release(rctx)
+			err = fmt.Errorf("lost leadership: %w", lerr)
+			return
+		}
+		if rerr := lease.Release(rctx); rerr != nil {
+			slog.Warn("releasing the leader lock failed (it is freed when the session closes)", "err", rerr)
+		}
+	}()
+	return work(ctx, st, store, cons)
+}
+
+// work is one leader's run: NATS, the stream, the workers and the consumer, until ctx
+// ends.
+func work(ctx context.Context, st settings, store invStore, cons *inventory.Consumer) error {
+	cfg, policy := st.cfg, st.policy
+	// Connect retries in the background.
+	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleInventory, "portwarden-inventory", cons.SetConnected))
+	if err != nil {
+		return err
+	}
+	defer nc.Close()
+	pub := bus.NewPublisher(js, "inventory")
+	cons.Announce = func(ctx context.Context, host string) (uint64, error) {
+		id := bus.NewEventID()
+		return pub.PublishSeq(ctx, bus.ForgottenSubject(host), id, &asmv1.HostForgotten{EventId: id, HostId: host, At: timestamppb.Now()})
+	}
 	stream, err := svc.WaitStream(ctx, js)
 	if err != nil {
 		return err

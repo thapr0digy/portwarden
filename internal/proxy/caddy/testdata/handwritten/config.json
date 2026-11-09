@@ -1,0 +1,18 @@
+{"admin":{"listen":"localhost:2019"},
+ "apps":{
+  "layer4":{},
+  "tls":{"certificates":{}},
+  "http":{"servers":{
+   "srv1":{"listen":["unix//run/caddy/app.sock"],"routes":[{"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"unix//run/app.sock"}]}]}]},
+   "srv0":{"listen":[":443","127.0.0.1:8443","udp/:443"],"routes":[
+    {"match":[{"host":["app.example.com","www.app.example.com"]}],"handle":[{"handler":"subroute","routes":[
+      {"match":[{"path":["/api/*"]}],"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"localhost:9000"},{"dial":"[::1]:9001"}]}]},
+      {"match":[{"path":["*.php"]}],"handle":[{"handler":"reverse_proxy","transport":{"protocol":"fastcgi","root":"/srv"},"upstreams":[{"dial":"unix//run/php/php-fpm.sock"}]}]},
+      {"handle":[{"handler":"vars","root":"/srv/www"},{"handler":"headers"},{"handler":"file_server","hide":["/etc/caddy/Caddyfile"]}]}
+    ]}],"terminal":true},
+    {"match":[{"host":["dyn.example.com"],"header":{"X-A":["1"]}},{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"reverse_proxy","dynamic_upstreams":{"source":"srv","name":"_api._tcp.example.com"}}]},
+    {"match":[{"host":["ph.example.com"]}],"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"{http.request.host}:8080"},{"dial":"backend.internal:8080"},{"dial":"127.0.0.1"}]}]},
+    {"handle":[{"handler":"static_response","status_code":404,"body":"secret body"}]}
+   ]}
+  }}
+ }}

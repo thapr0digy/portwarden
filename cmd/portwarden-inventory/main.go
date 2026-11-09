@@ -404,6 +404,9 @@ func run(ctx context.Context, path string, openStore openStoreFunc) error {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = httpSrv.Shutdown(sctx)
+		// Shutdown closes only the listeners Serve has taken; a start failure can come
+		// before the Serve goroutine runs, so close it here too (twice is harmless).
+		_ = ln.Close()
 	}()
 	lease, err := store.Elect(ctx, cfg.Leader, &role)
 	if err != nil {

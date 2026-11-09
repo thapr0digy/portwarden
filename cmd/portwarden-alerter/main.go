@@ -3,8 +3,9 @@
 // transitions to confirmed, on host silence, and once when its own feed stalls. Every
 // decision and its page are stored in PostgreSQL in one transaction before the NATS
 // message is acked; an outbox worker delivers pages (one JSON line on stdout each, and a
-// signed webhook POST) with retries across restarts. Run one instance. See README
-// "Backend".
+// signed webhook POST) with retries across restarts. Several instances may run: the one
+// holding the database's leader lock works, the others wait as hot standbys (README
+// "Running a standby"). See README "Backend".
 package main
 
 import (
@@ -15,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -28,6 +30,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/alerter"
 	"github.com/thapr0digy/portwarden/internal/alerter/pgstate"
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
+	"github.com/thapr0digy/portwarden/internal/backend/leader"
 	"github.com/thapr0digy/portwarden/internal/backend/liveness"
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
 	"github.com/thapr0digy/portwarden/internal/natsauth"
@@ -59,7 +62,16 @@ type Config struct {
 		MaxAttempts   int  `json:"max_attempts"`
 		AllowInsecure bool `json:"allow_insecure"`
 	} `json:"webhook"`
+	// Leader tunes the standby's poll and the leader's lock check (README "Running a
+	// standby").
+	Leader svc.Leader `json:"leader"`
+	// HealthListen is the address of GET /healthz (role, epoch, database reachable);
+	// unset means 127.0.0.1:8741, "" turns it off.
+	HealthListen *string `json:"health_listen"`
 }
+
+// defaultHealthListen is the health endpoint's address when the config names none.
+var defaultHealthListen = "127.0.0.1:8741"
 
 func main() {
 	version.HandleFlag()
@@ -87,6 +99,10 @@ func orTrue(b *bool) bool { return b == nil || *b }
 // stateStore is what the alerter uses of its PostgreSQL state; tests pass an in-memory
 // one.
 type stateStore interface {
+	// Elect waits as a standby until this instance leads (state shows the role), then
+	// fences the store's writes with the lease.
+	Elect(ctx context.Context, cfg svc.Leader, state *leader.State) (leader.Lease, error)
+	Ping(ctx context.Context) error
 	InTx(ctx context.Context, f func(alerter.State) error) error
 	Forgotten(ctx context.Context) (map[string]alerter.ForgetMark, error)
 	PruneForgotten(ctx context.Context, stream time.Time, lastSeq uint64) (int64, error)
@@ -115,10 +131,11 @@ func openPG(ctx context.Context, dsn string) (stateStore, error) {
 
 // settings is the config after loading and checking, with its secrets read.
 type settings struct {
-	cfg   Config
-	rules alerter.Rules
-	hook  *alerter.Webhook
-	dsn   string
+	cfg    Config
+	rules  alerter.Rules
+	hook   *alerter.Webhook
+	dsn    string
+	health string // the health endpoint's address ("" off)
 }
 
 // load reads and checks the config and reads the webhook secret and the DSN, in this
@@ -134,6 +151,18 @@ func load(path string) (settings, error) {
 		PageOnUncleanRestart: orTrue(cfg.Rules.PageOnUncleanRestart)}
 	if err := rules.Validate(); err != nil {
 		return settings{}, err
+	}
+	if err := cfg.Leader.Validate(); err != nil {
+		return settings{}, err
+	}
+	health := defaultHealthListen
+	if cfg.HealthListen != nil {
+		health = *cfg.HealthListen
+	}
+	if health != "" {
+		if _, _, err := net.SplitHostPort(health); err != nil {
+			return settings{}, fmt.Errorf("health_listen: %w", err)
+		}
 	}
 	var hook *alerter.Webhook
 	if cfg.Webhook.URL != "" {
@@ -152,29 +181,74 @@ func load(path string) (settings, error) {
 	if err != nil {
 		return settings{}, fmt.Errorf("postgres dsn: %w", err)
 	}
-	return settings{cfg: cfg, rules: rules, hook: hook, dsn: dsn}, nil
+	return settings{cfg: cfg, rules: rules, hook: hook, dsn: dsn, health: health}, nil
 }
 
-// run loads the config, opens the store with openStore and consumes the stream until ctx
-// ends (then it returns ctx's error) or the heartbeat consumer stops.
+// run loads the config, opens the store with openStore, serves the health endpoint and
+// waits as a standby until this instance leads; then it consumes the stream until ctx
+// ends (then it returns ctx's error), the heartbeat consumer stops, or the lead is lost
+// (an error: the process exits 1 and systemd restarts it as a standby).
 func run(ctx context.Context, path string, openStore openStoreFunc) error {
 	st, err := load(path)
 	if err != nil {
 		return err
 	}
-	cfg, rules, hook := st.cfg, st.rules, st.hook
-	ctx, stop := context.WithCancel(ctx)
-	defer stop()
 	store, err := openStore(ctx, st.dsn)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+	var role leader.State
+	stopHealth, err := serveHealth(st.health, store, &role)
+	if err != nil {
+		return err
+	}
+	defer stopHealth()
+	lease, err := store.Elect(ctx, st.cfg.Leader, &role)
+	if err != nil {
+		return err
+	}
+	return lead(ctx, st, store, lease)
+}
+
+// lead does the leader's work until ctx ends or the lease is lost. Its workers stop
+// before the lock is released, so the next leader never overlaps them.
+func lead(ctx context.Context, st settings, store stateStore, lease leader.Lease) (err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-lease.Lost():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	defer func() {
+		rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer rcancel()
+		if lerr := lease.Err(); lerr != nil {
+			_ = lease.Release(rctx)
+			err = fmt.Errorf("lost leadership: %w", lerr)
+			return
+		}
+		if rerr := lease.Release(rctx); rerr != nil {
+			slog.Warn("releasing the leader lock failed (it is freed when the session closes)", "err", rerr)
+		}
+	}()
+	return work(ctx, st, store, lease.Lost())
+}
+
+// work is one leader's run: it consumes the stream until ctx ends or the heartbeat
+// consumer stops; lost closes when the lead is lost (no page is sent after it).
+func work(ctx context.Context, st settings, store stateStore, lost <-chan struct{}) error {
+	cfg, rules, hook := st.cfg, st.rules, st.hook
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 
 	silentAfter := cfg.Rules.SilentAfter.D(90 * time.Second)
 	a := &app{engine: alerter.NewEngine(rules, bus.NewEventID), store: store, live: liveness.New(silentAfter),
 		feed: liveness.NewFeed(silentAfter, time.Now()), hook: hook, maxAttempts: cfg.Webhook.MaxAttempts,
-		tamperSig: map[string]string{}, noSilence: map[string]bool{}, runSig: map[string]string{}, out: os.Stdout}
+		tamperSig: map[string]string{}, noSilence: map[string]bool{}, runSig: map[string]string{}, out: os.Stdout, lost: lost}
 	if a.maxAttempts <= 0 {
 		a.maxAttempts = 20
 	}
@@ -251,6 +325,8 @@ type app struct {
 	maxAttempts int
 	replayUpTo  uint64
 	out         io.Writer // where deliver prints each page (stdout)
+	// lost closes when this instance stops leading: deliver sends nothing after it.
+	lost <-chan struct{}
 
 	mu   sync.Mutex // guards live, feed, tamperSig and noSilence (all on the alerter's own clock)
 	live *liveness.Tracker
@@ -649,6 +725,11 @@ func (a *app) deliver(ctx context.Context) {
 			continue
 		}
 		for _, p := range due {
+			select {
+			case <-a.lost:
+				return // another instance leads now: it delivers what is due
+			default:
+			}
 			if !printed[p.ID] {
 				_ = enc.Encode(p.Alert)
 				printed[p.ID] = true

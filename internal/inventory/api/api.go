@@ -1,6 +1,6 @@
 // Package api serves the inventory over HTTP as JSON:
 //
-//	GET    /healthz                                (no auth) database reachable
+//	GET    /healthz                                (no auth) database reachable, and this instance's role
 //	GET    /v1/hosts?limit=&cursor=                hosts by id
 //	GET    /v1/hosts/{id}                          one host
 //	DELETE /v1/hosts/{id}?force=                   forget a decommissioned host (M8; admin token)
@@ -20,6 +20,11 @@
 // token never forgets: DELETE needs the separate admin token (SetForget), and answers 403
 // "forget disabled" when none is configured. A host that is not silent is forgotten only
 // with force=1.
+//
+// Several inventories may serve the same database (README "Running a standby"): every
+// instance answers reads with the same token checks, and every response carries
+// "X-Portwarden-Role: leader|standby" (SetRole). Only the leader forgets: a standby
+// answers DELETE, once the admin token is checked, with 503 and "Retry-After: 2".
 package api
 
 import (
@@ -34,6 +39,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thapr0digy/portwarden/internal/backend/leader"
 	"github.com/thapr0digy/portwarden/internal/inventory"
 	"github.com/thapr0digy/portwarden/internal/model"
 )
@@ -47,6 +53,19 @@ type Server struct {
 	token  [sha256.Size]byte
 	admin  *[sha256.Size]byte
 	forget func(ctx context.Context, host string) (inventory.ForgetResult, error)
+	// role is this instance's role (nil: a lone instance, always the leader).
+	role *leader.State
+}
+
+// SetRole makes the server report role and refuse to forget while it is a standby.
+func (s *Server) SetRole(role *leader.State) { s.role = role }
+
+// roleName is this instance's role for the header and /healthz.
+func (s *Server) roleName() string {
+	if s.role == nil {
+		return leader.Leader.String()
+	}
+	return s.role.Role().String()
 }
 
 // SetForget enables DELETE /v1/hosts/{id} for adminToken (at least 16 characters, not the
@@ -88,15 +107,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/listeners", s.auth(s.listeners))
 	mux.Handle("GET /v1/exposure-history", s.auth(s.history))
 	mux.Handle("GET /v1/proxy-routes", s.auth(s.proxies))
-	return headers(mux)
+	return s.headers(mux)
 }
 
-func headers(next http.Handler) http.Handler {
+func (s *Server) headers(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Type", "application/json")
 		h.Set("Cache-Control", "no-store")
 		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Portwarden-Role", s.roleName())
 		next.ServeHTTP(w, r)
 	})
 }
@@ -122,7 +142,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "database unreachable")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "role": s.roleName()})
 }
 
 func (s *Server) hosts(w http.ResponseWriter, r *http.Request) {
@@ -174,6 +194,12 @@ func (s *Server) forgetHost(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.Header().Set("WWW-Authenticate", `Bearer realm="portwarden-inventory"`)
 		writeError(w, http.StatusUnauthorized, "missing or wrong bearer token")
+		return
+	}
+	if s.roleName() != leader.Leader.String() {
+		// Forgetting is serialised with the leader's message handling; a standby has none.
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusServiceUnavailable, "this instance is a standby: forget on the leader")
 		return
 	}
 	host := r.PathValue("id")

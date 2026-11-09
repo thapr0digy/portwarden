@@ -3,6 +3,7 @@ package svc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
+	"github.com/thapr0digy/portwarden/internal/backend/leader"
 	"github.com/thapr0digy/portwarden/internal/natsauth"
 )
 
@@ -93,5 +95,36 @@ func TestConsumeNeverStallsOnABadMessage(t *testing.T) {
 	defer mu.Unlock()
 	if len(quarantined) != 2 || quarantined[0] != "bad" || quarantined[1] != "flaky" || len(handled) != 1 {
 		t.Fatalf("quarantined %v handled %v", quarantined, handled)
+	}
+}
+
+// A fenced handler (another instance leads now) stops Consume at once with the error,
+// without acking, NAKing or quarantining the message: it stays pending for the new leader.
+func TestConsumeStopsWhenFenced(t *testing.T) {
+	js := jsServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := js.Publish(ctx, "asm.h.x", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	c, err := bus.Durable(ctx, js, "test", bus.DurableOptions{Filters: []string{"asm.>"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	quarantined := false
+	err = Consume(ctx, c, func(context.Context, jetstream.Msg) error {
+		calls++
+		return fmt.Errorf("store: %w", leader.ErrFenced)
+	}, ConsumeOptions{Quarantine: func(context.Context, jetstream.Msg, error) error { quarantined = true; return nil }})
+	if !errors.Is(err, leader.ErrFenced) || calls != 1 || quarantined {
+		t.Fatalf("err %v, calls %d, quarantined %v", err, calls, quarantined)
+	}
+	info, err := c.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.NumAckPending != 1 || info.AckFloor.Stream != 0 {
+		t.Fatalf("the message was settled: ack pending %d, ack floor %d", info.NumAckPending, info.AckFloor.Stream)
 	}
 }

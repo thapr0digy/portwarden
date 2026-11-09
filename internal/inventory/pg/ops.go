@@ -49,21 +49,21 @@ func (s *Store) ForgottenMark(ctx context.Context, host string) (inventory.Mark,
 
 // PruneMarks drops the forget marks of another stream and those past lastSeq.
 func (s *Store) PruneMarks(ctx context.Context, stream time.Time, lastSeq uint64) (int64, error) {
-	tag, err := s.pool.Exec(ctx, "DELETE FROM forgotten_hosts WHERE stream_created <> $1 OR stream_seq > $2", stream, int64(lastSeq))
+	tag, err := s.exec(ctx, "DELETE FROM forgotten_hosts WHERE stream_created <> $1 OR stream_seq > $2", stream, int64(lastSeq))
 	return tag.RowsAffected(), err
 }
 
 // PruneHistory deletes at most batch exposure_history rows older than before, oldest
 // first, in one short statement, and returns how many it deleted.
 func (s *Store) PruneHistory(ctx context.Context, before time.Time, batch int) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM exposure_history WHERE id IN (
+	tag, err := s.exec(ctx, `DELETE FROM exposure_history WHERE id IN (
 		SELECT id FROM exposure_history WHERE at < $1 ORDER BY at LIMIT $2)`, before, batch)
 	return tag.RowsAffected(), err
 }
 
 // PruneQuarantine deletes at most batch quarantined messages older than before.
 func (s *Store) PruneQuarantine(ctx context.Context, before time.Time, batch int) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM quarantine WHERE id IN (
+	tag, err := s.exec(ctx, `DELETE FROM quarantine WHERE id IN (
 		SELECT id FROM quarantine WHERE at < $1 ORDER BY at LIMIT $2)`, before, batch)
 	return tag.RowsAffected(), err
 }

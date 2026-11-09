@@ -12,11 +12,16 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/thapr0digy/portwarden/internal/backend/leader"
+	"github.com/thapr0digy/portwarden/internal/backend/svc"
 
 	"github.com/thapr0digy/portwarden/internal/alerter"
 )
@@ -26,8 +31,17 @@ var migrations embed.FS
 
 const migrationLock = 0x7077616c72 // "pwalr"
 
+// LeaderLock is the advisory lock key the leading alerter holds ("pwalrL"), distinct from
+// the migration lock (a migrating instance must not wait on a running leader) and from
+// the inventory's.
+const LeaderLock = 0x7077616c724c
+
 // Store is the alerter's PostgreSQL state.
-type Store struct{ pool *pgxpool.Pool }
+type Store struct {
+	pool *pgxpool.Pool
+	// lease, once set by Elect, fences every write (leader.PGLease.Fence).
+	lease atomic.Pointer[leader.PGLease]
+}
 
 // Open connects and migrates.
 func Open(ctx context.Context, dsn string) (*Store, error) {
@@ -99,17 +113,56 @@ func (s *Store) migrate(ctx context.Context) error {
 	return tx.Commit(ctx)
 }
 
-// InTx runs f with a State bound to one transaction, committed when f succeeds.
-func (s *Store) InTx(ctx context.Context, f func(alerter.State) error) error {
+// Ping checks the database is reachable.
+func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
+
+// Elect waits as a standby until this instance holds the alerter's leader lock (state
+// shows the role), then fences every later write with the lease. Only ctx ending stops
+// the wait.
+func (s *Store) Elect(ctx context.Context, cfg svc.Leader, state *leader.State) (leader.Lease, error) {
+	l, err := leader.Wait(ctx, s.pool.Config().ConnConfig, leader.Options{Service: "alerter", Key: LeaderLock,
+		Table: "alerter_leader", Poll: time.Duration(cfg.Poll), Check: time.Duration(cfg.Check)}, state)
+	if err != nil {
+		return nil, err
+	}
+	s.lease.Store(l)
+	return l, nil
+}
+
+// tx runs f in one transaction, committed when f succeeds; with a lease (Elect), the
+// epoch is checked first (leader.ErrFenced: another instance leads now). Every write goes
+// through it.
+func (s *Store) tx(ctx context.Context, f func(pgx.Tx) error) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := f(txState{tx}); err != nil {
+	if l := s.lease.Load(); l != nil {
+		if err := l.Fence(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if err := f(tx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// exec runs one write statement through tx.
+func (s *Store) exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	var tag pgconn.CommandTag
+	err := s.tx(ctx, func(tx pgx.Tx) error {
+		var err error
+		tag, err = tx.Exec(ctx, sql, args...)
+		return err
+	})
+	return tag, err
+}
+
+// InTx runs f with a State bound to one transaction, committed when f succeeds.
+func (s *Store) InTx(ctx context.Context, f func(alerter.State) error) error {
+	return s.tx(ctx, func(tx pgx.Tx) error { return f(txState{tx}) })
 }
 
 type txState struct{ tx pgx.Tx }
@@ -248,7 +301,7 @@ func (s *Store) Forgotten(ctx context.Context) (map[string]alerter.ForgetMark, e
 // PruneForgotten drops the marks of another stream (created at another time) and those
 // past its last sequence (a reset), at start.
 func (s *Store) PruneForgotten(ctx context.Context, stream time.Time, lastSeq uint64) (int64, error) {
-	tag, err := s.pool.Exec(ctx, "DELETE FROM alerter_forgotten WHERE stream_created <> $1 OR stream_seq > $2", stream, int64(lastSeq))
+	tag, err := s.exec(ctx, "DELETE FROM alerter_forgotten WHERE stream_created <> $1 OR stream_seq > $2", stream, int64(lastSeq))
 	return tag.RowsAffected(), err
 }
 
@@ -294,17 +347,17 @@ func (s *Store) Due(ctx context.Context, now time.Time, limit int) ([]Page, erro
 
 // Delivered marks a page delivered.
 func (s *Store) Delivered(ctx context.Context, id string, at time.Time) error {
-	_, err := s.pool.Exec(ctx, "UPDATE alerter_pages SET delivered_at = $2, attempts = attempts + 1 WHERE id = $1", id, at)
+	_, err := s.exec(ctx, "UPDATE alerter_pages SET delivered_at = $2, attempts = attempts + 1 WHERE id = $1", id, at)
 	return err
 }
 
 // Failed records a failed attempt: retried at next, or given up when giveUp.
 func (s *Store) Failed(ctx context.Context, id string, next time.Time, giveUp bool, why string) error {
 	if giveUp {
-		_, err := s.pool.Exec(ctx, "UPDATE alerter_pages SET gave_up_at = now(), attempts = attempts + 1, last_error = $2 WHERE id = $1", id, clean(why))
+		_, err := s.exec(ctx, "UPDATE alerter_pages SET gave_up_at = now(), attempts = attempts + 1, last_error = $2 WHERE id = $1", id, clean(why))
 		return err
 	}
-	_, err := s.pool.Exec(ctx, "UPDATE alerter_pages SET next_attempt = $2, attempts = attempts + 1, last_error = $3 WHERE id = $1",
+	_, err := s.exec(ctx, "UPDATE alerter_pages SET next_attempt = $2, attempts = attempts + 1, last_error = $3 WHERE id = $1",
 		id, next, clean(why))
 	return err
 }
@@ -312,10 +365,10 @@ func (s *Store) Failed(ctx context.Context, id string, next time.Time, giveUp bo
 // Prune drops listener dedupe marks older than window and finished pages older than a
 // week (silence and feed marks stay until cleared).
 func (s *Store) Prune(ctx context.Context, now time.Time, window time.Duration) error {
-	if _, err := s.pool.Exec(ctx, "DELETE FROM alerter_dedupe WHERE key LIKE 'listener:%' AND paged_at < $1", now.Add(-window)); err != nil {
+	if _, err := s.exec(ctx, "DELETE FROM alerter_dedupe WHERE key LIKE 'listener:%' AND paged_at < $1", now.Add(-window)); err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `DELETE FROM alerter_pages WHERE (delivered_at IS NOT NULL OR gave_up_at IS NOT NULL)
+	_, err := s.exec(ctx, `DELETE FROM alerter_pages WHERE (delivered_at IS NOT NULL OR gave_up_at IS NOT NULL)
 		AND created_at < $1`, now.Add(-7*24*time.Hour))
 	return err
 }

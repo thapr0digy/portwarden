@@ -11,7 +11,9 @@ Type=simple
 LoadCredential=nats.nk:/etc/portwarden/nats/alerter.nk
 LoadCredential=webhook.secret:/etc/portwarden/alerter.webhook-secret
 LoadCredential=dsn:/etc/portwarden/alerter.dsn
-# One instance only: it recreates its heartbeat consumer at start.
+# Several instances may run (on other machines, same config and database): one leads,
+# the others stand by (README "Running a standby"). On losing the lead it exits 1 and
+# Restart= brings it back as a standby.
 ExecStart=/usr/bin/portwarden-alerter --config /etc/portwarden/alerter.json
 DynamicUser=yes
 NoNewPrivileges=yes

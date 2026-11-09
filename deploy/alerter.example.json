@@ -23,5 +23,7 @@
     "secret_file": "/run/credentials/portwarden-alerter.service/webhook.secret",
     "timeout": "5s",
     "max_attempts": 5
-  }
+  },
+  "leader": { "poll": "1s", "check": "1s" },
+  "health_listen": "127.0.0.1:8741"
 }

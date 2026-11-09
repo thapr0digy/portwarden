@@ -33,5 +33,6 @@
     "quarantine": "720h",
     "interval": "1h",
     "batch": 1000
-  }
+  },
+  "leader": { "poll": "1s", "check": "1s" }
 }

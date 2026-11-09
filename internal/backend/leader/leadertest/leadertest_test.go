@@ -8,8 +8,10 @@ import (
 
 type recorder struct{ errs []string }
 
-func (r *recorder) Helper()                           {}
-func (r *recorder) Errorf(format string, args ...any) { r.errs = append(r.errs, fmt.Sprintf(format, args...)) }
+func (r *recorder) Helper() {}
+func (r *recorder) Errorf(format string, args ...any) {
+	r.errs = append(r.errs, fmt.Sprintf(format, args...))
+}
 func (r *recorder) Fatal(args ...any)                 { panic(fmt.Sprint(args...)) }
 func (r *recorder) Fatalf(format string, args ...any) { panic(fmt.Sprintf(format, args...)) }
 

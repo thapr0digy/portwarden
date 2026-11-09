@@ -2,7 +2,7 @@
 VM := portwarden
 REPO := $(CURDIR)
 
-.PHONY: vm generate test itest e2e install-agent dist dist-check dist-lint lint-deploy matrix vm-verify dev-test
+.PHONY: vm generate test fuzz itest e2e install-agent dist dist-check dist-lint lint-deploy matrix vm-verify dev-test
 
 # Re-runnable: starts the existing instance, or creates it from dev/lima.yaml.
 vm:
@@ -13,6 +13,30 @@ generate:
 
 test:
 	go test ./...
+
+# Native Go fuzzing of every parser of untrusted input, FUZZTIME each (Go runs one fuzz
+# target per invocation). Stops at the first crash; its input lands in the package's
+# testdata/fuzz/<Target>/, which go test then replays. Deep runs: README "Fuzzing".
+FUZZTIME ?= 30s
+FUZZMINIMIZETIME ?= 10s
+FUZZ_TARGETS := \
+	internal/exposure/nft:FuzzParse \
+	internal/exposure/iptables:FuzzParse \
+	internal/proxy/nginx:FuzzLoad \
+	internal/proxy/apache:FuzzLoad \
+	internal/proxy/haproxy:FuzzLoad \
+	internal/redact:FuzzCmdline \
+	internal/spool:FuzzDecodeRecord \
+	internal/spool:FuzzOpen \
+	internal/inventory:FuzzHandle
+
+fuzz:
+	@for t in $(FUZZ_TARGETS); do \
+		pkg=$${t%%:*}; name=$${t##*:}; \
+		echo "== fuzz $$pkg $$name ($(FUZZTIME))"; \
+		go test -run '^$$' -fuzz "^$$name\$$" -fuzztime $(FUZZTIME) -fuzzminimizetime $(FUZZMINIMIZETIME) ./$$pkg \
+			|| { echo "fuzz: $$pkg $$name failed"; exit 1; }; \
+	done
 
 # Host-only tests of the dev scripts: the VM lock and vm-verify's file list (dev/vmlock-test.sh).
 dev-test:

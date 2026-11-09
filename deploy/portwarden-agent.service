@@ -56,7 +56,8 @@ ProtectHostname=yes
 UMask=0077
 
 # --- Kernel interfaces. AF_NETLINK: sock_diag, rtnetlink and nf_tables (the agent and
-# nft); AF_UNIX: the systemd bus; AF_INET/AF_INET6: NATS and cloud metadata. It never
+# nft); AF_UNIX: the systemd bus and HAProxy/Caddy admin sockets; AF_INET/AF_INET6:
+# NATS, cloud metadata and local proxy admin APIs (README "Admin interfaces"). It never
 # listens. Namespaces are only read through /proc, never entered.
 RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 RestrictNamespaces=yes

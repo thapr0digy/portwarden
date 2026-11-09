@@ -43,6 +43,9 @@ type Backend struct {
 	Unix  string
 	// Note says why it is unresolved, or a server flag ("backup", "down").
 	Note string
+	// Server is the backend's name in the proxy, where it has one (an HAProxy server, a
+	// server-template's prefix); used to match runtime state, not published.
+	Server string
 }
 
 // Route is one routing rule as the config states it.
@@ -74,6 +77,20 @@ type Result struct {
 	Untrusted []string
 	// Newest is the latest modification time of the files read.
 	Newest time.Time
+	// AdminSockets are the runtime API endpoints the config declares (HAProxy's
+	// "stats socket"), for the admin reader; never published as routes.
+	AdminSockets []AdminSocket
+}
+
+// AdminSocket is a runtime/admin API endpoint a config declares.
+type AdminSocket struct {
+	// Network is "unix" (Addr is a path inside the proxy's root) or "tcp" (Addr is
+	// host:port, host possibly empty or "*" for every address).
+	Network, Addr string
+	// Level is the access level written ("admin", "operator", "user"; "" when absent).
+	Level string
+	// Source is file:line.
+	Source string
 }
 
 type fileID struct{ dev, ino uint64 }
@@ -133,6 +150,20 @@ func (r *Reader) Op() bool {
 		return false
 	}
 	r.ops++
+	return true
+}
+
+// Spend counts n bytes the load produced without reading them (an expanded Apache
+// macro) against MaxTotalBytes; false, with the load cut off, once that is exceeded.
+func (r *Reader) Spend(n int) bool {
+	if r.limited {
+		return false
+	}
+	if r.total+n > MaxTotalBytes {
+		r.cut(fmt.Sprintf("more than %d bytes", MaxTotalBytes))
+		return false
+	}
+	r.total += n
 	return true
 }
 

@@ -1,0 +1,223 @@
+{
+ "admin": {
+  "listen": "127.0.0.1:7019"
+ },
+ "apps": {
+  "http": {
+   "servers": {
+    "srv0": {
+     "automatic_https": {
+      "disable": true,
+      "skip": [
+       "app.example.com",
+       "www.app.example.com"
+      ]
+     },
+     "listen": [
+      ":7580"
+     ],
+     "routes": [
+      {
+       "handle": [
+        {
+         "handler": "subroute",
+         "routes": [
+          {
+           "group": "group2",
+           "handle": [
+            {
+             "handler": "subroute",
+             "routes": [
+              {
+               "handle": [
+                {
+                 "handler": "reverse_proxy",
+                 "upstreams": [
+                  {
+                   "dial": "127.0.0.1:9000"
+                  },
+                  {
+                   "dial": "[::1]:9001"
+                  }
+                 ]
+                }
+               ]
+              }
+             ]
+            }
+           ],
+           "match": [
+            {
+             "path": [
+              "/api/*"
+             ]
+            }
+           ]
+          },
+          {
+           "group": "group2",
+           "handle": [
+            {
+             "handler": "subroute",
+             "routes": [
+              {
+               "handle": [
+                {
+                 "handler": "vars",
+                 "root": "/srv/www"
+                },
+                {
+                 "handler": "file_server",
+                 "hide": [
+                  "internal/proxy/caddy/testdata/caddyfile/Caddyfile"
+                 ]
+                }
+               ]
+              }
+             ]
+            }
+           ]
+          }
+         ]
+        }
+       ],
+       "match": [
+        {
+         "host": [
+          "app.example.com",
+          "www.app.example.com"
+         ]
+        }
+       ],
+       "terminal": true
+      }
+     ]
+    },
+    "srv1": {
+     "automatic_https": {
+      "disable": true
+     },
+     "listen": [
+      ":7581"
+     ],
+     "routes": [
+      {
+       "handle": [
+        {
+         "handler": "reverse_proxy",
+         "upstreams": [
+          {
+           "dial": "unix//run/app.sock"
+          }
+         ]
+        }
+       ],
+       "match": [
+        {
+         "path": [
+          "/sock/*"
+         ]
+        }
+       ]
+      },
+      {
+       "handle": [
+        {
+         "handler": "static_response",
+         "headers": {
+          "Location": [
+           "{http.request.orig_uri.path}/"
+          ]
+         },
+         "status_code": 308
+        }
+       ],
+       "match": [
+        {
+         "file": {
+          "try_files": [
+           "{http.request.uri.path}/index.php"
+          ]
+         },
+         "not": [
+          {
+           "path": [
+            "*/"
+           ]
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "handle": [
+        {
+         "handler": "rewrite",
+         "uri": "{http.matchers.file.relative}"
+        }
+       ],
+       "match": [
+        {
+         "file": {
+          "split_path": [
+           ".php"
+          ],
+          "try_files": [
+           "{http.request.uri.path}",
+           "{http.request.uri.path}/index.php",
+           "index.php"
+          ]
+         }
+        }
+       ]
+      },
+      {
+       "handle": [
+        {
+         "handler": "reverse_proxy",
+         "transport": {
+          "protocol": "fastcgi",
+          "split_path": [
+           ".php"
+          ]
+         },
+         "upstreams": [
+          {
+           "dial": "unix//run/php/php-fpm.sock"
+          }
+         ]
+        }
+       ],
+       "match": [
+        {
+         "path": [
+          "*.php"
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    "srv2": {
+     "automatic_https": {
+      "disable": true
+     },
+     "listen": [
+      ":7582"
+     ],
+     "routes": [
+      {
+       "handle": [
+        {
+         "body": "not here",
+         "handler": "static_response",
+         "status_code": 404
+        }
+       ]
+      }
+     ]
+    }
+   }
+  }
+ }
+}

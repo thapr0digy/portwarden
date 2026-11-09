@@ -20,6 +20,8 @@ type directive struct {
 	line      int
 	container bool
 	block     []*directive
+	// via names the macro use this directive was expanded from ("" when written out).
+	via string
 }
 
 func (d *directive) source() string { return fmt.Sprintf("%s:%d", d.file, d.line) }
@@ -43,6 +45,7 @@ type loader struct {
 	defines    map[string]string
 	env        map[string]string
 	modules    map[string]bool
+	macros     macros
 }
 
 type line struct {
@@ -126,16 +129,15 @@ func (l *loader) block(file string, lines []line, pos *int, depth int, end strin
 				}
 				continue
 			case "macro":
-				l.r.Note("<Macro> at %s:%d not expanded", file, ln.num)
-				skip(lines, pos)
+				l.defineMacro(file, ln.num, args, lines, pos)
 				continue
 			}
-			d := &directive{name: name, args: args, file: file, line: ln.num, container: true}
+			d := &directive{name: name, args: args, file: file, line: ln.num, container: true, via: l.macros.via}
 			d.block = l.block(file, lines, pos, depth, name)
 			out = append(out, d)
 			continue
 		}
-		d := &directive{name: strings.ToLower(words[0]), args: words[1:], file: file, line: ln.num}
+		d := &directive{name: strings.ToLower(words[0]), args: words[1:], file: file, line: ln.num, via: l.macros.via}
 		if raw := l.split(ln.text); len(raw) == len(words) {
 			d.raw = raw[1:]
 		}
@@ -143,6 +145,14 @@ func (l *loader) block(file string, lines []line, pos *int, depth int, end strin
 		case "include", "includeoptional":
 			if len(d.args) == 1 {
 				out = append(out, l.include(d, depth)...)
+			}
+			continue
+		case "use":
+			out = append(out, l.use(d, depth)...)
+			continue
+		case "undefmacro":
+			if len(d.args) == 1 {
+				delete(l.macros.defs, strings.ToLower(d.args[0]))
 			}
 			continue
 		case "define":

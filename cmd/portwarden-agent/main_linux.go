@@ -55,10 +55,13 @@ const (
 	imdsRetry        = 30 * time.Second
 	dmiDir           = "/sys/class/dmi/id"
 	defaultProxyPoll = 2 * time.Second
-	proxySettle      = 2 * time.Second  // a changed proxy config is read once it held still this long
-	proxyMinGap      = 10 * time.Second // at most one proxy.routes per proxy per this interval
-	defaultTamper    = 30 * time.Second
-	defaultDropRate  = 1000
+	// defaultProxyAdminPoll: admin interfaces have no file to watch; one small read per
+	// proxy every 30 s catches runtime changes.
+	defaultProxyAdminPoll = 30 * time.Second
+	proxySettle           = 2 * time.Second  // a changed proxy config is read once it held still this long
+	proxyMinGap           = 10 * time.Second // at most one proxy.routes per proxy per this interval
+	defaultTamper         = 30 * time.Second
+	defaultDropRate       = 1000
 )
 
 type options struct {
@@ -71,6 +74,8 @@ type options struct {
 	imds                                                                string
 	proxyMap                                                            string
 	proxyPoll                                                           time.Duration
+	proxyAdmin                                                          map[string]bool
+	proxyAdminPoll                                                      time.Duration
 	tamperInterval                                                      time.Duration
 	tamperFiles                                                         []string
 	tamperDropRate                                                      float64
@@ -96,6 +101,8 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&o.imds, "imds", "auto", "cloud metadata for public IPs: auto (only when DMI says AWS, GCP or Azure) or off")
 	fs.StringVar(&o.proxyMap, "proxy-map", "auto", "map reverse proxies (nginx, Apache, HAProxy configs; observed proxy connections): auto or off")
 	fs.DurationVar(&o.proxyPoll, "proxy-poll", defaultProxyPoll, "how often proxy config files and connection counts are checked")
+	proxyAdmin := fs.String("proxy-admin", "auto", "read trusted proxies' local admin interfaces (Caddy's admin API, HAProxy's stats socket): auto (both), off, or a comma list of caddy,haproxy")
+	fs.DurationVar(&o.proxyAdminPoll, "proxy-admin-poll", defaultProxyAdminPoll, "how often proxy admin interfaces are re-read (0: only on start, restart and recheck)")
 	fs.DurationVar(&o.tamperInterval, "tamper-interval", defaultTamper, "interval between tamper self-checks (0 disables them)")
 	fs.Float64Var(&o.tamperDropRate, "tamper-drop-rate", defaultDropRate, "ring-buffer drops per minute at which events_dropped pages (below it the flag is informational; 0 never pages)")
 	fs.StringVar(&o.natsNkeyDir, "nats-nkey-dir", "", "directory of per-host nkey seeds (host-<host id>.nk, as portwarden-natsauth mint writes them): the agent uses its own host's (one Secret for a whole Kubernetes cluster)")
@@ -133,6 +140,14 @@ func parseFlags(args []string) (options, error) {
 	if o.proxyPoll <= 0 {
 		return o, fmt.Errorf("--proxy-poll must be positive, got %s", o.proxyPoll)
 	}
+	if o.proxyAdminPoll < 0 {
+		return o, fmt.Errorf("--proxy-admin-poll must not be negative, got %s", o.proxyAdminPoll)
+	}
+	kinds, err := parseProxyAdmin(*proxyAdmin)
+	if err != nil {
+		return o, err
+	}
+	o.proxyAdmin = kinds
 	if o.heartbeat <= 0 {
 		return o, fmt.Errorf("--heartbeat must be positive, got %s", o.heartbeat)
 	}

@@ -89,5 +89,40 @@ if command -v haproxy >/dev/null; then
 		ls -d "$c"root/etc/pw-* >/dev/null 2>&1 || continue
 		in_case "$c" 'haproxy -c -f "$PW/haproxy.cfg" >"$CASE/haproxy-c.txt" 2>&1'
 	done
+	# The runtime case: start it, change it over the stats socket, record the servers
+	# state the agent reads (internal/proxy/admin asks "show servers state").
+	in_case "$haproxy_td/runtime/" '
+		cli() { python3 -c "import socket,sys
+s=socket.socket(socket.AF_UNIX); s.connect(\"/tmp/pw-runtime-admin.sock\")
+s.sendall(sys.argv[1].encode()+b\"\n\"); out=b\"\"
+while True:
+    b=s.recv(65536)
+    if not b: break
+    out+=b
+sys.stdout.write(out.decode())" "$1"; }
+		haproxy -D -f "$PW/haproxy.cfg" -p /tmp/pw-runtime.pid
+		trap "kill \$(cat /tmp/pw-runtime.pid); rm -f /tmp/pw-runtime-admin.sock /tmp/pw-runtime.pid" EXIT
+		for _ in $(seq 50); do [ -S /tmp/pw-runtime-admin.sock ] && break; sleep 0.1; done
+		cli "set server app/s2 addr 127.0.0.9 port 7009" >/dev/null
+		cli "disable server app/s1" >/dev/null
+		cli "add server app/extra 127.0.0.1:7300" >/dev/null
+		cli "disable server app/gone" >/dev/null
+		cli "del server app/gone" >/dev/null
+		cli "show servers state" | sed -E "s/^([0-9]+ [^ ]+ [0-9]+ [^ ]+ [^ ]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+) [0-9]+ /\1 0 /" >"$CASE/servers-state.txt"'
 	echo "haproxy fixtures recorded"
+fi
+
+# Caddy: run each case's Caddyfile and record what the admin API says it runs (GET
+# /config/). The admin address is the case's own (its global "admin" option).
+if command -v caddy >/dev/null; then
+	for c in internal/proxy/caddy/testdata/*/; do
+		[ -f "$c/Caddyfile" ] || continue
+		admin=$(sed -n 's/^[[:space:]]*admin[[:space:]]\+\([^[:space:]]*\).*/\1/p' "$c/Caddyfile" | head -1)
+		sudo caddy run --config "$c/Caddyfile" --adapter caddyfile >/dev/null 2>&1 &
+		for _ in $(seq 50); do curl -fsS "http://$admin/config/" >/dev/null 2>&1 && break; sleep 0.1; done
+		curl -fsS "http://$admin/config/" | python3 -m json.tool --indent 1 >"$c/config.json"
+		curl -fsS -X POST "http://$admin/stop" >/dev/null || sudo pkill -f "caddy run --config $c/Caddyfile"
+		wait
+	done
+	echo "caddy fixtures recorded"
 fi

@@ -51,6 +51,9 @@ type vhost struct {
 	addrs  []string
 	names  []string
 	source string
+	// via is the macro use the virtual host was expanded from ("" when written out);
+	// apache2 -S names such a host by the macro and its Use line.
+	via string
 }
 
 func load(fsys conf.FS, o Options) (conf.Result, []vhost) {
@@ -91,7 +94,7 @@ func load(fsys conf.FS, o Options) (conf.Result, []vhost) {
 		if d.name != "virtualhost" || !d.container {
 			continue
 		}
-		v := vhost{source: d.source()}
+		v := vhost{source: d.source(), via: d.via}
 		for _, a := range d.args {
 			v.addrs = append(v.addrs, normVhostAddr(a))
 		}
@@ -110,6 +113,9 @@ func load(fsys conf.FS, o Options) (conf.Result, []vhost) {
 		if root != "" && !proxiesRoot(vr) {
 			st := base
 			st.Path, st.Kind, st.Target, st.Root, st.Source = "/", model.RouteStatic, root, root, d.source()
+			if d.via != "" {
+				st.Notes = append(st.Notes, "from "+d.via)
+			}
 			vr = append([]conf.Route{st}, vr...)
 		}
 		routes = append(routes, vr...)
@@ -186,6 +192,9 @@ func (p *parser) routes(block []*directive, base conf.Route, where string) []con
 			rt.Target = strings.TrimPrefix(d.raw[i], trim)
 		}
 		p.resolve(&rt, target)
+		if d.via != "" {
+			rt.Notes = append(rt.Notes, "from "+d.via)
+		}
 		out = append(out, rt)
 	}
 	for _, d := range block {

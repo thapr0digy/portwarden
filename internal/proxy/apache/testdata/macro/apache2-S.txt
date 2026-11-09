@@ -1,0 +1,20 @@
+[Mon Nov 09 15:29:08.292974 2026] [macro:warn] [pid 2687067:tid 261001448235040] AH02797: macro 'apphost' (defined on line 6 of "/etc/pw-macro/macros/defs.conf"): argument name prefix conflict ($name #1 and $nameport #2), be careful about your macro definition!
+VirtualHost configuration:
+127.0.0.1:8085         internal.local (/etc/pw-macro/sites-enabled/apps.conf:4)
+*:80                   is a NameVirtualHost
+         default server a.example (macro 'apphost' (defined on line 6 of "/etc/pw-macro/macros/defs.conf") used on line 1 of "/etc/pw-macro/sites-enabled/apps.conf":1)
+         port 80 namevhost a.example (macro 'apphost' (defined on line 6 of "/etc/pw-macro/macros/defs.conf") used on line 1 of "/etc/pw-macro/sites-enabled/apps.conf":1)
+                 alias www.a.example
+         port 80 namevhost b.example (macro 'apphost' (defined on line 6 of "/etc/pw-macro/macros/defs.conf") used on line 2 of "/etc/pw-macro/sites-enabled/apps.conf":1)
+                 alias www.b.example
+ServerRoot: "/etc/pw-macro"
+Main DocumentRoot: "/var/www/html"
+Main ErrorLog: "/var/log/apache2/error.log"
+Mutex proxy: using_defaults
+Mutex default: dir="/var/lock/apache2" mechanism=fcntl 
+Mutex watchdog-callback: using_defaults
+PidFile: "/var/run/apache2/apache2.pid"
+Define: DUMP_VHOSTS
+Define: DUMP_RUN_CFG
+User: name="www-data" id=33
+Group: name="www-data" id=33

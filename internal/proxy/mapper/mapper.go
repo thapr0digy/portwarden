@@ -74,6 +74,8 @@ type Config struct {
 	Poll, Settle time.Duration
 	// Recheck re-reads every config and namespace address; 0 disables.
 	Recheck time.Duration
+	// Admin reads the admin interfaces of trusted proxies; nil: never.
+	Admin *AdminConfig
 }
 
 type tracked struct {
@@ -92,6 +94,8 @@ type tracked struct {
 	pendingReload bool
 	trigger       string
 	at            time.Time
+	// adm is the proxy's admin interface: its endpoints and last answer.
+	adm adminState
 }
 
 type rawKey struct {
@@ -113,6 +117,9 @@ type Mapper struct {
 	current   []state.Listener
 	attached  string // the last cgroup and pid sets Conns accepted, to skip no-op updates
 	trackErr  string // why the last tracking update failed ("" when it succeeded)
+	// ctx is Run's context, for the admin reads it starts; adminDone brings them back.
+	ctx       context.Context
+	adminDone chan adminResult
 }
 
 // New returns a mapper; Poll and Settle default to 2 s.
@@ -126,6 +133,7 @@ func New(cfg Config) *Mapper {
 	return &Mapper{
 		cfg: cfg, listeners: make(chan []state.Listener, 1),
 		proxies: make(map[string]*tracked), addrs: make(map[uint32][]netip.Addr),
+		ctx: context.Background(), adminDone: make(chan adminResult, 16),
 	}
 }
 
@@ -147,6 +155,7 @@ func (m *Mapper) Listeners(ls []state.Listener) {
 
 // Run maps until ctx ends, calling out (from this goroutine) after every change.
 func (m *Mapper) Run(ctx context.Context, out func(proxy.Update)) {
+	m.ctx = ctx
 	poll := time.NewTicker(m.cfg.Poll)
 	defer poll.Stop()
 	var recheckC <-chan time.Time
@@ -155,10 +164,24 @@ func (m *Mapper) Run(ctx context.Context, out func(proxy.Update)) {
 		defer t.Stop()
 		recheckC = t.C
 	}
+	var adminC <-chan time.Time
+	if m.cfg.Admin != nil && m.cfg.Admin.Poll > 0 {
+		t := time.NewTicker(m.cfg.Admin.Poll)
+		defer t.Stop()
+		adminC = t.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case r := <-m.adminDone:
+			if m.applyAdmin(ctx, r, time.Now()) {
+				out(m.update())
+			}
+		case <-adminC:
+			for _, t := range m.proxies {
+				m.startAdmin(ctx, t)
+			}
 		case ls := <-m.listeners:
 			m.current = ls
 			if m.sync(time.Now()) {
@@ -206,8 +229,10 @@ func (m *Mapper) sync(now time.Time) bool {
 			m.read(t, model.ProxyTriggerStarted, now)
 			changed = true
 		case t.inst.Master().PID != inst.Master().PID || t.inst.Root != inst.Root:
-			// A restart: the new master may run a different config.
+			// A restart: the new master may run a different config, and the old one's
+			// admin answer is no longer the proxy's.
 			t.inst = inst
+			t.adm = t.adm.reset()
 			m.read(t, model.ProxyTriggerListener, now)
 			changed = true
 		case !sameInstance(t.inst, inst):
@@ -346,22 +371,35 @@ func (m *Mapper) read(t *tracked, trigger string, now time.Time) {
 	t.trigger, t.at = trigger, now
 	t.pending = ""
 	defer func() { t.pendingReload = m.pendingReload(t) }()
-	if !discover.ConfigReadable(t.inst.Kind) {
+	if !m.readable(t.inst.Kind) {
 		t.res = conf.Result{}
 		return
 	}
 	if !t.inst.Trusted {
 		t.res = conf.Result{Notes: []string{"config:untrusted " + t.inst.Untrusted + "; not read, no connection tracking"}}
 		t.fp = ""
+		t.adm = t.adm.reset()
 		return
 	}
 	fsys, err := m.cfg.OpenRoot(t.inst.Root)
 	if err != nil {
 		t.res = conf.Result{Notes: []string{"unreadable root " + t.inst.Root + ": " + err.Error()}}
 		t.fp = ""
+		t.adm = t.adm.reset()
 		return
 	}
 	defer fsys.Close()
+	defer func() {
+		// After the config: HAProxy's stats sockets come from it. An untrusted config's
+		// sockets are not used (the routes were dropped above, the sockets with them).
+		if len(t.res.Untrusted) > 0 {
+			t.res.AdminSockets = nil
+			t.adm = t.adm.reset()
+			return
+		}
+		m.planAdmin(t, fsys)
+		m.startAdmin(m.ctx, t)
+	}()
 	switch t.inst.Kind {
 	case discover.KindNginx:
 		t.res = nginx.Load(fsys, t.inst.NginxConf)
@@ -369,6 +407,8 @@ func (m *Mapper) read(t *tracked, trigger string, now time.Time) {
 		t.res = apache.Load(fsys, t.inst.Apache)
 	case discover.KindHAProxy:
 		t.res = haproxy.Load(fsys, t.inst.HAProxyFile)
+	default: // read through the admin interface only (planAdmin)
+		t.res = conf.Result{}
 	}
 	t.fp = fingerprint(fsys, t.res.Watch)
 	if len(t.res.Untrusted) > 0 {
@@ -527,7 +567,8 @@ func (m *Mapper) update() proxy.Update {
 		inst.Procs = slices.Clone(inst.Procs[:min(len(inst.Procs), MaxProcs)])
 		inst.Listeners = slices.Clone(inst.Listeners)
 		inst.Files = slices.Clone(t.res.Files)
-		inst.Notes = slices.Clone(t.res.Notes)
+		routes, notes := t.effective()
+		inst.Notes = notes
 		switch {
 		case m.cfg.Conns == nil:
 			inst.Notes = append(inst.Notes, "observed connections unavailable")
@@ -537,12 +578,12 @@ func (m *Mapper) update() proxy.Update {
 		if t.pendingReload {
 			inst.Notes = append(inst.Notes, "pending reload: config files changed after the running workers started; routes are as written")
 		}
-		if !t.inst.Trusted && !discover.ConfigReadable(inst.Kind) {
+		if !t.inst.Trusted && !m.readable(inst.Kind) {
 			inst.Notes = append(inst.Notes, "config:untrusted "+t.inst.Untrusted+"; no connection tracking")
-		} else if !discover.ConfigReadable(inst.Kind) {
+		} else if !m.readable(inst.Kind) {
 			inst.Notes = append(inst.Notes, "config not read for "+inst.Kind+": routes are inferred from observed connections")
 		}
-		s := proxy.State{Instance: inst, Routes: t.res.Routes, Trigger: t.trigger, At: t.at}
+		s := proxy.State{Instance: inst, Routes: routes, Trigger: t.trigger, At: t.at}
 		for _, o := range t.observed {
 			s.Observed = append(s.Observed, o)
 		}

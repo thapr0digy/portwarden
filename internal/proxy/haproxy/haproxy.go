@@ -1,7 +1,9 @@
 // Package haproxy reads an HAProxy configuration (each -f file, or every *.cfg in a -f
 // directory, in order) and lists its routes: for each frontend and listen section, its
 // bind addresses and the backends its use_backend rules and default_backend name, with
-// their servers. The runtime API is not used.
+// their servers. It also lists the config's "stats socket" endpoints; the runtime API's
+// answer ("show servers state", read by internal/proxy/admin) is parsed by
+// ParseServersState and folded in by Overlay.
 package haproxy
 
 import (
@@ -54,7 +56,56 @@ func Load(fsys conf.FS, paths []string) conf.Result {
 			sections = appendSections(sections, f, string(data))
 		}
 	}
-	return r.Finish(routes(sections, conf.LoadNames(fsys)))
+	res := r.Finish(routes(sections, conf.LoadNames(fsys)))
+	res.AdminSockets = statsSockets(sections)
+	return res
+}
+
+// MaxAdminSockets bounds the stats sockets kept from one config.
+const MaxAdminSockets = 16
+
+// statsSockets lists the global section's "stats socket" lines that the runtime API can
+// be reached on: a Unix path (bare, or unix@) or a TCP address (ipv4@, ipv6@, or a plain
+// host:port). abns@, fd@ and sockpair@ sockets cannot be connected to and are left out.
+func statsSockets(sections []*section) []conf.AdminSocket {
+	var out []conf.AdminSocket
+	for _, s := range sections {
+		if s.kind != "global" {
+			continue
+		}
+		for _, l := range s.lines {
+			w := l.words
+			if len(w) < 3 || w[0] != "stats" || w[1] != "socket" || len(out) >= MaxAdminSockets {
+				continue
+			}
+			as := conf.AdminSocket{Source: source(l)}
+			for i := 3; i+1 < len(w); i++ {
+				if w[i] == "level" {
+					as.Level = w[i+1]
+				}
+			}
+			a := w[2]
+			switch {
+			case strings.HasPrefix(a, "unix@"):
+				as.Network, as.Addr = "unix", strings.TrimPrefix(a, "unix@")
+			case strings.HasPrefix(a, "/"):
+				as.Network, as.Addr = "unix", a
+			case strings.HasPrefix(a, "abns@") || strings.HasPrefix(a, "fd@") || strings.HasPrefix(a, "sockpair@"):
+				continue
+			default:
+				for _, p := range []string{"ipv4@", "ipv6@", "tcp@", "tcp4@", "tcp6@"} {
+					a = strings.TrimPrefix(a, p)
+				}
+				host, port, ok := splitServer(a)
+				if !ok || port == "" {
+					continue
+				}
+				as.Network, as.Addr = "tcp", joinHostPort(host, port)
+			}
+			out = append(out, as)
+		}
+	}
+	return out
 }
 
 func appendSections(sections []*section, file, src string) []*section {
@@ -129,6 +180,7 @@ func split(s string) []string {
 
 type server struct {
 	src   line
+	name  string
 	addr  string
 	flags string
 	tmpl  bool
@@ -262,7 +314,9 @@ func fill(rt *conf.Route, name string, backends map[string][]server, names *conf
 		return
 	}
 	for _, sv := range srvs {
-		rt.Backends = append(rt.Backends, endpoint(sv, names))
+		b := endpoint(sv, names)
+		b.Server = sv.name
+		rt.Backends = append(rt.Backends, b)
 	}
 }
 
@@ -272,9 +326,9 @@ func servers(s *section) []server {
 		w := l.words
 		switch {
 		case w[0] == "server" && len(w) > 2:
-			out = append(out, server{src: l, addr: w[2], flags: flags(w[3:])})
+			out = append(out, server{src: l, name: w[1], addr: w[2], flags: flags(w[3:])})
 		case w[0] == "server-template" && len(w) > 3:
-			out = append(out, server{src: l, addr: w[3], flags: flags(w[4:]), tmpl: true})
+			out = append(out, server{src: l, name: w[1], addr: w[3], flags: flags(w[4:]), tmpl: true})
 		}
 	}
 	return out

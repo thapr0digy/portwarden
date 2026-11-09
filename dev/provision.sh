@@ -26,6 +26,11 @@ if [ "$PROVISION_E2E" = 1 ]; then
   apt-get install -y nginx postgresql lintian
   apt-get install -y docker.io || echo "provision: docker.io unavailable; the e2e docker step will SKIP" >&2
   systemctl enable --now postgresql
+  # Proxies whose admin interfaces the agent reads (dev/proxy-fixtures.sh and the
+  # internal/proxy/admin live tests start their own instances). The packaged caddy.service
+  # would take :80 from nginx, so it stays off.
+  apt-get install -y haproxy apache2 caddy
+  systemctl disable --now caddy || true
 fi
 
 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION} "; then

@@ -46,7 +46,6 @@ ProxyPass /if http://127.0.0.1:1001/
 		"unresolved: balancer://nobody has no members",
 		"conditional: <if %{HTTP_HOST} == 'x'>",
 		"config note: unreadable /etc/httpd/missing.conf: file does not exist",
-		"config note: <Macro> at /etc/httpd/conf/httpd.conf:11 not expanded",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)

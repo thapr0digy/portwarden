@@ -1,0 +1,9 @@
+127.0.0.1:7480 names= path="default" proxy "app" upstream=app
+    -> 127.0.0.1:7001 127.0.0.1:7001 (maint (runtime))
+    -> 127.0.0.9:7009 127.0.0.9:7009 (runtime address (file: 127.0.0.1:7002))
+    -> 127.0.0.1:7003 127.0.0.1:7003 (not in runtime state)
+    -> 127.0.0.1:7100 127.0.0.1:7100 (server-template)
+    -> 127.0.0.1:7100 127.0.0.1:7100 (server-template web (runtime))
+    -> 127.0.0.1:7100 127.0.0.1:7100 (server-template web (runtime))
+    -> 127.0.0.1:7300 127.0.0.1:7300 (maint (runtime); added at runtime)
+    @ /etc/pw-runtime/haproxy.cfg:14

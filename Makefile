@@ -25,6 +25,8 @@ FUZZ_TARGETS := \
 	internal/proxy/nginx:FuzzLoad \
 	internal/proxy/apache:FuzzLoad \
 	internal/proxy/haproxy:FuzzLoad \
+	internal/proxy/haproxy:FuzzServersState \
+	internal/proxy/caddy:FuzzParse \
 	internal/redact:FuzzCmdline \
 	internal/spool:FuzzDecodeRecord \
 	internal/spool:FuzzOpen \

@@ -88,6 +88,18 @@ func TestAgentUnit(t *testing.T) {
 	}
 }
 
+// The iptables-legacy example drop-in adds exactly CAP_NET_RAW and nothing else; the
+// unit itself keeps its four capabilities (TestAgentUnit).
+func TestAgentIptablesLegacyExample(t *testing.T) {
+	const dropIn = "portwarden-agent-iptables-legacy.example.conf"
+	d := directives(t, dropIn)
+	want(t, dropIn, d, "AmbientCapabilities", "CAP_NET_RAW")
+	want(t, dropIn, d, "CapabilityBoundingSet", "CAP_NET_RAW")
+	if len(d) != 2 {
+		t.Errorf("%s sets %d directives, want only the two capability lists: %v", dropIn, len(d), d)
+	}
+}
+
 func TestBackendUnits(t *testing.T) {
 	for _, svc := range []string{"inventory", "alerter", "verifier"} {
 		unit := "portwarden-" + svc + ".service"

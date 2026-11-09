@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"golang.org/x/sys/unix"
 )
 
 // SelfExeCheck watches the running executable: its baseline is the hash of
@@ -44,6 +45,63 @@ func SelfExeHash() (path, hash string, err error) {
 
 // SelfTracer checks the agent's own threads.
 func SelfTracer() *Tracer { return &Tracer{TaskDir: "/proc/self/task"} }
+
+// Harden marks the process not dumpable (prctl PR_SET_DUMPABLE 0): the kernel then owns
+// its /proc/<pid> files as root, so a process with the agent's uid (even with the agent's
+// capabilities, which do not include CAP_DAC_OVERRIDE) cannot open its mem, environ or
+// maps, and no core dump is written. The flag is per process (all threads). Root can
+// still read and write the memory.
+func Harden() error {
+	return unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0)
+}
+
+// SelfDumpable checks every pass that the process is still not dumpable; startErr is
+// Harden's error at start, if any.
+func SelfDumpable(startErr error) *Dumpable {
+	return &Dumpable{Get: getDumpable, StartErr: startErr}
+}
+
+func getDumpable() (int, error) {
+	return unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
+}
+
+// SelfReadProbe reads each of the agent's own /proc files that its checks and start-up
+// rely on, and returns one error per path that failed. After Harden these files are
+// owned by root; the kernel still lets a process reach its own entries (the ptrace check
+// passes for its own thread group, and these files are world-readable), and this probe
+// proves it on the running host.
+func SelfReadProbe() []error {
+	var errs []error
+	add := func(what string, err error) {
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", what, err))
+		}
+	}
+	_, err := os.Readlink("/proc/self/exe")
+	add("readlink /proc/self/exe", err)
+	add("read /proc/self/exe", readFirstByte("/proc/self/exe"))
+	_, err = SelfTracer().Run()
+	add("ptrace check (/proc/self/task)", err)
+	for _, p := range []string{"/proc/self/ns/net", "/proc/thread-self/ns/net"} {
+		_, err := os.Stat(p)
+		add("stat "+p, err)
+	}
+	for _, p := range []string{"/proc/self/cgroup", "/proc/self/stat"} {
+		_, err := os.ReadFile(p)
+		add("read "+p, err)
+	}
+	return errs
+}
+
+func readFirstByte(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Read(make([]byte, 1))
+	return err
+}
 
 const (
 	systemdDest  = "org.freedesktop.systemd1"

@@ -322,3 +322,28 @@ func TestTracer(t *testing.T) {
 		t.Fatal("an unreadable task dir must be unknown")
 	}
 }
+
+func TestDumpableCheckReportsUnknown(t *testing.T) {
+	value, getErr := 0, error(nil)
+	d := &Dumpable{Get: func() (int, error) { return value, getErr }}
+	if flags, err := d.Run(); err != nil || len(flags) != 0 {
+		t.Fatalf("not dumpable must pass: %+v %v", flags, err)
+	}
+	value = 1
+	if _, err := d.Run(); err == nil || !strings.Contains(err.Error(), "dumpable again") {
+		t.Fatalf("dumpable after a clean start must be unknown: %v", err)
+	}
+	d.StartErr = errors.New("operation not permitted")
+	if _, err := d.Run(); err == nil || !strings.Contains(err.Error(), "operation not permitted") {
+		t.Fatalf("the start error must be named: %v", err)
+	}
+	getErr = errors.New("boom")
+	if _, err := d.Run(); err == nil {
+		t.Fatal("an unreadable flag must be unknown")
+	}
+	value, getErr = 1, nil
+	st := NewMonitor(d).Pass(t0).Status
+	if len(st.Flags) != 0 || len(st.Unknown) != 1 || !strings.HasPrefix(st.Unknown[0], "dumpable: ") {
+		t.Fatalf("a dumpable agent is unknown, never a flag: %+v", st)
+	}
+}

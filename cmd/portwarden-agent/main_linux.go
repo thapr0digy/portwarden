@@ -169,6 +169,8 @@ func main() {
 }
 
 func run(opts options, log *slog.Logger) error {
+	// First, before the NATS seed or any probe is in memory.
+	hardenErr := hardenProcess(log)
 	if err := preflight.Check(kernelRelease()); err != nil {
 		return err
 	}
@@ -333,7 +335,7 @@ func run(opts options, log *slog.Logger) error {
 	}
 
 	if opts.tamperInterval > 0 {
-		mon := newTamperMonitor(self, extraFiles, opts.tamperDropRate, pr, proxyConns, log)
+		mon := newTamperMonitor(self, extraFiles, opts.tamperDropRate, pr, proxyConns, hardenErr, log)
 		beats.Add(1)
 		go func() {
 			defer beats.Done()

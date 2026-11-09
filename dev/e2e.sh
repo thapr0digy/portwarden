@@ -49,11 +49,15 @@
 #  11. hardened unit and tamper (M6): until here the agent ran with --tamper-interval 1s and
 #      must have raised no tamper signal. Then the deploy/ unit itself (as the .deb installs
 #      it, with a runtime drop-in for the e2e NATS) runs the agent as portwarden-agent under
-#      the full hardening: it publishes a listener, the host recovers, and each induced
+#      the full hardening: it publishes a listener, the host recovers, it is not dumpable
+#      (its /proc/<pid>/mem is root-owned and a process with its uid and the unit's four
+#      capabilities is refused it, while a dumpable control with the same uid and caps is
+#      readable; the process_vm_readv result is printed as measured), and each induced
 #      tamper raises a TAMPER event and one alerter page: a ptrace (PTRACE_SEIZE), an edit
 #      of the unit file, the executable replaced on disk, and the agent's cgroup connect
 #      links detached from outside (bpftool link detach); the ptrace and the restored unit
-#      file and executable clear again.
+#      file and executable clear again. After the ptrace the inventory's status lists the
+#      dumpable check and nothing unknown.
 # Self-contained: it builds its own binaries, runs its own nats-server on a private port
 # and store, runs its agent with its own spool directory, stops the portwarden-agent
 # systemd unit while it runs (it would share the BPF programs' run counters) and puts
@@ -982,6 +986,13 @@ sudo tee "$UNIT_DROPIN_DIR/e2e.conf" >/dev/null <<UNIT
 [Service]
 Environment="PORTWARDEN_AGENT_ARGS=--nats-url $nats_url --nats-nkey $UNIT_CRED_DIR/host.nk --heartbeat 1s --recheck ${RECHECK_S}s --tamper-interval 1s --spool-dir $UNIT_SPOOL"
 UNIT
+# The run counter lives in the spool directory: carry the e2e agent's over, as one shared
+# spool would, so the inventory orders the unit's run after it instead of skipping its
+# messages as an earlier run's.
+sudo install -d -m 0700 -o portwarden-agent -g portwarden-agent /var/lib/portwarden "$UNIT_SPOOL"
+if sudo test -f "$work/spool/run-number"; then
+	sudo install -m 0600 -o portwarden-agent -g portwarden-agent "$work/spool/run-number" "$UNIT_SPOOL/run-number"
+fi
 sudo systemctl daemon-reload
 sudo systemctl start portwarden-agent
 unit_pid() { systemctl show -p MainPID --value portwarden-agent; }
@@ -998,6 +1009,60 @@ sudo journalctl -u portwarden-agent --since "-2min" -o cat | grep -q '"msg":"tam
 	fail "the unit's agent does not watch its unit files"
 upid=$(unit_pid)
 echo "hardened unit: user $(ps -o user= -p "$upid"), CapEff $(awk '/^CapEff:/ {print $2}' "/proc/$upid/status"), Seccomp $(awk '/^Seccomp:/ {print $2}' "/proc/$upid/status"); OPENED :$UNIT_PORT; host_recovered paged"
+
+log "hardening: the unit's agent is not dumpable, so its memory is closed to its own uid"
+sudo journalctl -u portwarden-agent --since "-2min" -o cat | grep -q '"msg":"hardening: not dumpable; self-reads ok"' ||
+	fail "the unit's agent did not report its hardening: $(sudo journalctl -u portwarden-agent --since "-2min" -o cat | grep hardening | head -3)"
+mem_owner=$(sudo stat -c %U "/proc/$upid/mem")
+[ "$mem_owner" = root ] || fail "/proc/$upid/mem is owned by $mem_owner, want root (the agent is still dumpable)"
+# A process with the agent's uid and exactly the unit's four capabilities, CAP_SYS_PTRACE
+# included. Without them the kernel already refuses it (the agent's capabilities are not
+# a subset of its own), so only this case shows what the dumpable flag adds.
+unit_caps=+bpf,+perfmon,+sys_ptrace,+net_admin
+as_agent_uid() {
+	sudo setpriv --reuid portwarden-agent --regid portwarden-agent --clear-groups \
+		--inh-caps "$unit_caps" --ambient-caps "$unit_caps" "$@"
+}
+# mem_probe <pid>: "mem=<ok|EACCES|errno N> vm_readv=<ok|errno N>", reading one byte of
+# the target's first readable mapping through /proc/<pid>/mem and process_vm_readv(2).
+mem_probe() {
+	as_agent_uid python3 -c 'import ctypes, errno, os, sys
+pid = int(sys.argv[1])
+addr = None
+with open("/proc/%d/maps" % pid) as maps:
+    for line in maps:
+        rng, perms = line.split()[:2]
+        if perms.startswith("r"):
+            addr = int(rng.split("-")[0], 16)
+            break
+try:
+    with open("/proc/%d/mem" % pid, "rb", buffering=0) as f:
+        f.seek(addr)
+        f.read(1)
+    mem = "ok"
+except OSError as e:
+    mem = "EACCES" if e.errno == errno.EACCES else "errno %d" % e.errno
+class iovec(ctypes.Structure):
+    _fields_ = [("base", ctypes.c_void_p), ("len", ctypes.c_size_t)]
+libc = ctypes.CDLL(None, use_errno=True)
+buf = ctypes.create_string_buffer(1)
+local, remote = iovec(ctypes.addressof(buf), 1), iovec(addr, 1)
+n = libc.process_vm_readv(pid, ctypes.byref(local), 1, ctypes.byref(remote), 1, 0)
+print("mem=%s vm_readv=%s" % (mem, "ok" if n == 1 else "errno %d" % ctypes.get_errno()))' "$1"
+}
+as_agent_uid sleep 60 &
+control=$!
+pids+=($control)
+# sudo (or sudo-rs, with its pty monitor) sits between; setpriv execs sleep as the agent's uid.
+control_pid() { pgrep -n -u portwarden-agent -x sleep; }
+control_up() { [ -n "$(control_pid)" ]; }
+wait_for "the control process" 5 control_up
+control_result=$(mem_probe "$(control_pid)")
+case "$control_result" in mem=ok*) ;; *) fail "the control (a dumpable process with the agent's uid) is not readable: $control_result" ;; esac
+agent_result=$(mem_probe "$upid")
+case "$agent_result" in mem=EACCES*) ;; *) fail "/proc/$upid/mem is not denied to the agent's uid: $agent_result" ;; esac
+echo "hardening: /proc/<pid>/mem owner root; agent's uid with the unit's caps: agent $agent_result, dumpable control $control_result"
+sudo kill "$(control_pid)" 2>/dev/null || true
 
 # tamper_seen <regex>: a TAMPER line matches.
 tamper_seen() { seen "TAMPER .*$1" 1; }
@@ -1025,6 +1090,13 @@ wait "$tracer" || fail "the ptrace helper failed"
 wait_for "TAMPER cleared=ptraced:self" "$TAMPER_WINDOW_S" tamper_seen "cleared=ptraced:self"
 wait_for "a tamper page for ptraced" 15 has_tamper_page "ptraced:self"
 echo "tamper ptrace: $(grep -m1 'TAMPER raised=ptraced' "$work/watch.log" | cut -d' ' -f4-)"
+# The tamper events above carry the hardened agent's full status: every check ran, the
+# dumpable one included, and none is degraded to unknown.
+hardened_status() { api "/v1/hosts/$host_id" | jq -e '.tamper.checks | index("dumpable") != null' >/dev/null; }
+wait_for "the hardened agent's status in the inventory (with the dumpable check)" 15 hardened_status
+hardened=$(api "/v1/hosts/$host_id" | jq -c '.tamper | {checks, unknown}')
+jq -e '.unknown == []' <<<"$hardened" >/dev/null || fail "a tamper check of the hardened agent is degraded: $hardened"
+echo "hardening: tamper checks $(jq -c .checks <<<"$hardened"), unknown $(jq -c .unknown <<<"$hardened")"
 
 log "tamper: unit file edited"
 unit_file=/etc/systemd/system/portwarden-agent.service

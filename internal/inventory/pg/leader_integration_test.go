@@ -36,7 +36,7 @@ func TestInventoryWritesAreFenced(t *testing.T) {
 		return inventory.Event{Meta: inventory.Meta{StreamSeq: 1, StreamTime: at},
 			Msg: &asmv1.Heartbeat{HostId: h1, RunId: "r1", Seq: 1}}
 	}
-	if err := old.Apply(ctx, hb(time.Now())); err != nil {
+	if err := old.SetCursor(ctx, h1, inventory.Cursor{RunID: "r1", LastSeq: 1}); err != nil {
 		t.Fatalf("the leader's own write: %v", err)
 	}
 	got := make(chan leader.Lease, 1)

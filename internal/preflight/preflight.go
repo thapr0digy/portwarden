@@ -8,6 +8,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/cilium/ebpf/btf"
+
+	"github.com/thapr0digy/portwarden/internal/bpftarget"
 )
 
 const (
@@ -77,12 +81,96 @@ func checkLockdownFile(path string) error {
 	return CheckLockdown(string(raw))
 }
 
-// Check runs every startup check against the live host, given the `uname -r` release.
-func Check(kernelRelease string) error {
+// MissingTargetsError reports every kernel function the agent's programs attach to that
+// the running kernel's BTF lacks (or names more than once, which the loader refuses).
+type MissingTargetsError struct {
+	Release   string
+	Missing   []bpftarget.Target
+	Ambiguous []bpftarget.Target
+}
+
+func (e *MissingTargetsError) Error() string {
+	n := len(e.Missing) + len(e.Ambiguous)
+	var b strings.Builder
+	fmt.Fprintf(&b, "kernel %s cannot attach %d kernel function", e.Release, n)
+	if n != 1 {
+		b.WriteString("s")
+	}
+	b.WriteString(" the agent traces:")
+	if len(e.Missing) > 0 {
+		b.WriteString(" missing " + joinTargets(e.Missing))
+	}
+	if len(e.Ambiguous) > 0 {
+		if len(e.Missing) > 0 {
+			b.WriteString(";")
+		}
+		b.WriteString(" ambiguous (several kernel symbols share the name) " + joinTargets(e.Ambiguous))
+	}
+	b.WriteString("; this kernel is not supported (the agent has no degraded mode)")
+	return b.String()
+}
+
+func joinTargets(ts []bpftarget.Target) string {
+	parts := make([]string, len(ts))
+	for i, t := range ts {
+		parts[i] = t.String()
+	}
+	return strings.Join(parts, ", ")
+}
+
+// CheckAttachTargets looks every target up in spec the way cilium/ebpf does when it
+// loads the program: a function (a typedef for tp_btf) of exactly that name. A name that
+// is absent or names another kind of type is missing; one that matches several is
+// ambiguous, which the loader refuses too. All problems are reported in one
+// *MissingTargetsError.
+func CheckAttachTargets(spec *btf.Spec, targets []bpftarget.Target, release string) error {
+	problems := &MissingTargetsError{Release: release}
+	for _, t := range targets {
+		var err error
+		if t.IsTypedef() {
+			var td *btf.Typedef
+			err = spec.TypeByName(t.Func, &td)
+		} else {
+			var fn *btf.Func
+			err = spec.TypeByName(t.Func, &fn)
+		}
+		switch {
+		case err == nil:
+		case errors.Is(err, btf.ErrNotFound):
+			problems.Missing = append(problems.Missing, t)
+		case errors.Is(err, btf.ErrMultipleMatches):
+			problems.Ambiguous = append(problems.Ambiguous, t)
+		default:
+			return fmt.Errorf("look up %s in the kernel BTF: %w", t, err)
+		}
+	}
+	if len(problems.Missing)+len(problems.Ambiguous) > 0 {
+		return problems
+	}
+	return nil
+}
+
+// checkKernelTargets loads the kernel's BTF with load and checks targets against it. A
+// BTF that cannot be read is reported apart from functions missing from it.
+func checkKernelTargets(load func() (*btf.Spec, error), targets []bpftarget.Target, release string) error {
+	spec, err := load()
+	if err != nil {
+		return fmt.Errorf("read kernel BTF at %s: %w", btfPath, err)
+	}
+	return CheckAttachTargets(spec, targets, release)
+}
+
+// Check runs every startup check against the live host, given the `uname -r` release
+// and the kernel functions the agent's programs attach to. It runs before anything is
+// attached.
+func Check(kernelRelease string, targets []bpftarget.Target) error {
 	if err := CheckKernelRelease(kernelRelease); err != nil {
 		return err
 	}
 	if err := checkBTF(btfPath); err != nil {
+		return err
+	}
+	if err := checkKernelTargets(btf.LoadKernelSpec, targets, kernelRelease); err != nil {
 		return err
 	}
 	return checkLockdownFile(lockdownPath)

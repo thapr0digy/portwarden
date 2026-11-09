@@ -33,12 +33,15 @@ import (
 )
 
 // TestMain doubles as the alerter binary for the child-process tests: with
-// PW_TEST_HELPER set it runs the real main (with an in-memory store) on --config
-// PW_TEST_CONFIG.
+// PW_TEST_HELPER set it runs the real main (with an in-memory store, or PostgreSQL with
+// PW_TEST_REAL_PG) on --config PW_TEST_CONFIG.
 func TestMain(m *testing.M) {
 	defaultHealthListen = "127.0.0.1:0" // tests never take the real port
 	if os.Getenv("PW_TEST_HELPER") == "1" {
 		openStore = opener(newFakeStore())
+		if os.Getenv("PW_TEST_REAL_PG") == "1" {
+			openStore = openPG // the two-instance tests (handover_integration_test.go)
+		}
 		os.Args = []string{os.Args[0], "--config", os.Getenv("PW_TEST_CONFIG")}
 		main()
 		return

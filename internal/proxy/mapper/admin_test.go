@@ -173,7 +173,9 @@ func TestCaddyRoutesFromAdmin(t *testing.T) {
 	}
 	// An answer that does not parse is undetermined too.
 	fa.set("{", nil)
-	u = next("bad json", func(u proxy.Update) bool { return strings.Contains(instNotes(u), "admin:undetermined localhost:2019: caddy config") })
+	u = next("bad json", func(u proxy.Update) bool {
+		return strings.Contains(instNotes(u), "admin:undetermined localhost:2019: caddy config")
+	})
 	if len(u.States[0].Routes) != 0 {
 		t.Errorf("routes from a broken answer: %+v", u.States[0].Routes)
 	}
@@ -193,7 +195,9 @@ func TestCaddyAdminOffAndUntrusted(t *testing.T) {
 	fa2 := &fakeAdmin{body: caddyConfig}
 	m2, next2 := runAdminMapper(t, 1000, fu, fa2, 10*time.Millisecond)
 	m2.Listeners(caddyListeners(900))
-	u = next2("untrusted", func(u proxy.Update) bool { return strings.Contains(instNotes(u), "config:untrusted master runs as uid 1000") })
+	u = next2("untrusted", func(u proxy.Update) bool {
+		return strings.Contains(instNotes(u), "config:untrusted master runs as uid 1000")
+	})
 	time.Sleep(50 * time.Millisecond)
 	if fa2.count() != 0 {
 		t.Fatalf("an untrusted proxy's admin interface was read %d times", fa2.count())
@@ -207,7 +211,9 @@ func TestHAProxyRuntimeOverlay(t *testing.T) {
 	fa := &fakeAdmin{body: stateHeader + "3 app 1 s1 127.0.0.1 2 0 1 1 1 1 0 3 7 0 0 0 - 8000 - 0 0 - - 0\n3 app 2 extra 127.0.0.1 2 0 1 1 1 1 0 3 7 0 0 0 - 8100 - 0 0 - - 0\n"}
 	m, next := runAdminMapper(t, 0, f, fa, 0)
 	m.Listeners(haproxyListeners())
-	u := next("runtime", func(u proxy.Update) bool { return len(u.States) == 1 && len(u.States[0].Routes) == 1 && len(u.States[0].Routes[0].Backends) == 2 })
+	u := next("runtime", func(u proxy.Update) bool {
+		return len(u.States) == 1 && len(u.States[0].Routes) == 1 && len(u.States[0].Routes[0].Backends) == 2
+	})
 	if b := u.States[0].Routes[0].Backends[1]; b.Address != "127.0.0.1:8100" || b.Note != "added at runtime" {
 		t.Errorf("runtime backend = %+v", b)
 	}
@@ -245,7 +251,9 @@ func TestAdminFailureIsUndetermined(t *testing.T) {
 	fa := &fakeAdmin{}
 	m, next := runAdminMapper(t, 0, fn, fa, 0)
 	m.Listeners(haproxyListeners())
-	next("no socket", func(u proxy.Update) bool { return strings.Contains(instNotes(u), "admin:no stats socket in the config") })
+	next("no socket", func(u proxy.Update) bool {
+		return strings.Contains(instNotes(u), "admin:no stats socket in the config")
+	})
 	if fa.count() != 0 {
 		t.Errorf("%d reads without an endpoint", fa.count())
 	}

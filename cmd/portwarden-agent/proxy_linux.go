@@ -13,6 +13,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/probes"
 	"github.com/thapr0digy/portwarden/internal/procinfo"
 	"github.com/thapr0digy/portwarden/internal/proxy"
+	"github.com/thapr0digy/portwarden/internal/proxy/admin"
 	"github.com/thapr0digy/portwarden/internal/proxy/discover"
 	"github.com/thapr0digy/portwarden/internal/proxy/mapper"
 	"github.com/thapr0digy/portwarden/internal/proxy/rootfs"
@@ -31,6 +32,16 @@ func startProxyMapping(ctx context.Context, opts options, hostNetNS uint32, reso
 		OpenRoot:   rootfs.Open,
 		NetnsAddrs: netnsAddrs(hostNetNS),
 		Poll:       opts.proxyPoll, Settle: proxySettle, Recheck: opts.recheck,
+	}
+	if len(opts.proxyAdmin) > 0 {
+		host := admin.ProcHost{ProcRoot: "/proc", PPIDFunc: procs.PPID, ExeFunc: procs.Exe}
+		cfg.Admin = &mapper.AdminConfig{
+			Kinds: opts.proxyAdmin, Poll: opts.proxyAdminPoll, SelfNetNS: hostNetNS,
+			Read: func(ctx context.Context, p admin.Proxy, ep admin.Endpoint, q admin.Query) (admin.Answer, error) {
+				return admin.Read(ctx, host, p, ep, q)
+			},
+			HostContainerNet: hostContainerNet,
+		}
 	}
 	pc, err := probes.StartProxyConns()
 	if err != nil {
@@ -68,6 +79,27 @@ func netnsAddrs(hostNetNS uint32) func(netns, pid uint32) ([]netip.Addr, error) 
 		}
 		return out, nil
 	}
+}
+
+// hostContainerNet reports whether the host reaches addr over one of its container
+// networks (a Docker bridge, a CNI veth), so an admin read of a container proxy's own
+// address cannot leave the host. The interfaces are read on every call (one netlink dump
+// per container-proxy admin read).
+func hostContainerNet(addr netip.Addr) bool {
+	ifs, err := netif.Snapshot()
+	if err != nil {
+		return false
+	}
+	name, ok := netif.Route(ifs, addr)
+	if !ok {
+		return false
+	}
+	for _, i := range ifs {
+		if i.Name == name {
+			return i.ContainerNet() && !i.Loopback
+		}
+	}
+	return false
 }
 
 type proxyConnsAdapter struct{ *probes.ProxyConns }

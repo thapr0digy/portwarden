@@ -121,6 +121,7 @@ failing_logs() {
 		case $rest in *tests=FAIL*) echo "$leg/tests.log" ;; esac
 		case $rest in *deb=FAIL*) echo "$leg/dist-upgrade.log"; echo "$leg/deb.log" ;; esac
 		case $rest in *busy*) echo "$leg/vm.log" ;; esac
+		case $rest in *"did not start"*) echo "$leg/vm.log"; echo "$leg/provision.log" ;; esac
 	done < <(tail -n +2 "$m/summary.txt")
 }
 

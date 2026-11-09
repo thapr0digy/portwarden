@@ -45,7 +45,8 @@ vm_of() { case $1 in 2404) echo portwarden ;; 2604) echo portwarden-2604 ;; amd6
 yaml_of() { case $1 in 2404) echo dev/lima.yaml ;; 2604) echo dev/lima-2604.yaml ;; amd64) echo dev/lima-amd64.yaml ;; next) echo dev/lima-next.yaml ;; esac; }
 in_list() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }
 
-# vm_up <leg>: starts the leg's VM, creating and provisioning it first if needed.
+# vm_up <leg>: starts the leg's VM, creating and provisioning it first if needed. Fails
+# when the VM does not start or provisioning fails (run under `if`, so set -e is off).
 vm_up() {
 	local leg=$1 vm yaml
 	vm=$(vm_of "$leg")
@@ -59,7 +60,7 @@ vm_up() {
 		set=(--set ".mounts[0].location = \"$MATRIX_MOUNT\"")
 	fi
 	echo "matrix: creating VM $vm from $yaml (minutes; QEMU TCG takes longer)"
-	limactl start --tty=false --name="$vm" "${set[@]}" "$yaml" >>"$out/$leg/vm.log" 2>&1
+	limactl start --tty=false --name="$vm" "${set[@]}" "$yaml" >>"$out/$leg/vm.log" 2>&1 || return 1
 	if [ "$leg" = amd64 ]; then
 		return # runs prebuilt test binaries: nothing to install
 	fi
@@ -125,26 +126,10 @@ run_cross() {
 
 rc=0
 summary=()
-for leg in $legs; do
-	vm_of "$leg" >/dev/null || { echo "matrix: unknown leg $leg" >&2; exit 2; }
-	mkdir -p "$out/$leg"
-	start=$(date +%s)
-	vm_up "$leg"
-	vm=$(vm_of "$leg")
-	if ! vmlock_wait_idle "$vm"; then
-		rc=1
-		line="$leg | - | FAIL (VM busy with tests started outside the lock) | $(($(date +%s) - start))s"
-		echo "matrix: $line"
-		summary+=("$line")
-		continue
-	fi
-	info=$(limactl shell "$vm" bash -c '. /etc/os-release; echo "$PRETTY_NAME $(uname -r) $(uname -m)"' 2>/dev/null)
-	echo "matrix: $leg: $info"
-	if [ "$leg" = amd64 ]; then
-		result=$(run_cross "$leg")
-	else
-		result=$(run_full "$leg")
-	fi
+# add_line <leg> <system> <result> <start>: records the leg's summary line. A FAIL fails
+# the run unless the leg is advisory, which gets WARN instead.
+add_line() {
+	local leg=$1 info=$2 result=$3 start=$4 line
 	case $result in
 	*FAIL*)
 		if in_list "$leg" "$advisory"; then
@@ -154,12 +139,34 @@ for leg in $legs; do
 		fi
 		;;
 	esac
-	if in_list "$leg" "$stop_after"; then
-		limactl stop "$vm" >>"$out/$leg/vm.log" 2>&1 || echo "matrix: could not stop VM $vm (see .matrix/$leg/vm.log)" >&2
-	fi
 	line="$leg | $info | $result | $(($(date +%s) - start))s"
 	echo "matrix: $line"
 	summary+=("$line")
+}
+for leg in $legs; do
+	vm_of "$leg" >/dev/null || { echo "matrix: unknown leg $leg" >&2; exit 2; }
+	mkdir -p "$out/$leg"
+	start=$(date +%s)
+	vm=$(vm_of "$leg")
+	if ! vm_up "$leg"; then
+		add_line "$leg" - "FAIL (VM did not start or provision; see vm.log, provision.log)" "$start"
+		continue
+	fi
+	if ! vmlock_wait_idle "$vm"; then
+		add_line "$leg" - "FAIL (VM busy with tests started outside the lock)" "$start"
+		continue
+	fi
+	info=$(limactl shell "$vm" bash -c '. /etc/os-release; echo "$PRETTY_NAME $(uname -r) $(uname -m)"' 2>/dev/null)
+	echo "matrix: $leg: $info"
+	if [ "$leg" = amd64 ]; then
+		result=$(run_cross "$leg")
+	else
+		result=$(run_full "$leg")
+	fi
+	if in_list "$leg" "$stop_after"; then
+		limactl stop "$vm" >>"$out/$leg/vm.log" 2>&1 || echo "matrix: could not stop VM $vm (see .matrix/$leg/vm.log)" >&2
+	fi
+	add_line "$leg" "$info" "$result" "$start"
 done
 printf '%s\n' "leg | system | result | time" "${summary[@]}" | tee "$out/summary.txt"
 exit "$rc"

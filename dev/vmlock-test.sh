@@ -330,7 +330,8 @@ matrix_run() {
 echo "limactl \$*" >>"$stubs/calls.log"
 case \$1 in
 list) printf '%s\n' portwarden portwarden-2604 portwarden-amd64 portwarden-next ;;
-start | stop) ;;
+start) case "\$*" in *" ${MATRIX_STUB_NOSTART:-none}") exit 1 ;; esac ;;
+stop) ;;
 shell)
 	vm=\$2
 	case "\$*" in
@@ -362,6 +363,15 @@ test_next_vm_is_stopped_after_its_leg_and_the_others_are_not() {
 	grep -q '^limactl stop portwarden-next$' <<<"$out" || { echo "next VM not stopped: $out"; return 1; }
 	grep -q '^limactl stop portwarden$' <<<"$out" && { echo "2404 VM stopped: $out"; return 1; }
 	grep -q '^rc=0$' <<<"$out" || { echo "want rc=0: $out"; return 1; }
+}
+
+# A pruned image or a failed provision on the advisory leg is a WARN too, not an abort.
+test_advisory_leg_whose_vm_does_not_start_warns_and_the_others_run() {
+	local out
+	out=$(MATRIX_STUB_NOSTART=portwarden-next matrix_run advnostart "next 2404" none)
+	grep -q '^rc=0$' <<<"$out" || { echo "want rc=0: $out"; return 1; }
+	grep -q '^next | - | FAIL (VM did not start.*WARN (advisory' <<<"$out" || { echo "no WARN line: $out"; return 1; }
+	grep -q '^2404 | .*itest=ok e2e=ok |' <<<"$out" || { echo "2404 did not run: $out"; return 1; }
 }
 
 test_empty_matrix_advisory_makes_the_next_leg_blocking() {

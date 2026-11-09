@@ -110,6 +110,9 @@ func load(fsys conf.FS, o Options) (conf.Result, []vhost) {
 		if root != "" && !proxiesRoot(vr) {
 			st := base
 			st.Path, st.Kind, st.Target, st.Root, st.Source = "/", model.RouteStatic, root, root, d.source()
+			if d.via != "" {
+				st.Notes = append(st.Notes, "from "+d.via)
+			}
 			vr = append([]conf.Route{st}, vr...)
 		}
 		routes = append(routes, vr...)
@@ -186,6 +189,9 @@ func (p *parser) routes(block []*directive, base conf.Route, where string) []con
 			rt.Target = strings.TrimPrefix(d.raw[i], trim)
 		}
 		p.resolve(&rt, target)
+		if d.via != "" {
+			rt.Notes = append(rt.Notes, "from "+d.via)
+		}
 		out = append(out, rt)
 	}
 	for _, d := range block {

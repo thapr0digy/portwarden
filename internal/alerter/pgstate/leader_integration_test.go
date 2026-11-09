@@ -54,7 +54,9 @@ func TestAlerterWritesAreFenced(t *testing.T) {
 	}
 
 	writes := map[string]func() error{
-		"InTx":           func() error { return old.InTx(ctx, func(st alerter.State) error { return st.SetPaged(ctx, "listener:h/after", time.Now()) }) },
+		"InTx": func() error {
+			return old.InTx(ctx, func(st alerter.State) error { return st.SetPaged(ctx, "listener:h/after", time.Now()) })
+		},
 		"Delivered":      func() error { return old.Delivered(ctx, "x", time.Now()) },
 		"Failed":         func() error { return old.Failed(ctx, "x", time.Now(), false, "boom") },
 		"Failed give up": func() error { return old.Failed(ctx, "x", time.Now(), true, "boom") },

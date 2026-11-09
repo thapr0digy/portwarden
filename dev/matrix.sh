@@ -89,15 +89,16 @@ run_cross() {
 	: >"$out/$leg/tests.log"
 	while read -r pkg dir; do
 		[ -n "$pkg" ] || continue
-		local name=${pkg//\//_} tags=integration
+		local name=${pkg//\//_} tags=integration skip=""
 		case $pkg in
-		*/pgstate | */inventory/pg) continue ;; # need PostgreSQL (make itest covers them)
+		*/pgstate | */inventory/pg | */backend/leader) continue ;; # need PostgreSQL (make itest covers them)
+		*/cmd/portwarden-alerter | */cmd/portwarden-inventory) skip=Handover ;; # the two-instance tests need PostgreSQL
 		esac
 		CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -tags "$tags" -o "$bin/$name.test" "$pkg" >>"$out/$leg/tests.log" 2>&1 ||
 			{ echo "BUILD FAIL $pkg" >>"$out/$leg/tests.log"; status=FAIL; continue; }
 		[ -f "$bin/$name.test" ] || continue
 		# </dev/null: limactl would otherwise read the package list off this loop's stdin.
-		if limactl shell "$vm" bash -c "cd '$dir' && sudo '$bin/$name.test' -test.timeout 20m" </dev/null >>"$out/$leg/tests.log" 2>&1; then
+		if limactl shell "$vm" bash -c "cd '$dir' && sudo '$bin/$name.test' -test.timeout 20m${skip:+ -test.skip $skip}" </dev/null >>"$out/$leg/tests.log" 2>&1; then
 			echo "ok   $pkg" >>"$out/$leg/tests.log"
 		else
 			echo "FAIL $pkg" >>"$out/$leg/tests.log"

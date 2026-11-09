@@ -171,7 +171,11 @@ func main() {
 func run(opts options, log *slog.Logger) error {
 	// First, before the NATS seed or any probe is in memory.
 	hardenErr := hardenProcess(log)
-	if err := preflight.Check(kernelRelease()); err != nil {
+	targets, err := agentTargets()
+	if err != nil {
+		return err
+	}
+	if err := preflight.Check(kernelRelease(), targets); err != nil {
 		return err
 	}
 	host, err := hostid.Read(opts.machineIDPath)

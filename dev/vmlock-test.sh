@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for dev/vmlock.sh, dev/vm-verify.sh's file list and failure logs, and dev/dist.sh's
-# offline tool build (make dev-test). Host only, no VM: every lock lives in a scratch
+# Tests for dev/vmlock.sh, dev/vm-verify.sh's file list and failure logs, dev/matrix.sh's
+# advisory legs, and dev/dist.sh's offline tool build (make dev-test). Host only, no VM: every lock lives in a scratch
 # directory. Each test is named after the assumption it checks; prints ok/FAIL per test and exits non-zero on any failure.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -312,6 +312,103 @@ test_vm_verify_rejects_unknown_legs() {
 	local rc=0
 	dev/vm-verify.sh --legs "2404 riscv" >/dev/null 2>&1 || rc=$?
 	[ "$rc" = 2 ] || { echo "exit $rc, want 2"; return 1; }
+}
+
+# matrix_run <name> <legs> <failing vm> [env assignments…]: runs this tree's dev/matrix.sh
+# in a scratch clone against a stub limactl: every VM exists, is idle and passes its tests,
+# except that dev/itest.sh fails in <failing vm>. Prints its output, the summary, the stub's
+# call log and "rc=<status>".
+matrix_run() {
+	local name=$1 legs=$2 failvm=$3 c stubs rc=0
+	shift 3
+	c=$(clone_with_scripts "$name")
+	cp "$repo/dev/matrix.sh" "$c/dev/"
+	stubs=$scratch/stubs-$name
+	mkdir -p "$stubs"
+	cat >"$stubs/limactl" <<STUB
+#!/usr/bin/env bash
+echo "limactl \$*" >>"$stubs/calls.log"
+case \$1 in
+list) printf '%s\n' portwarden portwarden-2604 portwarden-amd64 portwarden-next ;;
+start) case "\$*" in *" ${MATRIX_STUB_NOSTART:-none}") exit 1 ;; esac ;;
+stop) ;;
+shell)
+	vm=\$2
+	case "\$*" in
+	*pgrep*) exit 1 ;; # idle
+	*os-release*) echo "Stub OS stub-kernel aarch64" ;;
+	*itest.sh*) [ "\$vm" != "$failvm" ] ;;
+	esac
+	;;
+esac
+STUB
+	chmod +x "$stubs/limactl"
+	(cd "$c" && env PATH="$stubs:$PATH" VMLOCK_DIR="$scratch/lock-$name" MATRIX_LEGS="$legs" "$@" dev/matrix.sh 2>&1) || rc=$?
+	cat "$c/.matrix/summary.txt" 2>/dev/null
+	cat "$stubs/calls.log"
+	echo "rc=$rc"
+}
+
+test_advisory_next_leg_failure_warns_and_the_matrix_passes() {
+	local out
+	out=$(matrix_run advwarn "2404 next" portwarden-next)
+	grep -q '^rc=0$' <<<"$out" || { echo "want rc=0: $out"; return 1; }
+	grep -q '^next | .*itest=FAIL e2e=ok WARN (advisory' <<<"$out" || { echo "no WARN line: $out"; return 1; }
+	grep -q '^2404 | .*itest=ok e2e=ok |' <<<"$out" || { echo "2404 line: $out"; return 1; }
+}
+
+test_next_vm_is_stopped_after_its_leg_and_the_others_are_not() {
+	local out
+	out=$(matrix_run advstop "2404 next" none)
+	grep -q '^limactl stop portwarden-next$' <<<"$out" || { echo "next VM not stopped: $out"; return 1; }
+	grep -q '^limactl stop portwarden$' <<<"$out" && { echo "2404 VM stopped: $out"; return 1; }
+	grep -q '^rc=0$' <<<"$out" || { echo "want rc=0: $out"; return 1; }
+}
+
+# A pruned image or a failed provision on the advisory leg is a WARN too, not an abort.
+test_advisory_leg_whose_vm_does_not_start_warns_and_the_others_run() {
+	local out
+	out=$(MATRIX_STUB_NOSTART=portwarden-next matrix_run advnostart "next 2404" none)
+	grep -q '^rc=0$' <<<"$out" || { echo "want rc=0: $out"; return 1; }
+	grep -q '^next | - | FAIL (VM did not start.*WARN (advisory' <<<"$out" || { echo "no WARN line: $out"; return 1; }
+	grep -q '^2404 | .*itest=ok e2e=ok |' <<<"$out" || { echo "2404 did not run: $out"; return 1; }
+}
+
+test_empty_matrix_advisory_makes_the_next_leg_blocking() {
+	local out
+	out=$(matrix_run advblock "next" portwarden-next MATRIX_ADVISORY=)
+	grep -q '^rc=1$' <<<"$out" || { echo "want rc=1: $out"; return 1; }
+	grep -q 'WARN' <<<"$out" && { echo "a blocking leg printed WARN: $out"; return 1; }
+	return 0
+}
+
+test_blocking_leg_failure_still_fails_the_matrix_next_to_an_advisory_leg() {
+	local out
+	out=$(matrix_run blockfail "2404 next" portwarden)
+	grep -q '^rc=1$' <<<"$out" || { echo "want rc=1: $out"; return 1; }
+}
+
+test_vm_verify_passes_with_an_advisory_warn_and_prints_its_log() {
+	local c root stubs rc=0 out
+	c=$(clone_with_scripts advlog)
+	root=$scratch/root-advlog
+	stubs=$scratch/stubs-advlog
+	mkdir -p "$root" "$stubs"
+	printf '#!/bin/sh\nexit 0\n' >"$stubs/limactl"
+	chmod +x "$stubs/limactl"
+	cat >"$c/dev/matrix.sh" <<'STUB'
+#!/usr/bin/env bash
+cd "$(dirname "$0")/.."
+mkdir -p .matrix/next
+echo "itest: advisory failure marker" >.matrix/next/itest.log
+printf 'leg | system | result | time\nnext | stub | itest=FAIL e2e=ok WARN (advisory: does not fail the run) | 1s\n' >.matrix/summary.txt
+exit 0
+STUB
+	chmod +x "$c/dev/matrix.sh"
+	out=$(cd "$c" && PATH="$stubs:$PATH" VMVERIFY_ROOT=$root dev/vm-verify.sh --legs next 2>&1) || rc=$?
+	[ "$rc" = 0 ] || { echo "want rc=0, got $rc: $out"; return 1; }
+	grep -q 'advisory failure marker' <<<"$out" || { echo "advisory log not printed: $out"; return 1; }
+	[ ! -d "$root/.vmverify/logs" ] || { echo "a passing run kept failure logs"; return 1; }
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do

@@ -1,0 +1,30 @@
+# Kernel matrix leg "next": the newest Ubuntu release, 26.10 ("stonking", kernel 7.3), an
+# early warning for kernel drift in the functions the probes trace. Created by
+# `make matrix` as the Lima instance portwarden-next, stopped after its leg (remove it
+# with `limactl delete -f portwarden-next`). Move it to the next release when one ships.
+# The dated release directory is pinned by digest (from its SHA256SUMS); Ubuntu prunes
+# dated directories after some months, so the unpinned release/ image follows as a
+# fallback.
+minimumLimaVersion: 2.0.0
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/stonking/release-20261105/ubuntu-26.10-server-cloudimg-arm64.img"
+    arch: aarch64
+    digest: "sha256:90c07f4b58d7a06bc5525a41db4d32501e36fbab3e6ae05405b81e38c406d7a8"
+  - location: "https://cloud-images.ubuntu.com/releases/stonking/release-20261105/ubuntu-26.10-server-cloudimg-amd64.img"
+    arch: x86_64
+    digest: "sha256:9ef2243a4319e43164ab11d61e324efa0dd19ed850979d10c3a6e44feb5684c5"
+  - location: "https://cloud-images.ubuntu.com/releases/stonking/release/ubuntu-26.10-server-cloudimg-arm64.img"
+    arch: aarch64
+  - location: "https://cloud-images.ubuntu.com/releases/stonking/release/ubuntu-26.10-server-cloudimg-amd64.img"
+    arch: x86_64
+cpus: 4
+# 6 GiB: compiling the AWS SDK for the itest binaries was OOM-killed at 4 GiB.
+memory: 6GiB
+disk: 30GiB
+mounts:
+  # mountPoint defaults to the host path, so `cd <repo>` works in `limactl shell`.
+  # CI overrides the location with --set (dev/matrix.sh).
+  - location: "{{.Home}}/projects/portwarden"
+    writable: true
+# Provisioning is run by dev/matrix.sh from the checkout under test (dev/provision.sh),
+# not here: the mount is the main checkout, which may hold an older script.

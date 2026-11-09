@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
+	"github.com/thapr0digy/portwarden/internal/backend/leader"
 	"github.com/thapr0digy/portwarden/internal/natsauth"
 )
 
@@ -169,7 +170,9 @@ const DefaultMaxDeliver = 10
 // Consume pulls from c and calls h for each message, one at a time. A transient failure
 // is retried in place (so order holds while the cause is brief), then NAKed with a delay;
 // a permanent one, or a transient one on its last delivery, is quarantined and
-// terminated, so one bad message never stops the consumer. It returns when ctx ends.
+// terminated, so one bad message never stops the consumer. It returns when ctx ends, or
+// with the error when a handler is fenced (leader.ErrFenced: this instance no longer
+// leads).
 func Consume(ctx context.Context, c jetstream.Consumer, h Handler, o ConsumeOptions) error {
 	o.defaults()
 	it, err := c.Messages(jetstream.PullMaxMessages(o.Prefetch))
@@ -224,6 +227,11 @@ func handleOne(ctx context.Context, m jetstream.Msg, h Handler, o ConsumeOptions
 				slog.Warn("consume: ack failed (the message will be redelivered and skipped)", "subject", m.Subject(), "err", aerr)
 			}
 			return nil
+		}
+		if errors.Is(err, leader.ErrFenced) {
+			// Another instance leads now: stop without acking, NAKing or quarantining;
+			// the new leader gets the message once its ack wait runs out.
+			return err
 		}
 		if IsPermanent(err) {
 			return quarantine(ctx, m, err, o)
@@ -296,4 +304,26 @@ func WaitStream(ctx context.Context, js jetstream.JetStream) (jetstream.Stream, 
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// Leader is the "leader" block of the alerter's and the inventory's configs (README
+// "Running a standby").
+type Leader struct {
+	// Poll is how often a standby asks for the lock (default 1 s).
+	Poll Duration `json:"poll"`
+	// Check is how often the leader checks its lock session (default 1 s).
+	Check Duration `json:"check"`
+}
+
+// Validate refuses intervals outside 100 ms to 1 min.
+func (l Leader) Validate() error {
+	for _, f := range []struct {
+		name string
+		d    Duration
+	}{{"leader.poll", l.Poll}, {"leader.check", l.Check}} {
+		if v := time.Duration(f.d); v != 0 && (v < 100*time.Millisecond || v > time.Minute) {
+			return fmt.Errorf("%s %s: must be between 100ms and 1m0s", f.name, v)
+		}
+	}
+	return nil
 }

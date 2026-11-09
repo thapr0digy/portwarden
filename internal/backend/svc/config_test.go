@@ -141,3 +141,18 @@ func TestWaitStream(t *testing.T) {
 		t.Fatalf("%v %v", s, err)
 	}
 }
+
+func TestLeaderValidate(t *testing.T) {
+	ok := []Leader{{}, {Poll: Duration(100 * time.Millisecond), Check: Duration(time.Minute)}}
+	for _, l := range ok {
+		if err := l.Validate(); err != nil {
+			t.Errorf("%+v: %v", l, err)
+		}
+	}
+	bad := []Leader{{Poll: Duration(50 * time.Millisecond)}, {Check: Duration(2 * time.Minute)}}
+	for _, l := range bad {
+		if err := l.Validate(); err == nil {
+			t.Errorf("%+v: accepted", l)
+		}
+	}
+}

@@ -342,3 +342,19 @@ func TestFeedStallSuppressesHostSilence(t *testing.T) {
 		t.Fatalf("hosts marked silent while the feed was stalled: %v", f.silent)
 	}
 }
+
+// The clean-shutdown marker changes no host block, so it must not start a cloud look-up.
+func TestStoppingHostEventSkipsLookup(t *testing.T) {
+	f := newFake()
+	var changed []string
+	c := &Consumer{Store: f, Changed: func(h string) { changed = append(changed, h) }}
+	hb := &asmv1.HostInfo{Cloud: "aws"}
+	handle(t, c, "snapshot", &asmv1.Snapshot{HostId: host, RunId: "01A", Seq: 1, Host: hb})
+	handle(t, c, "host.changed", &asmv1.HostEvent{HostId: host, RunId: "01A", Seq: 2, Host: hb, Previous: hb, Stopping: true})
+	if len(f.applied) != 2 || f.cursors[host].LastSeq != 2 {
+		t.Fatalf("the marker must be applied and move the cursor: %+v", f.cursors[host])
+	}
+	if len(changed) != 1 {
+		t.Fatalf("changed calls %v, want only the snapshot's", changed)
+	}
+}

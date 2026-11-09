@@ -257,6 +257,11 @@ func (s *Store) apply(ctx context.Context, e inventory.Event) error {
 				return err
 			}
 		}
+		if id, ok := inventory.AgentIdentity(e.Msg); ok {
+			if err := setIdentity(ctx, tx, host, id, at); err != nil {
+				return err
+			}
+		}
 		return setCursor(ctx, tx, host, *e.Cursor)
 	})
 }
@@ -327,6 +332,26 @@ func setHostInfo(ctx context.Context, tx pgx.Tx, host string, h *asmv1.HostInfo)
 		host, h.GetCloud(), h.GetInstanceId(), h.GetRegion(), ips, json.RawMessage(conds), checkedResource(host, h))
 	return err
 }
+
+// setIdentity stores the agent's latest version and executable hash (M11), cleaned and
+// validated (the host controls them), and agent_stopped_at: the stream time of the run's
+// clean-shutdown marker, cleared by any later message of a running agent.
+func setIdentity(ctx context.Context, tx pgx.Tx, host string, raw inventory.Identity, at time.Time) error {
+	id, badHash := inventory.CleanIdentity(raw)
+	if badHash && badExeHash.changed(host, raw.ExeSHA256) {
+		slog.Warn("inventory: dropping an invalid exe_sha256; logged once per distinct value", "host", host, "length", len(raw.ExeSHA256))
+	}
+	var stoppedAt *time.Time
+	if id.Stopping {
+		stoppedAt = &at
+	}
+	_, err := tx.Exec(ctx, "UPDATE hosts SET agent_version = $2, agent_exe_sha256 = $3, agent_stopped_at = $4 WHERE host_id = $1",
+		host, id.Version, id.ExeSHA256, stoppedAt)
+	return err
+}
+
+// badExeHash remembers the invalid exe_sha256 values already logged (bounded).
+var badExeHash = newBadResources(maxBadResourceHosts)
 
 // badResource remembers the invalid cloud_resource values already logged (bounded).
 var badResource = newBadResources(maxBadResourceHosts)

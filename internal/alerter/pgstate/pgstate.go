@@ -181,6 +181,32 @@ func (t txState) SetForgotten(ctx context.Context, host string, m alerter.Forget
 	return err
 }
 
+func (t txState) Run(ctx context.Context, host string) (alerter.Run, bool, error) {
+	var r alerter.Run
+	var n int64
+	err := t.tx.QueryRow(ctx, "SELECT run_id, boot_id, run_number, version, identity, clean_stop FROM alerter_runs WHERE host = $1",
+		clean(host)).Scan(&r.ID, &r.BootID, &n, &r.Version, &r.Identity, &r.CleanStop)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return r, false, nil
+	}
+	r.Number = uint64(n)
+	return r, err == nil, err
+}
+
+func (t txState) SetRun(ctx context.Context, host string, r alerter.Run) error {
+	_, err := t.tx.Exec(ctx, `INSERT INTO alerter_runs (host, run_id, boot_id, run_number, version, identity, clean_stop)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (host) DO UPDATE SET run_id = EXCLUDED.run_id, boot_id = EXCLUDED.boot_id, run_number = EXCLUDED.run_number,
+			version = EXCLUDED.version, identity = EXCLUDED.identity, clean_stop = EXCLUDED.clean_stop, at = now()`,
+		clean(host), clean(r.ID), clean(r.BootID), int64(r.Number), clean(r.Version), r.Identity, r.CleanStop)
+	return err
+}
+
+func (t txState) ClearRun(ctx context.Context, host string) error {
+	_, err := t.tx.Exec(ctx, "DELETE FROM alerter_runs WHERE host = $1", clean(host))
+	return err
+}
+
 func (t txState) SetBack(ctx context.Context, host string) error {
 	_, err := t.tx.Exec(ctx, "UPDATE alerter_forgotten SET back = true WHERE host = $1", clean(host))
 	return err

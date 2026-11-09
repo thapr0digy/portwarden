@@ -30,8 +30,11 @@ const (
 
 // Alert is the webhook payload.
 type Alert struct {
-	ID            string     `json:"id"`
-	Kind          string     `json:"kind"`
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+	// Severity is "info" for informational alerts (agent_restarted_unclean); omitted on
+	// pages.
+	Severity      string     `json:"severity,omitempty"`
 	Host          string     `json:"host,omitempty"`
 	At            time.Time  `json:"at"`
 	Summary       string     `json:"summary"`
@@ -87,11 +90,14 @@ type Rules struct {
 	PageOnSilence   bool   `json:"page_on_silence"`
 	// PageOnTamper pages when an agent raises a tamper flag (asm.<host>.tamper or a
 	// heartbeat's tamper status); TamperIgnore lists flag kinds that never page.
-	PageOnTamper     bool          `json:"page_on_tamper"`
-	TamperIgnore     []string      `json:"tamper_ignore"`
-	DedupeWindow     time.Duration `json:"-"`
-	Ignore           []Ignore      `json:"ignore"`
-	pageLevelNumeric int
+	PageOnTamper bool     `json:"page_on_tamper"`
+	TamperIgnore []string `json:"tamper_ignore"`
+	// PageOnUncleanRestart sends an informational agent_restarted_unclean alert when a
+	// host's agent starts a new run without the previous run's clean-shutdown marker.
+	PageOnUncleanRestart bool          `json:"page_on_unclean_restart"`
+	DedupeWindow         time.Duration `json:"-"`
+	Ignore               []Ignore      `json:"ignore"`
+	pageLevelNumeric     int
 }
 
 // Validate fills defaults and checks the level name.
@@ -134,6 +140,11 @@ type State interface {
 	SetBack(ctx context.Context, host string) error
 	// ForgetMark returns a host's mark (ok false: never forgotten).
 	ForgetMark(ctx context.Context, host string) (ForgetMark, bool, error)
+	// Run returns a host's current agent run (ok false: none recorded); SetRun replaces
+	// it; ClearRun drops it (a forgotten host).
+	Run(ctx context.Context, host string) (Run, bool, error)
+	SetRun(ctx context.Context, host string, r Run) error
+	ClearRun(ctx context.Context, host string) error
 	Enqueue(ctx context.Context, a *Alert) error
 }
 

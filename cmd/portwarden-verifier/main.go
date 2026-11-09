@@ -58,20 +58,38 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	path := flag.String("config", "/etc/portwarden/verifier.json", "config file (JSON)")
 	flag.Parse()
-	if err := run(*path); err != nil && !errors.Is(err, context.Canceled) {
-		slog.Error("portwarden-verifier", "err", err)
-		os.Exit(1)
-	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	err := run(ctx, *path)
+	stop()
+	os.Exit(exitCode(err))
 }
 
-func run(path string) error {
+// exitCode is the process's exit status for run's result: 0 for a clean stop (nil, or the
+// signal's context.Canceled), else 1 after logging the error.
+func exitCode(err error) int {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return 0
+	}
+	slog.Error("portwarden-verifier", "err", err)
+	return 1
+}
+
+// settings is the config after loading and checking, ready for wiring.
+type settings struct {
+	cfg    Config
+	scope  verifier.Scope
+	prober *verifier.Prober
+}
+
+// load reads and checks the config: everything before the first connection.
+func load(path string) (settings, error) {
 	var cfg Config
 	if err := svc.Load(path, &cfg); err != nil {
-		return err
+		return settings{}, err
 	}
 	scope, err := buildScope(cfg)
 	if err != nil {
-		return err
+		return settings{}, err
 	}
 	if cfg.Checker == "" {
 		host, _ := os.Hostname()
@@ -87,9 +105,17 @@ func run(path string) error {
 	for _, p := range cfg.HTTPPorts {
 		prober.HTTPPorts[p] = true
 	}
+	return settings{cfg: cfg, scope: scope, prober: prober}, nil
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
+// run loads the config, connects and probes what the inventory requests until ctx ends
+// (then it returns ctx's error).
+func run(ctx context.Context, path string) error {
+	st, err := load(path)
+	if err != nil {
+		return err
+	}
+	cfg := st.cfg
 	nc, js, err := bus.Connect(cfg.NATS.Bus(natsauth.RoleVerifier, "portwarden-verifier", nil))
 	if err != nil {
 		return err
@@ -99,7 +125,7 @@ func run(path string) error {
 		return err
 	}
 	pub := bus.NewPublisher(js, "verifier")
-	v := verifier.New(scope, prober.Probe, pub.Publish, pub.RunID, cfg.Checker, verifier.Limits{
+	v := verifier.New(st.scope, st.prober.Probe, pub.Publish, pub.RunID, cfg.Checker, verifier.Limits{
 		GlobalPerSecond: cfg.Rate.GlobalPerSecond, PerHostPerMinute: cfg.Rate.PerHostPerMinute, Concurrency: cfg.Rate.Concurrency,
 		Queue: cfg.Rate.Queue, MinGap: cfg.MinGap.D(30 * time.Second),
 	})
@@ -114,7 +140,12 @@ func run(path string) error {
 		return err
 	}
 	slog.Info("verifier running", "checker", cfg.Checker, "allow", cfg.AllowCIDRs, "limits", fmt.Sprintf("%+v", v.Limits))
-	return svc.Consume(ctx, c, func(_ context.Context, m jetstream.Msg) error {
+	return svc.Consume(ctx, c, handleRequest(v), svc.ConsumeOptions{})
+}
+
+// handleRequest checks a probe request against its subject and hands it to the verifier.
+func handleRequest(v *verifier.Verifier) svc.Handler {
+	return func(_ context.Context, m jetstream.Msg) error {
 		p, ok := bus.Parse(m.Subject())
 		if !ok || p.Origin != bus.OriginProbe {
 			return nil
@@ -128,7 +159,7 @@ func run(path string) error {
 		}
 		v.Request(p.Host, &r)
 		return nil
-	}, svc.ConsumeOptions{})
+	}
 }
 
 func buildScope(cfg Config) (verifier.Scope, error) {

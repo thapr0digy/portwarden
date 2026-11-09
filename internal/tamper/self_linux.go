@@ -17,18 +17,29 @@ import (
 // /proc/self/exe (the image the kernel runs, even if the path was replaced since), and
 // the path is where /proc/self/exe pointed at start.
 func SelfExeCheck() (*SelfExe, error) {
-	path, err := os.Readlink("/proc/self/exe")
-	if err != nil {
-		return nil, err
-	}
-	if p, ok := strings.CutSuffix(path, " (deleted)"); ok {
-		return nil, fmt.Errorf("the executable %s was removed before the agent started", p)
-	}
-	base, err := HashFile("/proc/self/exe")
+	path, base, err := SelfExeHash()
 	if err != nil {
 		return nil, err
 	}
 	return NewSelfExe(path, base), nil
+}
+
+// SelfExeHash returns where /proc/self/exe points and the hex SHA-256 of the image the
+// kernel runs. The agent calls it once at start and reuses the hash for its heartbeats
+// and for its self_exe check (NewSelfExe), so the file is hashed once per run.
+func SelfExeHash() (path, hash string, err error) {
+	path, err = os.Readlink("/proc/self/exe")
+	if err != nil {
+		return "", "", err
+	}
+	if p, ok := strings.CutSuffix(path, " (deleted)"); ok {
+		return "", "", fmt.Errorf("the executable %s was removed before the agent started", p)
+	}
+	hash, err = HashFile("/proc/self/exe")
+	if err != nil {
+		return "", "", err
+	}
+	return path, hash, nil
 }
 
 // SelfTracer checks the agent's own threads.

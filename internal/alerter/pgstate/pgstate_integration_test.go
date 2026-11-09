@@ -23,7 +23,7 @@ func open(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	if _, err := s.pool.Exec(context.Background(), "TRUNCATE alerter_pages, alerter_dedupe, alerter_probe, alerter_forgotten"); err != nil {
+	if _, err := s.pool.Exec(context.Background(), "TRUNCATE alerter_pages, alerter_dedupe, alerter_probe, alerter_forgotten, alerter_runs"); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -226,4 +226,38 @@ func TestForgottenAcrossAStreamReset(t *testing.T) {
 // sameMark compares marks with time.Time.Equal (PostgreSQL returns the local zone).
 func sameMark(a, b alerter.ForgetMark) bool {
 	return a.Seq == b.Seq && a.Back == b.Back && a.Stream.Equal(b.Stream)
+}
+
+// Migration 0004: a host's agent run round-trips (NUL bytes cleaned), is replaced, and is
+// dropped by ClearRun.
+func TestRunState(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	want := alerter.Run{ID: "01A", BootID: "b1", Number: 7, Version: "1.4.0", Identity: true}
+	if err := s.InTx(ctx, func(st alerter.State) error {
+		if _, ok, err := st.Run(ctx, "h"); err != nil || ok {
+			t.Errorf("no run yet: %v %v", ok, err)
+		}
+		if err := st.SetRun(ctx, "h", alerter.Run{ID: "old\x00"}); err != nil {
+			return err
+		}
+		return st.SetRun(ctx, "h", want)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InTx(ctx, func(st alerter.State) error {
+		got, ok, err := st.Run(ctx, "h")
+		if err != nil || !ok || got != want {
+			t.Errorf("run = %+v %v %v, want %+v", got, ok, err, want)
+		}
+		if err := st.ClearRun(ctx, "h"); err != nil {
+			return err
+		}
+		if _, ok, err := st.Run(ctx, "h"); err != nil || ok {
+			t.Errorf("after ClearRun: %v %v", ok, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }

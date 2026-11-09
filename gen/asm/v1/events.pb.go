@@ -808,8 +808,14 @@ type Heartbeat struct {
 	// The firewall fingerprint as of the agent's latest exposure view (M7), the same value
 	// as HostInfo.firewall_fingerprint. Unset from agents without it.
 	FirewallFingerprint *string `protobuf:"bytes,12,opt,name=firewall_fingerprint,json=firewallFingerprint,proto3,oneof" json:"firewall_fingerprint,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// The agent's identity (M11): its release version (internal/version, "dev" in a plain
+	// build) and the lowercase hex SHA-256 of its executable, hashed once at start. Empty
+	// from older agents; exe_sha256 is also empty when the agent could not read its own
+	// executable. Self-reported: a visibility aid, not attestation (root can forge both).
+	AgentVersion  string `protobuf:"bytes,13,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	ExeSha256     string `protobuf:"bytes,14,opt,name=exe_sha256,json=exeSha256,proto3" json:"exe_sha256,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -923,6 +929,20 @@ func (x *Heartbeat) GetTamper() *TamperStatus {
 func (x *Heartbeat) GetFirewallFingerprint() string {
 	if x != nil && x.FirewallFingerprint != nil {
 		return *x.FirewallFingerprint
+	}
+	return ""
+}
+
+func (x *Heartbeat) GetAgentVersion() string {
+	if x != nil {
+		return x.AgentVersion
+	}
+	return ""
+}
+
+func (x *Heartbeat) GetExeSha256() string {
+	if x != nil {
+		return x.ExeSha256
 	}
 	return ""
 }
@@ -1379,6 +1399,10 @@ type HostInfo struct {
 	// ("/subscriptions/<id>/resourceGroups/<group>/providers/Microsoft.Compute/virtualMachines/<name>").
 	// Empty on AWS (instance_id and region suffice), off-cloud, and from older agents.
 	CloudResource string `protobuf:"bytes,7,opt,name=cloud_resource,json=cloudResource,proto3" json:"cloud_resource,omitempty"`
+	// The agent's identity (M11), as on Heartbeat: version and executable SHA-256. Empty
+	// from older agents. Self-reported, not attestation.
+	AgentVersion  string `protobuf:"bytes,8,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	ExeSha256     string `protobuf:"bytes,9,opt,name=exe_sha256,json=exeSha256,proto3" json:"exe_sha256,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1458,6 +1482,20 @@ func (x *HostInfo) GetFirewallFingerprint() string {
 func (x *HostInfo) GetCloudResource() string {
 	if x != nil {
 		return x.CloudResource
+	}
+	return ""
+}
+
+func (x *HostInfo) GetAgentVersion() string {
+	if x != nil {
+		return x.AgentVersion
+	}
+	return ""
+}
+
+func (x *HostInfo) GetExeSha256() string {
+	if x != nil {
+		return x.ExeSha256
 	}
 	return ""
 }
@@ -1804,8 +1842,13 @@ type HostEvent struct {
 	// Run ordering (M5 fix wave): the kernel boot id and a run counter the agent keeps in
 	// its spool directory (0 when it has none). Consumers order runs of one host by
 	// (boot_id, run_number) instead of the run_id's wall-clock time.
-	BootId        string `protobuf:"bytes,8,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
-	RunNumber     uint64 `protobuf:"varint,9,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
+	BootId    string `protobuf:"bytes,8,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	RunNumber uint64 `protobuf:"varint,9,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
+	// The agent's clean-shutdown marker (M11): the last message of a run that stopped on
+	// SIGTERM/SIGINT, with host == previous (the host block did not change). A run whose
+	// successor starts without one ended uncleanly (crash, kill, power loss). False from
+	// older agents, which never send one.
+	Stopping      bool `protobuf:"varint,10,opt,name=stopping,proto3" json:"stopping,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1901,6 +1944,13 @@ func (x *HostEvent) GetRunNumber() uint64 {
 		return x.RunNumber
 	}
 	return 0
+}
+
+func (x *HostEvent) GetStopping() bool {
+	if x != nil {
+		return x.Stopping
+	}
+	return false
 }
 
 // Proxy is a reverse proxy instance (nginx, Apache, HAProxy, or an observed-only kind).
@@ -2871,7 +2921,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\aboot_id\x18\t \x01(\tR\x06bootId\x12\x1d\n" +
 	"\n" +
 	"run_number\x18\n" +
-	" \x01(\x04R\trunNumber\"\xc9\x03\n" +
+	" \x01(\x04R\trunNumber\"\x8d\x04\n" +
 	"\tHeartbeat\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -2887,7 +2937,10 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"run_number\x18\n" +
 	" \x01(\x04R\trunNumber\x12,\n" +
 	"\x06tamper\x18\v \x01(\v2\x14.asm.v1.TamperStatusR\x06tamper\x126\n" +
-	"\x14firewall_fingerprint\x18\f \x01(\tH\x00R\x13firewallFingerprint\x88\x01\x01B\x17\n" +
+	"\x14firewall_fingerprint\x18\f \x01(\tH\x00R\x13firewallFingerprint\x88\x01\x01\x12#\n" +
+	"\ragent_version\x18\r \x01(\tR\fagentVersion\x12\x1d\n" +
+	"\n" +
+	"exe_sha256\x18\x0e \x01(\tR\texeSha256B\x17\n" +
 	"\x15_firewall_fingerprint\"\xba\x01\n" +
 	"\n" +
 	"TamperFlag\x12\x12\n" +
@@ -2929,7 +2982,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x02ip\x18\x01 \x01(\tR\x02ip\x12\x10\n" +
 	"\x03via\x18\x02 \x01(\tR\x03via\x12\x10\n" +
 	"\x03dir\x18\x03 \x01(\tR\x03dir\x12\x14\n" +
-	"\x05iface\x18\x04 \x01(\tR\x05iface\"\xa2\x02\n" +
+	"\x05iface\x18\x04 \x01(\tR\x05iface\"\xe6\x02\n" +
 	"\bHostInfo\x12/\n" +
 	"\n" +
 	"public_ips\x18\x01 \x03(\v2\x10.asm.v1.PublicIPR\tpublicIps\x12\x14\n" +
@@ -2941,7 +2994,10 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"conditions\x12\x16\n" +
 	"\x06region\x18\x05 \x01(\tR\x06region\x126\n" +
 	"\x14firewall_fingerprint\x18\x06 \x01(\tH\x00R\x13firewallFingerprint\x88\x01\x01\x12%\n" +
-	"\x0ecloud_resource\x18\a \x01(\tR\rcloudResourceB\x17\n" +
+	"\x0ecloud_resource\x18\a \x01(\tR\rcloudResource\x12#\n" +
+	"\ragent_version\x18\b \x01(\tR\fagentVersion\x12\x1d\n" +
+	"\n" +
+	"exe_sha256\x18\t \x01(\tR\texeSha256B\x17\n" +
 	"\x15_firewall_fingerprint\"\xf2\x03\n" +
 	"\rExposureEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
@@ -2978,7 +3034,7 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\x06rtt_ms\x18\f \x01(\rR\x05rttMs\x12\x18\n" +
 	"\achecker\x18\r \x01(\tR\achecker\x12,\n" +
 	"\bexposure\x18\x0e \x01(\v2\x10.asm.v1.ExposureR\bexposure\x12\x16\n" +
-	"\x06origin\x18\x0f \x01(\tR\x06origin\"\xb1\x02\n" +
+	"\x06origin\x18\x0f \x01(\tR\x06origin\"\xcd\x02\n" +
 	"\tHostEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x15\n" +
@@ -2990,7 +3046,9 @@ const file_asm_v1_events_proto_rawDesc = "" +
 	"\bprevious\x18\a \x01(\v2\x10.asm.v1.HostInfoR\bprevious\x12\x17\n" +
 	"\aboot_id\x18\b \x01(\tR\x06bootId\x12\x1d\n" +
 	"\n" +
-	"run_number\x18\t \x01(\x04R\trunNumber\"\x89\x02\n" +
+	"run_number\x18\t \x01(\x04R\trunNumber\x12\x1a\n" +
+	"\bstopping\x18\n" +
+	" \x01(\bR\bstopping\"\x89\x02\n" +
 	"\x05Proxy\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12-\n" +

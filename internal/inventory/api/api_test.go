@@ -171,3 +171,56 @@ func TestHostFirewallFields(t *testing.T) {
 		t.Fatalf("a host that never sent one: firewall_changed_at must be null, got %s", rec.Body)
 	}
 }
+
+type identityReader struct{ fakeReader }
+
+var identityStopped = time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)
+
+func identityHost(id string) inventory.HostView {
+	if id == "old" {
+		return inventory.HostView{ID: id}
+	}
+	return inventory.HostView{ID: id, AgentVersion: "1.4.0", AgentExeSHA256: strings.Repeat("cd", 32), AgentStoppedAt: &identityStopped}
+}
+
+func (f *identityReader) Hosts(_ context.Context, _ inventory.HostQuery) ([]inventory.HostView, error) {
+	return []inventory.HostView{identityHost("h1"), identityHost("old")}, nil
+}
+
+func (f *identityReader) Host(_ context.Context, id string) (inventory.HostView, bool, error) {
+	return identityHost(id), true, nil
+}
+
+func TestHostsAPIIdentity(t *testing.T) {
+	s, _ := New(&identityReader{}, token)
+	h := s.Handler()
+	check := func(got map[string]any, wantVersion, wantHash string, wantStopped any) {
+		t.Helper()
+		if got["agent_version"] != wantVersion || got["agent_exe_sha256"] != wantHash {
+			t.Errorf("identity = %v %v", got["agent_version"], got["agent_exe_sha256"])
+		}
+		if v, ok := got["agent_stopped_at"]; !ok || v != wantStopped {
+			t.Errorf("agent_stopped_at = %v (present %v), want %v", v, ok, wantStopped)
+		}
+	}
+	var one map[string]any
+	rec := get(t, h, "/v1/hosts/h1", token)
+	if err := json.Unmarshal(rec.Body.Bytes(), &one); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	check(one, "1.4.0", strings.Repeat("cd", 32), "2026-11-08T09:00:00Z")
+
+	var list []map[string]any
+	rec = get(t, h, "/v1/hosts", token)
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || rec.Code != http.StatusOK || len(list) != 2 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	check(list[0], "1.4.0", strings.Repeat("cd", 32), "2026-11-08T09:00:00Z")
+	check(list[1], "", "", nil) // an older agent: empty strings, null stop time
+
+	for _, path := range []string{"/v1/hosts", "/v1/hosts/h1"} {
+		if rec := get(t, h, path, ""); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s without a token: %d", path, rec.Code)
+		}
+	}
+}

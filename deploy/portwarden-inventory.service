@@ -18,6 +18,9 @@ LoadCredential=token:/etc/portwarden/inventory.token
 # Azure look-up with an app registration's client secret (cloud.azure.client_secret_file =
 # /run/credentials/portwarden-inventory.service/azure-secret):
 #LoadCredential=azure-secret:/etc/portwarden/azure-secret
+# Several instances may run (on other machines, same config and database): one leads,
+# the others stand by and serve reads (README "Running a standby"). On losing the lead it
+# exits 1 and Restart= brings it back as a standby.
 ExecStart=/usr/bin/portwarden-inventory --config /etc/portwarden/inventory.json
 DynamicUser=yes
 NoNewPrivileges=yes

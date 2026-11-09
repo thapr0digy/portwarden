@@ -46,6 +46,13 @@
 #      an alerter restart (its heartbeat consumer replays the ghost's last heartbeat); when
 #      it sends again it is a new host
 #      (new first_seen, no host_recovered page). The host API carries a tamper status.
+#      Standby (two instances): a second inventory and alerter start as hot standbys
+#      (/healthz says standby; the standby inventory serves reads with the read token and
+#      refuses a forget with 503); SIGKILL of both leaders hands over (the measured times
+#      are printed), a listener opened on :$STANDBY_PORT then is stored by the new
+#      inventory and paged exactly once by the new alerter, and :$M5_OPEN_PORT is not paged
+#      again; the first pair, restarted, stands by until a clean stop of the second hands
+#      back.
 #  11. hardened unit and tamper (M6): until here the agent ran with --tamper-interval 1s and
 #      must have raised no tamper signal. Then the deploy/ unit itself (as the .deb installs
 #      it, with a runtime drop-in for the e2e NATS) runs the agent as portwarden-agent under
@@ -95,6 +102,7 @@ M5_FW_PORT=8091
 M7_UNUSED_PORT=8089 # nothing listens here: a rule for it moves no listener's exposure
 M8_SECRET_PORT=8088 # a loopback listener started with secret arguments (M8 redaction)
 UNIT_PORT=8090
+STANDBY_PORT=8085 # opened while the standbys lead (two-instance step)
 M9_V6ONLY_PORT=8087 # a [::] listener with IPV6_V6ONLY (M9): judged for IPv6 only
 M9_DUAL_PORT=8086   # a dual-stack [::] listener: judged for IPv4 too
 TAMPER_WINDOW_S=10
@@ -103,6 +111,10 @@ UNIT_CRED_DIR=/run/portwarden-e2e
 UNIT_SPOOL=/var/lib/portwarden/e2e-spool
 INV_PORT=18740
 HOOK_PORT=18741
+INV2_PORT=18742      # the standby inventory's API
+ALERT_HEALTH=18743   # the first alerter's health endpoint
+ALERT2_HEALTH=18744  # the standby alerter's
+HANDOVER_WINDOW_S=15 # a SIGKILLed leader frees its lock at once; the standby polls every 1 s
 M5_NFT_TABLE=pw_e2e_m5
 M5_NETNS=pw-e2e-out
 M5_HOST_IP=10.231.0.1
@@ -142,7 +154,7 @@ log() { echo "e2e: $*"; }
 
 fail() {
 	echo "e2e: FAIL: $*" >&2
-	for f in agent nats watch watch-replay inventory alerter verifier hook; do
+	for f in agent nats watch watch-replay inventory inventory2 alerter alerter2 verifier hook; do
 		[ -s "$work/$f.log" ] && { echo "--- $f.log (tail) ---" >&2; tail -n 20 "$work/$f.log" >&2; }
 	done
 	exit 1
@@ -753,6 +765,7 @@ JSON
 cat >"$work/alerter.json" <<JSON
 {"nats": {"url": "$nats_url", "nkey_file": "$work/users/alerter.nk"},
  "postgres_dsn_file": "$work/inventory.dsn",
+ "health_listen": "127.0.0.1:$ALERT_HEALTH",
  "rules": {"page_level": "host_firewall_open", "silent_after": "${SILENT_AFTER_S}s", "dedupe_window": "1h"},
  "webhook": {"url": "http://127.0.0.1:$HOOK_PORT/", "secret_file": "$work/webhook.secret", "timeout": "2s", "allow_insecure": true}}
 JSON
@@ -764,7 +777,8 @@ cat >"$work/verifier.json" <<JSON
  "timeouts": {"connect": "2s", "banner": "1s"}, "min_gap": "1s"}
 JSON
 "$work/portwarden-inventory" --config "$work/inventory.json" >>"$work/inventory.log" 2>&1 &
-pids+=($!)
+inventory_pid=$!
+pids+=($inventory_pid)
 "$work/fakehost" --nats-url "$nats_url" --nats-nkey "$work/users/host-e2eother.nk" --host e2eother >>"$work/fakehost.log" 2>&1 &
 pids+=($!)
 "$work/portwarden-alerter" --config "$work/alerter.json" >>"$work/alerter.log" 2>&1 &
@@ -824,6 +838,73 @@ sleep 3 # the confirmation (suppressed by dedupe) has been seen by now; give any
 seen_in "$work/alerter.log" '"msg":"alert suppressed".*"rule":"dedupe"' 1 || fail "the confirmation was not suppressed by dedupe"
 echo "alerter: one page for :$M5_OPEN_PORT ($(jq -r "select(.listener.port == $M5_OPEN_PORT) | .kind + \" \" + .summary" "$work/hook.jsonl")), none for :$M5_FW_PORT"
 ! grep -q "bad signature" "$work/hook.log" || fail "the webhook saw a bad signature"
+
+log "standby (two instances): a second inventory and alerter stand by; SIGKILL of the leaders hands over"
+jq --arg l "127.0.0.1:$INV2_PORT" '.listen = $l' "$work/inventory.json" >"$work/inventory2.json"
+jq --arg h "127.0.0.1:$ALERT2_HEALTH" '.health_listen = $h' "$work/alerter.json" >"$work/alerter2.json"
+"$work/portwarden-inventory" --config "$work/inventory2.json" >>"$work/inventory2.log" 2>&1 &
+inventory2_pid=$!
+pids+=($inventory2_pid)
+"$work/portwarden-alerter" --config "$work/alerter2.json" >>"$work/alerter2.log" 2>&1 &
+alerter2_pid=$!
+pids+=($alerter2_pid)
+# role_of <port>: the role an instance's /healthz reports (empty when it does not answer).
+role_of() { curl -sf --max-time 2 "http://127.0.0.1:$1/healthz" 2>/dev/null | jq -r '.role // empty' 2>/dev/null || true; }
+has_role() { [ "$(role_of "$1")" = "$2" ]; }
+wait_for "the second inventory to stand by" 20 has_role "$INV2_PORT" standby
+wait_for "the second alerter to stand by" 20 has_role "$ALERT2_HEALTH" standby
+has_role "$INV_PORT" leader || fail "the first inventory is $(role_of "$INV_PORT"), want leader"
+has_role "$ALERT_HEALTH" leader || fail "the first alerter is $(role_of "$ALERT_HEALTH"), want leader"
+! seen_in "$work/alerter2.log" '"msg":"alerter running"' 1 || fail "the standby alerter started consuming"
+api2() { curl -sf --max-time 5 -H "Authorization: Bearer $api_token" "http://127.0.0.1:$INV2_PORT$1"; }
+[ "$(api2 "/v1/hosts/$host_id" | jq -r .id)" = "$host_id" ] || fail "the standby inventory does not serve reads"
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$INV2_PORT/v1/hosts")
+[ "$code" = 401 ] || fail "the standby inventory without a token answered $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $(cat "$work/inventory-admin.token")" "http://127.0.0.1:$INV2_PORT/v1/hosts/e2enobody?force=1")
+[ "$code" = 503 ] || fail "a forget on the standby inventory answered $code, want 503"
+echo "standby: second inventory and alerter stand by; the standby inventory reads $host_id with the read token, 401 without, forget 503"
+
+pages_before=$(pages "$M5_OPEN_PORT")
+t_kill=$(now_ns)
+kill -KILL "$inventory_pid" "$alerter_pid"
+wait "$inventory_pid" 2>/dev/null || true
+wait "$alerter_pid" 2>/dev/null || true
+wait_for "the second inventory to lead" "$HANDOVER_WINDOW_S" has_role "$INV2_PORT" leader
+inv_handover_ms=$((($(now_ns) - t_kill) / 1000000))
+wait_for "the second alerter to lead" "$HANDOVER_WINDOW_S" has_role "$ALERT2_HEALTH" leader
+alert_handover_ms=$((($(now_ns) - t_kill) / 1000000))
+wait_for "the second alerter consuming" 20 seen_in "$work/alerter2.log" '"msg":"alerter running"' 1
+sudo nft add rule inet "$M5_NFT_TABLE" input tcp dport "$STANDBY_PORT" accept
+python3 -m http.server "$STANDBY_PORT" --bind 0.0.0.0 --directory "$work/www" >/dev/null 2>&1 &
+pids+=($!)
+inv2_open() { case "$(api2 "/v1/listeners?host=$host_id&proto=tcp&port=$STANDBY_PORT" | jq -r '.[0].level // empty')" in host_firewall_open | confirmed) true ;; *) false ;; esac; }
+wait_for "the new inventory to store :$STANDBY_PORT" "$INV_WINDOW_S" inv2_open
+standby_page() { [ "$(pages "$STANDBY_PORT")" -ge 1 ]; }
+wait_for "a page for :$STANDBY_PORT from the new alerter" 20 standby_page
+sleep 3 # room for a duplicate (the verifier's confirmation is deduped)
+[ "$(pages "$STANDBY_PORT")" -eq 1 ] || fail "expected one page for :$STANDBY_PORT after the handover, got $(pages "$STANDBY_PORT")"
+[ "$(pages "$M5_OPEN_PORT")" -eq "$pages_before" ] || fail ":$M5_OPEN_PORT was paged again across the handover"
+seen_in "$work/alerter2.log" '"msg":"alert delivered"' 1 || fail "the new alerter did not deliver the page"
+echo "standby: SIGKILL of both leaders: inventory handover ${inv_handover_ms} ms, alerter handover ${alert_handover_ms} ms; :$STANDBY_PORT stored and paged once by the new leaders, :$M5_OPEN_PORT not again"
+
+# Hand back: the first pair restarted stands by; a clean stop of the second hands over.
+runs_before=$(count_in "$work/alerter.log" '"msg":"alerter running"')
+"$work/portwarden-inventory" --config "$work/inventory.json" >>"$work/inventory.log" 2>&1 &
+inventory_pid=$!
+pids+=($inventory_pid)
+"$work/portwarden-alerter" --config "$work/alerter.json" >>"$work/alerter.log" 2>&1 &
+alerter_pid=$!
+pids+=($alerter_pid)
+wait_for "the first inventory to stand by" 20 has_role "$INV_PORT" standby
+wait_for "the first alerter to stand by" 20 has_role "$ALERT_HEALTH" standby
+t_stop=$(now_ns)
+kill -TERM "$inventory2_pid" "$alerter2_pid"
+wait "$inventory2_pid" 2>/dev/null || fail "the second inventory did not stop cleanly"
+wait "$alerter2_pid" 2>/dev/null || fail "the second alerter did not stop cleanly"
+wait_for "the first inventory to lead again" "$HANDOVER_WINDOW_S" has_role "$INV_PORT" leader
+wait_for "the first alerter to lead again" "$HANDOVER_WINDOW_S" has_role "$ALERT_HEALTH" leader
+wait_for "the first alerter consuming again" 20 seen_in "$work/alerter.log" '"msg":"alerter running"' $((runs_before + 1))
+echo "standby: clean stop of the second pair handed back in $((($(now_ns) - t_stop) / 1000000)) ms"
 
 log "cmdline redaction (M8): secret arguments are masked before the agent publishes them"
 # Loopback, so it pages nothing; argv: python3 -c <script> <port> <secret arguments...>.
@@ -941,12 +1022,13 @@ seen_in "$work/inventory.log" "\"msg\":\"api: host forgotten\".*\"token\":\"admi
 # A restarted alerter replays every host's last heartbeat, the ghost's included: the
 # forget mark must keep it from seeding liveness (without it, the ghost's silence would
 # page again once its mark was gone).
+runs_before=$(count_in "$work/alerter.log" '"msg":"alerter running"')
 kill "$alerter_pid"
 wait "$alerter_pid" 2>/dev/null || true
 "$work/portwarden-alerter" --config "$work/alerter.json" >>"$work/alerter.log" 2>&1 &
 alerter_pid=$!
 pids+=($alerter_pid)
-wait_for "the restarted alerter consuming" 20 seen_in "$work/alerter.log" '"msg":"alerter running"' 2
+wait_for "the restarted alerter consuming" 20 seen_in "$work/alerter.log" '"msg":"alerter running"' $((runs_before + 1))
 sleep $((2 * SILENT_AFTER_S + 4)) # the restart's grace (one silent_after), then a silent_after, with margin
 [ "$(ghost_page_count)" -eq 1 ] || fail "the forgotten host paged again: $(ghost_pages)"
 [ "$(ghost_code)" = 404 ] || fail "the forgotten host came back without sending ($(ghost_code))"

@@ -203,7 +203,12 @@ func (l *limited) Read(b []byte) (int, error) {
 // verified connection: no client that could follow a redirect, use a proxy from the
 // environment or open a second connection.
 func get(conn net.Conn, host, path string) ([]byte, error) {
-	req := "GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\nUser-Agent: portwarden-agent\r\nAccept: application/json\r\n\r\n"
+	// Plan only produces an IP literal, localhost or a wildcard with a numeric port, and
+	// the paths are constants; this keeps a header from ever being injected regardless.
+	if strings.ContainsAny(host+path, "\r\n \t") {
+		return nil, errors.New("refusing a request line or Host with whitespace")
+	}
+	req :="GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\nUser-Agent: portwarden-agent\r\nAccept: application/json\r\n\r\n"
 	if _, err := io.WriteString(conn, req); err != nil {
 		return nil, err
 	}

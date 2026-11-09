@@ -64,7 +64,7 @@ func (s *State) Role() Role { return Role(s.role.Load()) }
 // Epoch is the epoch led (0 while standing by).
 func (s *State) Epoch() int64 { return s.epoch.Load() }
 
-func (s *State) set(r Role, epoch int64) {
+func (s *State) Set(r Role, epoch int64) {
 	s.epoch.Store(epoch)
 	s.role.Store(int32(r))
 }
@@ -135,7 +135,7 @@ func Wait(ctx context.Context, base *pgx.ConnConfig, opts Options, state *State)
 		return nil, fmt.Errorf("leader: bad epoch table name %q", opts.Table)
 	}
 	poll := orDefault(opts.Poll, time.Second)
-	state.set(Standby, 0)
+	state.Set(Standby, 0)
 	slog.Info("standby: waiting for the leader lock", "service", opts.Service, "poll", poll.String())
 	backoff := time.Second
 	var conn *pgx.Conn
@@ -230,7 +230,7 @@ func tryAcquire(ctx context.Context, conn *pgx.Conn, opts Options, state *State)
 	l := &PGLease{opts: opts, conn: conn, epoch: epoch, state: state,
 		fence: "SELECT epoch FROM " + opts.Table + " WHERE id = 1 FOR SHARE",
 		lost:  make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{})}
-	state.set(Leader, epoch)
+	state.Set(Leader, epoch)
 	slog.Info("became leader", "service", opts.Service, "epoch", epoch)
 	go l.keep()
 	return l, nil
@@ -274,7 +274,7 @@ func (l *PGLease) lose(err error) {
 		l.errMu.Lock()
 		l.err = err
 		l.errMu.Unlock()
-		l.state.set(Standby, 0)
+		l.state.Set(Standby, 0)
 		slog.Error("lost leadership", "service", l.opts.Service, "epoch", l.epoch, "err", err)
 		close(l.lost)
 	})
@@ -319,7 +319,7 @@ func (l *PGLease) Fence(ctx context.Context, tx pgx.Tx) error {
 func (l *PGLease) Release(ctx context.Context) error {
 	l.stopOnce.Do(func() { close(l.stop) })
 	<-l.done
-	l.state.set(Standby, 0)
+	l.state.Set(Standby, 0)
 	if l.Err() != nil || l.conn.IsClosed() {
 		// Lost: the session is broken or fenced; closing it frees the lock if it is not.
 		_ = l.conn.Close(ctx)

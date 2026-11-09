@@ -12,7 +12,7 @@ func TestRoleAndState(t *testing.T) {
 	if s.Role() != Standby || s.Role().String() != "standby" || s.Epoch() != 0 {
 		t.Fatalf("zero state: %s %d", s.Role(), s.Epoch())
 	}
-	s.set(Leader, 7)
+	s.Set(Leader, 7)
 	if s.Role() != Leader || s.Role().String() != "leader" || s.Epoch() != 7 {
 		t.Fatalf("leader: %s %d", s.Role(), s.Epoch())
 	}

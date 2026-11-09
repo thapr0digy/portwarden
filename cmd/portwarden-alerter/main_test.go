@@ -36,6 +36,7 @@ import (
 // PW_TEST_HELPER set it runs the real main (with an in-memory store) on --config
 // PW_TEST_CONFIG.
 func TestMain(m *testing.M) {
+	defaultHealthListen = "127.0.0.1:0" // tests never take the real port
 	if os.Getenv("PW_TEST_HELPER") == "1" {
 		openStore = opener(newFakeStore())
 		os.Args = []string{os.Args[0], "--config", os.Getenv("PW_TEST_CONFIG")}

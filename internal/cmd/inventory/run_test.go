@@ -1,4 +1,4 @@
-package main
+package inventory
 
 import (
 	"bufio"
@@ -23,11 +23,12 @@ import (
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
 	"github.com/thapr0digy/portwarden/internal/backend/testnats"
+	"github.com/thapr0digy/portwarden/internal/cmd/cli"
 	"github.com/thapr0digy/portwarden/internal/natsauth"
 )
 
 // TestMain doubles as the inventory binary for the child-process tests: with
-// PW_TEST_HELPER set it runs the real main (with an in-memory store, or PostgreSQL with
+// PW_TEST_HELPER set it runs the real Run (with an in-memory store, or PostgreSQL with
 // PW_TEST_REAL_PG) on the arguments in
 // PW_TEST_ARGS (separated by newlines).
 func TestMain(m *testing.M) {
@@ -36,9 +37,7 @@ func TestMain(m *testing.M) {
 		if os.Getenv("PW_TEST_REAL_PG") == "1" {
 			openStore = openPG // the two-instance tests (handover_integration_test.go)
 		}
-		os.Args = append([]string{os.Args[0]}, strings.Split(os.Getenv("PW_TEST_ARGS"), "\n")...)
-		main()
-		return
+		os.Exit(cli.Code(Run(context.Background(), strings.Split(os.Getenv("PW_TEST_ARGS"), "\n"), os.Stdout, os.Stderr)))
 	}
 	os.Exit(m.Run())
 }

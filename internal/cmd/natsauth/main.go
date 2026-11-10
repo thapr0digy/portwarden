@@ -1,16 +1,18 @@
-// portwarden-natsauth mints per-host and per-service NATS nkey users with Portwarden's
-// least-privilege permissions and renders the nats-server authorization block.
+// Package natsauth is `portwarden natsauth` (also installed as portwarden-natsauth): it
+// mints per-host and per-service NATS nkey users with Portwarden's least-privilege
+// permissions and renders the nats-server authorization block.
 //
-//	portwarden-natsauth mint --dir /etc/portwarden/nats-users --role host --host <machine-id>
-//	portwarden-natsauth mint --dir /etc/portwarden/nats-users --role inventory
-//	portwarden-natsauth render --dir /etc/portwarden/nats-users --out /etc/nats/portwarden-users.conf
+//	portwarden natsauth mint --dir /etc/portwarden/nats-users --role host --host <machine-id>
+//	portwarden natsauth mint --dir /etc/portwarden/nats-users --role inventory
+//	portwarden natsauth render --dir /etc/portwarden/nats-users --out /etc/nats/portwarden-users.conf
 //
 // mint writes <name>.nk (the seed, mode 0600: copy it to the host or service and pass it
 // as --nats-nkey) and <name>.json (public part). render writes the authorization block
 // for every minted user; include it from the server config and reload nats-server.
-package main
+package natsauth
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,29 +20,40 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/thapr0digy/portwarden/internal/cmd/cli"
 	"github.com/thapr0digy/portwarden/internal/natsauth"
 	"github.com/thapr0digy/portwarden/internal/version"
 )
 
-func main() {
-	version.HandleFlag()
-	if err := run(os.Args[1:], os.Stdout); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			os.Exit(0)
-		}
-		fmt.Fprintln(os.Stderr, "portwarden-natsauth:", err)
-		os.Exit(2)
+// Name is the command's name in its usage and version line.
+const Name = "portwarden-natsauth"
+
+// Run is `portwarden natsauth` (and the portwarden-natsauth name): mint or render. It
+// returns cli.Exit with the status the process ends with: 0, or 2 after printing the error.
+func Run(_ context.Context, args []string, stdout, stderr io.Writer) error {
+	if version.Requested(args) {
+		version.Fprint(stdout, Name)
+		return nil
 	}
+	if err := run(args, stdout, stderr); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		fmt.Fprintln(stderr, Name+":", err)
+		return cli.Exit(2)
+	}
+	return nil
 }
 
 const usage = "usage: portwarden-natsauth mint --dir D --role host|inventory|alerter|verifier|admin [--host ID]\n" +
 	"       portwarden-natsauth render --dir D [--out FILE]"
 
-func run(args []string, stdout io.Writer) error {
+func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
-	fs := flag.NewFlagSet("portwarden-natsauth "+args[0], flag.ContinueOnError)
+	fs := flag.NewFlagSet(Name+" "+args[0], flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	dir := fs.String("dir", "", "directory of minted users (seeds and public parts)")
 	switch args[0] {
 	case "mint":

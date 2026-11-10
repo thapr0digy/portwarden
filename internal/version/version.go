@@ -27,9 +27,20 @@ func HandleFlag() {
 }
 
 func printIfRequested(args []string, w io.Writer) bool {
-	if len(args) != 2 || (args[1] != "--version" && args[1] != "-version") {
+	if len(args) == 0 || !Requested(args[1:]) {
 		return false
 	}
-	fmt.Fprintln(w, filepath.Base(args[0]), String())
+	Fprint(w, filepath.Base(args[0]))
 	return true
+}
+
+// Requested reports whether a command's arguments (without the program name) ask for
+// its version: exactly one argument, --version or -version.
+func Requested(args []string) bool {
+	return len(args) == 1 && (args[0] == "--version" || args[0] == "-version")
+}
+
+// Fprint writes "<command> <String()>", the line --version prints.
+func Fprint(w io.Writer, command string) {
+	fmt.Fprintln(w, command, String())
 }

@@ -1,15 +1,16 @@
-// portwarden-verifier is the outside checker: run it on a machine outside the servers'
-// networks (fixed source addresses with a clear reverse DNS name, design §9). It probes
-// what the inventory requests (pwb.probe.<host>.request, built from stored state), on
+// Package verifier is `portwarden verifier` (also installed as portwarden-verifier), the
+// outside checker: run it on a machine outside the servers' networks (fixed source
+// addresses with a clear reverse DNS name, design §9). It probes what the inventory requests (pwb.probe.<host>.request, built from stored state), on
 // addresses inside its allowlist (non-public ones only when listed for the host), and
 // publishes pwb.verifier.<host>.exposure. See README "Backend".
-package main
+package verifier
 
 import (
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -23,6 +24,7 @@ import (
 	asmv1 "github.com/thapr0digy/portwarden/gen/asm/v1"
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
+	"github.com/thapr0digy/portwarden/internal/cmd/cli"
 	"github.com/thapr0digy/portwarden/internal/natsauth"
 	"github.com/thapr0digy/portwarden/internal/verifier"
 	"github.com/thapr0digy/portwarden/internal/version"
@@ -53,15 +55,27 @@ type Config struct {
 	MinGap    svc.Duration `json:"min_gap"`
 }
 
-func main() {
-	version.HandleFlag()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
-	path := flag.String("config", "/etc/portwarden/verifier.json", "config file (JSON)")
-	flag.Parse()
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+// Name is the command's name in its usage, version line and logs.
+const Name = "portwarden-verifier"
+
+// Run is `portwarden verifier` (and the portwarden-verifier name): it runs until SIGTERM
+// or SIGINT and returns cli.Exit with the status the process ends with.
+func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if version.Requested(args) {
+		version.Fprint(stdout, Name)
+		return nil
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(stderr, nil)))
+	fs := flag.NewFlagSet(Name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	path := fs.String("config", "/etc/portwarden/verifier.json", "config file (JSON)")
+	if err := fs.Parse(args); err != nil {
+		return cli.FlagExit(err)
+	}
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	err := run(ctx, *path)
 	stop()
-	os.Exit(exitCode(err))
+	return cli.Exit(exitCode(err))
 }
 
 // exitCode is the process's exit status for run's result: 0 for a clean stop (nil, or the

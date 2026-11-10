@@ -1,16 +1,17 @@
-// portwarden-inventory keeps the current state of every host, listener, exposure and
-// proxy route in PostgreSQL from the ASM_EVENTS stream, raises "host silent" when a
-// host's heartbeats stop, runs the cloud look-up (level 3) and serves a read-only JSON
-// API. Several instances may run: the one holding the database's leader lock consumes and
+// Package inventory is `portwarden inventory` (also installed as portwarden-inventory): it
+// keeps the current state of every host, listener, exposure and proxy route in
+// PostgreSQL from the ASM_EVENTS stream, raises "host silent" when a host's heartbeats
+// stop, runs the cloud look-up (level 3) and serves a read-only JSON API. Several instances may run: the one holding the database's leader lock consumes and
 // runs the workers, the others wait as hot standbys that serve reads (README "Running a
 // standby"). See README "Backend".
-package main
+package inventory
 
 import (
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -36,6 +37,7 @@ import (
 	cloudazure "github.com/thapr0digy/portwarden/internal/cloud/azure"
 	cloudgcp "github.com/thapr0digy/portwarden/internal/cloud/gcp"
 	"github.com/thapr0digy/portwarden/internal/cloud/reach"
+	"github.com/thapr0digy/portwarden/internal/cmd/cli"
 	"github.com/thapr0digy/portwarden/internal/inventory"
 	"github.com/thapr0digy/portwarden/internal/inventory/api"
 	"github.com/thapr0digy/portwarden/internal/inventory/pg"
@@ -254,22 +256,35 @@ func (c CloudConfig) policy() (reach.Policy, error) {
 	return pol, nil
 }
 
-func main() {
-	version.HandleFlag()
-	if len(os.Args) > 1 && os.Args[1] == "forget-host" {
-		if err := forgetHost(os.Args[2:], os.Stdout, os.Getenv); err != nil {
-			fmt.Fprintln(os.Stderr, "portwarden-inventory forget-host:", err)
-			os.Exit(1)
-		}
-		return
+// Name is the command's name in its usage, version line and logs.
+const Name = "portwarden-inventory"
+
+// Run is `portwarden inventory` (and the portwarden-inventory name): the service, which
+// runs until SIGTERM or SIGINT and logs to stderr, or with "forget-host" first that
+// subcommand. It returns cli.Exit with the status the process ends with.
+func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if version.Requested(args) {
+		version.Fprint(stdout, Name)
+		return nil
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
-	path := flag.String("config", "/etc/portwarden/inventory.json", "config file (JSON)")
-	flag.Parse()
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	if len(args) > 0 && args[0] == "forget-host" {
+		if err := forgetHost(args[1:], stdout, os.Getenv); err != nil {
+			fmt.Fprintln(stderr, Name+" forget-host:", err)
+			return cli.Exit(1)
+		}
+		return nil
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(stderr, nil)))
+	fs := flag.NewFlagSet(Name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	path := fs.String("config", "/etc/portwarden/inventory.json", "config file (JSON)")
+	if err := fs.Parse(args); err != nil {
+		return cli.FlagExit(err)
+	}
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	err := run(ctx, *path, openStore)
 	stop()
-	os.Exit(exitCode(err))
+	return cli.Exit(exitCode(err))
 }
 
 // exitCode is the process's exit status for run's result: 0 for a clean stop (nil, or the

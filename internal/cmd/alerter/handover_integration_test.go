@@ -1,6 +1,6 @@
 //go:build integration
 
-package main
+package alerter
 
 import (
 	"context"
@@ -139,7 +139,7 @@ func TestTwoAlertersHandover(t *testing.T) {
 	ctxB, cancelB := context.WithCancel(ctx)
 	defer cancelB()
 	doneB := make(chan error, 1)
-	go func() { doneB <- run(ctxB, config(addrB), openPG) }()
+	go func() { doneB <- run(ctxB, config(addrB), openPG, os.Stdout) }()
 	waitUntil(t, "B to stand by", func() bool { return healthOf(t, addrB).Role == "standby" })
 
 	publish := func(kind string, data []byte) {
@@ -170,7 +170,7 @@ func TestTwoAlertersHandover(t *testing.T) {
 	ctxC, cancelC := context.WithCancel(ctx)
 	defer cancelC()
 	doneC := make(chan error, 1)
-	go func() { doneC <- run(ctxC, config(addrC), openPG) }()
+	go func() { doneC <- run(ctxC, config(addrC), openPG, os.Stdout) }()
 	waitUntil(t, "C to stand by", func() bool { return healthOf(t, addrC).Role == "standby" })
 	dropped := time.Now()
 	if _, err := adm.Exec(ctx, "SELECT pg_terminate_backend($1)", leaderPID(t, ctx, adm)); err != nil {

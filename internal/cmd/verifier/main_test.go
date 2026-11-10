@@ -1,4 +1,4 @@
-package main
+package verifier
 
 import (
 	"bufio"
@@ -20,16 +20,15 @@ import (
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
 	"github.com/thapr0digy/portwarden/internal/backend/testnats"
+	"github.com/thapr0digy/portwarden/internal/cmd/cli"
 	"github.com/thapr0digy/portwarden/internal/natsauth"
 )
 
 // TestMain doubles as the verifier binary for the child-process tests: with
-// PW_TEST_HELPER set it runs the real main with --config PW_TEST_CONFIG.
+// PW_TEST_HELPER set it runs the real Run with --config PW_TEST_CONFIG.
 func TestMain(m *testing.M) {
 	if os.Getenv("PW_TEST_HELPER") == "1" {
-		os.Args = []string{os.Args[0], "--config", os.Getenv("PW_TEST_CONFIG")}
-		main()
-		return
+		os.Exit(cli.Code(Run(context.Background(), []string{"--config", os.Getenv("PW_TEST_CONFIG")}, os.Stdout, os.Stderr)))
 	}
 	os.Exit(m.Run())
 }

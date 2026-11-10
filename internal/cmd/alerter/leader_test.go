@@ -1,4 +1,4 @@
-package main
+package alerter
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -109,7 +110,7 @@ func TestRunStandbyDoesNoWorkUntilItLeads(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, configFile(t, cfg), opener(store)) }()
+	go func() { done <- run(ctx, configFile(t, cfg), opener(store), os.Stdout) }()
 	waitUntil(t, "the standby's health endpoint", func() bool { return healthOf(t, addr).Role == "standby" })
 	time.Sleep(1500 * time.Millisecond) // a working instance would have delivered and consumed by now
 	if store.pages()[0].delivered {
@@ -143,7 +144,7 @@ func TestRunLostLeadershipExits(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, configFile(t, Config{NATS: natsConfig(ts)}), opener(store)) }()
+	go func() { done <- run(ctx, configFile(t, Config{NATS: natsConfig(ts)}), opener(store), os.Stdout) }()
 	ts.WaitConsumer(t, natsauth.ConsumerAlerterHB)
 	store.mu.Lock()
 	l := store.lease
@@ -193,7 +194,7 @@ func TestRunHealthAddressBusy(t *testing.T) {
 	defer ln.Close()
 	addr := ln.Addr().String()
 	store := newFakeStore()
-	err = run(context.Background(), configFile(t, Config{HealthListen: &addr}), opener(store))
+	err = run(context.Background(), configFile(t, Config{HealthListen: &addr}), opener(store), os.Stdout)
 	if err == nil || !strings.Contains(err.Error(), "health_listen") || !store.closed {
 		t.Fatalf("%v (closed %v)", err, store.closed)
 	}

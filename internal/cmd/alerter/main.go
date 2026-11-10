@@ -1,12 +1,12 @@
-// portwarden-alerter pages on newly reachable listeners (an agent exposure.changed or a
-// cloud verdict reaching the page level from below), on the outside checker's
-// transitions to confirmed, on host silence, and once when its own feed stalls. Every
+// Package alerter is `portwarden alerter` (also installed as portwarden-alerter): it
+// pages on newly reachable listeners (an agent exposure.changed or a cloud verdict
+// reaching the page level from below), on the outside checker's transitions to confirmed, on host silence, and once when its own feed stalls. Every
 // decision and its page are stored in PostgreSQL in one transaction before the NATS
 // message is acked; an outbox worker delivers pages (one JSON line on stdout each, and a
 // signed webhook POST) with retries across restarts. Several instances may run: the one
 // holding the database's leader lock works, the others wait as hot standbys (README
 // "Running a standby"). See README "Backend".
-package main
+package alerter
 
 import (
 	"context"
@@ -17,7 +17,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"os"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -33,6 +32,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/backend/leader"
 	"github.com/thapr0digy/portwarden/internal/backend/liveness"
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
+	"github.com/thapr0digy/portwarden/internal/cmd/cli"
 	"github.com/thapr0digy/portwarden/internal/natsauth"
 	"github.com/thapr0digy/portwarden/internal/version"
 )
@@ -73,15 +73,28 @@ type Config struct {
 // defaultHealthListen is the health endpoint's address when the config names none.
 var defaultHealthListen = "127.0.0.1:8741"
 
-func main() {
-	version.HandleFlag()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
-	path := flag.String("config", "/etc/portwarden/alerter.json", "config file (JSON)")
-	flag.Parse()
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	err := run(ctx, *path, openStore)
+// Name is the command's name in its usage, version line and logs.
+const Name = "portwarden-alerter"
+
+// Run is `portwarden alerter` (and the portwarden-alerter name): it runs until SIGTERM or
+// SIGINT, writes each page to stdout as one JSON line, logs to stderr and returns
+// cli.Exit with the status the process ends with.
+func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if version.Requested(args) {
+		version.Fprint(stdout, Name)
+		return nil
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(stderr, nil)))
+	fs := flag.NewFlagSet(Name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	path := fs.String("config", "/etc/portwarden/alerter.json", "config file (JSON)")
+	if err := fs.Parse(args); err != nil {
+		return cli.FlagExit(err)
+	}
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
+	err := run(ctx, *path, openStore, stdout)
 	stop()
-	os.Exit(exitCode(err))
+	return cli.Exit(exitCode(err))
 }
 
 // exitCode is the process's exit status for run's result: 0 for a clean stop (nil, or the
@@ -135,7 +148,8 @@ type settings struct {
 	rules  alerter.Rules
 	hook   *alerter.Webhook
 	dsn    string
-	health string // the health endpoint's address ("" off)
+	health string    // the health endpoint's address ("" off)
+	pages  io.Writer // each page as one JSON line (the process's stdout)
 }
 
 // load reads and checks the config and reads the webhook secret and the DSN, in this
@@ -188,11 +202,12 @@ func load(path string) (settings, error) {
 // waits as a standby until this instance leads; then it consumes the stream until ctx
 // ends (then it returns ctx's error), the heartbeat consumer stops, or the lead is lost
 // (an error: the process exits 1 and systemd restarts it as a standby).
-func run(ctx context.Context, path string, openStore openStoreFunc) error {
+func run(ctx context.Context, path string, openStore openStoreFunc, pages io.Writer) error {
 	st, err := load(path)
 	if err != nil {
 		return err
 	}
+	st.pages = pages
 	store, err := openStore(ctx, st.dsn)
 	if err != nil {
 		return err
@@ -248,7 +263,7 @@ func work(ctx context.Context, st settings, store stateStore, lost <-chan struct
 	silentAfter := cfg.Rules.SilentAfter.D(90 * time.Second)
 	a := &app{engine: alerter.NewEngine(rules, bus.NewEventID), store: store, live: liveness.New(silentAfter),
 		feed: liveness.NewFeed(silentAfter, time.Now()), hook: hook, maxAttempts: cfg.Webhook.MaxAttempts,
-		tamperSig: map[string]string{}, noSilence: map[string]bool{}, runSig: map[string]string{}, out: os.Stdout, lost: lost}
+		tamperSig: map[string]string{}, noSilence: map[string]bool{}, runSig: map[string]string{}, out: st.pages, lost: lost}
 	if a.maxAttempts <= 0 {
 		a.maxAttempts = 20
 	}

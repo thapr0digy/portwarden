@@ -1,13 +1,14 @@
-// portwarden-watch prints the ASM_EVENTS stream, one line per message, for humans and for
-// dev/e2e.sh. It is read-only: an ordered consumer leaves no state on the server.
-package main
+// Package watch is `portwarden watch` (also installed as portwarden-watch): it prints the
+// ASM_EVENTS stream, one line per message, for humans and for dev/e2e.sh. It is
+// read-only: an ordered consumer leaves no state on the server.
+package watch
 
 import (
 	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"os"
+	"io"
 	"os/signal"
 	"syscall"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/thapr0digy/portwarden/internal/cmd/cli"
 	"github.com/thapr0digy/portwarden/internal/version"
 )
 
@@ -28,9 +30,10 @@ type options struct {
 	since     time.Duration
 }
 
-func parseFlags(args []string) (options, error) {
+func parseFlags(args []string, stderr io.Writer) (options, error) {
 	var o options
-	fs := flag.NewFlagSet("portwarden-watch", flag.ContinueOnError)
+	fs := flag.NewFlagSet(Name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	fs.StringVar(&o.natsURL, "nats-url", "nats://127.0.0.1:4222", "NATS server URL")
 	fs.StringVar(&o.natsCreds, "nats-creds", "", "NATS credentials file")
 	fs.StringVar(&o.natsNkey, "nats-nkey", "", "NATS nkey user seed file (the user needs stream read and consumer rights, e.g. the admin)")
@@ -51,25 +54,35 @@ func parseFlags(args []string) (options, error) {
 	return o, nil
 }
 
-func main() {
-	version.HandleFlag()
-	opts, err := parseFlags(os.Args[1:])
+// Name is the command's name in its usage, version line and errors.
+const Name = "portwarden-watch"
+
+// Run is `portwarden watch` (and the portwarden-watch name): it prints a line per message
+// on stdout until SIGTERM or SIGINT and returns cli.Exit with the status the process ends
+// with (2 for bad flags, 1 when it cannot watch).
+func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if version.Requested(args) {
+		version.Fprint(stdout, Name)
+		return nil
+	}
+	opts, err := parseFlags(args, stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			os.Exit(0)
+			return nil
 		}
-		fmt.Fprintln(os.Stderr, "portwarden-watch:", err)
-		os.Exit(2)
+		fmt.Fprintln(stderr, Name+":", err)
+		return cli.Exit(2)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	if err := run(ctx, opts); err != nil {
-		fmt.Fprintln(os.Stderr, "portwarden-watch:", err)
-		os.Exit(1)
+	if err := run(ctx, opts, stdout, stderr); err != nil {
+		fmt.Fprintln(stderr, Name+":", err)
+		return cli.Exit(1)
 	}
+	return nil
 }
 
-func run(ctx context.Context, opts options) error {
+func run(ctx context.Context, opts options, stdout, stderr io.Writer) error {
 	copts := []nats.Option{nats.Name("portwarden-watch")}
 	if opts.natsCreds != "" {
 		copts = append(copts, nats.UserCredentials(opts.natsCreds))
@@ -108,13 +121,13 @@ func run(ctx context.Context, opts options) error {
 	cc, err := cons.Consume(func(m jetstream.Msg) {
 		p, err := parseMessage(m.Subject(), m.Data())
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "portwarden-watch:", err)
+			fmt.Fprintln(stderr, Name+":", err)
 			return
 		}
 		if gap := gaps.check(p.run, p.seq); gap != "" {
-			fmt.Println(gap)
+			fmt.Fprintln(stdout, gap)
 		}
-		fmt.Println(p.line)
+		fmt.Fprintln(stdout, p.line)
 	})
 	if err != nil {
 		return fmt.Errorf("consume: %w", err)

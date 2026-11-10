@@ -1,4 +1,4 @@
-package main
+package alerter
 
 import (
 	"bufio"
@@ -29,11 +29,12 @@ import (
 	"github.com/thapr0digy/portwarden/internal/backend/liveness"
 	"github.com/thapr0digy/portwarden/internal/backend/svc"
 	"github.com/thapr0digy/portwarden/internal/backend/testnats"
+	"github.com/thapr0digy/portwarden/internal/cmd/cli"
 	"github.com/thapr0digy/portwarden/internal/natsauth"
 )
 
 // TestMain doubles as the alerter binary for the child-process tests: with
-// PW_TEST_HELPER set it runs the real main (with an in-memory store, or PostgreSQL with
+// PW_TEST_HELPER set it runs the real Run (with an in-memory store, or PostgreSQL with
 // PW_TEST_REAL_PG) on --config PW_TEST_CONFIG.
 func TestMain(m *testing.M) {
 	defaultHealthListen = "127.0.0.1:0" // tests never take the real port
@@ -42,9 +43,7 @@ func TestMain(m *testing.M) {
 		if os.Getenv("PW_TEST_REAL_PG") == "1" {
 			openStore = openPG // the two-instance tests (handover_integration_test.go)
 		}
-		os.Args = []string{os.Args[0], "--config", os.Getenv("PW_TEST_CONFIG")}
-		main()
-		return
+		os.Exit(cli.Code(Run(context.Background(), []string{"--config", os.Getenv("PW_TEST_CONFIG")}, os.Stdout, os.Stderr)))
 	}
 	os.Exit(m.Run())
 }
@@ -542,7 +541,7 @@ func TestRunStartFailures(t *testing.T) {
 		if open == nil {
 			open = opener(store)
 		}
-		err := run(ctx, configFile(t, c.cfg), open)
+		err := run(ctx, configFile(t, c.cfg), open, os.Stdout)
 		if err == nil || !strings.Contains(err.Error(), c.want) || exitCode(err) != 1 {
 			t.Errorf("%s: %v (want %q)", name, err, c.want)
 		}
@@ -577,7 +576,7 @@ func TestRunWiringAndShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, p, opener(store)) }()
+	go func() { done <- run(ctx, p, opener(store), os.Stdout) }()
 	time.Sleep(100 * time.Millisecond)
 	ts.CreateStream(t)
 	ts.WaitConsumer(t, natsauth.ConsumerAlerter)
@@ -623,7 +622,7 @@ func TestRunShutdownWhileWaitingForStream(t *testing.T) {
 	store := newFakeStore()
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	if err := run(ctx, configFile(t, Config{NATS: natsConfig(ts)}), opener(store)); !errors.Is(err, context.DeadlineExceeded) || !store.closed {
+	if err := run(ctx, configFile(t, Config{NATS: natsConfig(ts)}), opener(store), os.Stdout); !errors.Is(err, context.DeadlineExceeded) || !store.closed {
 		t.Fatalf("%v, closed %v", err, store.closed)
 	}
 }

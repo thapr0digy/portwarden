@@ -11,6 +11,8 @@ Type=simple
 # Secrets are passed as systemd credentials (readable only by this service, under
 # /run/credentials/portwarden-verifier.service/); the config file names those paths.
 LoadCredential=nats.nk:/etc/portwarden/nats/verifier.nk
+# /usr/bin/portwarden-verifier is the backend .deb's symlink to /usr/bin/portwarden, which runs
+# its verifier subcommand (`portwarden verifier`) under this name.
 ExecStart=/usr/bin/portwarden-verifier --config /etc/portwarden/verifier.json
 DynamicUser=yes
 NoNewPrivileges=yes

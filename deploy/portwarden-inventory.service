@@ -21,6 +21,8 @@ LoadCredential=token:/etc/portwarden/inventory.token
 # Several instances may run (on other machines, same config and database): one leads,
 # the others stand by and serve reads (README "Running a standby"). On losing the lead it
 # exits 1 and Restart= brings it back as a standby.
+# /usr/bin/portwarden-inventory is the backend .deb's symlink to /usr/bin/portwarden, which runs
+# its inventory subcommand (`portwarden inventory`) under this name.
 ExecStart=/usr/bin/portwarden-inventory --config /etc/portwarden/inventory.json
 DynamicUser=yes
 NoNewPrivileges=yes

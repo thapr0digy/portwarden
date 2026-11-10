@@ -2,6 +2,7 @@
 .matrix/
 dist/
 .vmverify/
+/portwarden
 /portwarden-agent
 /portwarden-alerter
 /portwarden-inventory

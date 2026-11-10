@@ -2,7 +2,7 @@
 # network namespaces (it must see every process and listening socket), with exactly the
 # four capabilities the systemd unit grants (design §9) and a read-only root filesystem.
 #
-#   portwarden-natsauth mint --dir users --role host --host <machine-id>   # once per node
+#   portwarden natsauth mint --dir users --role host --host <machine-id>   # once per node
 #   kubectl apply -f deploy/kubernetes/daemonset.yaml   # creates the namespace too
 #   kubectl -n portwarden create secret generic portwarden-agent-nats \
 #     --from-file=users/host-<id1>.nk --from-file=users/host-<id2>.nk ...

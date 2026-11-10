@@ -33,7 +33,15 @@ wait_running() {
 	done
 	fail "$unit is not running $2"
 }
-cleanup() { sudo rm -rf /etc/portwarden/nats/verifier.nk /etc/portwarden/nats/verifier.json /etc/portwarden/verifier.json; }
+# The files this check writes; it refuses to run where any exists, and removes only them.
+own_files=(/etc/portwarden/nats/verifier.nk /etc/portwarden/nats/verifier.json /etc/portwarden/verifier.json)
+for f in "${own_files[@]}"; do
+	if sudo test -e "$f"; then
+		echo "deb-check-backend: $f exists; run this on a disposable machine" >&2
+		exit 1
+	fi
+done
+cleanup() { sudo rm -f "${own_files[@]}"; }
 trap cleanup EXIT
 
 if dpkg -s portwarden-backend >/dev/null 2>&1; then
@@ -52,7 +60,6 @@ log "installed: $old_version"
 
 log "run the verifier from its unit"
 sudo mkdir -p /etc/portwarden/nats
-[ ! -e /etc/portwarden/nats/verifier.nk ] || fail "/etc/portwarden/nats/verifier.nk exists; not a disposable machine?"
 sudo portwarden-natsauth mint --dir /etc/portwarden/nats --role verifier >/dev/null
 [ "$(sudo stat -c %a /etc/portwarden/nats/verifier.nk)" = 600 ] || fail "minted seed is not 0600"
 cat <<'JSON' | sudo tee /etc/portwarden/verifier.json >/dev/null

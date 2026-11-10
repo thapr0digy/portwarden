@@ -1,9 +1,10 @@
-// Package inventory is `portwarden inventory` (also installed as portwarden-inventory): it
-// keeps the current state of every host, listener, exposure and proxy route in
+// Package inventory is `portwarden inventory` (also installed as portwarden-inventory):
+// it keeps the current state of every host, listener, exposure and proxy route in
 // PostgreSQL from the ASM_EVENTS stream, raises "host silent" when a host's heartbeats
-// stop, runs the cloud look-up (level 3) and serves a read-only JSON API. Several instances may run: the one holding the database's leader lock consumes and
-// runs the workers, the others wait as hot standbys that serve reads (README "Running a
-// standby"). See README "Backend".
+// stop, runs the cloud look-up (level 3) and serves a read-only JSON API. Several
+// instances may run: the one holding the database's leader lock consumes and runs the
+// workers, the others wait as hot standbys that serve reads (README "Running a standby").
+// See README "Backend".
 package inventory
 
 import (

@@ -1,11 +1,12 @@
 // Package alerter is `portwarden alerter` (also installed as portwarden-alerter): it
 // pages on newly reachable listeners (an agent exposure.changed or a cloud verdict
-// reaching the page level from below), on the outside checker's transitions to confirmed, on host silence, and once when its own feed stalls. Every
-// decision and its page are stored in PostgreSQL in one transaction before the NATS
-// message is acked; an outbox worker delivers pages (one JSON line on stdout each, and a
-// signed webhook POST) with retries across restarts. Several instances may run: the one
-// holding the database's leader lock works, the others wait as hot standbys (README
-// "Running a standby"). See README "Backend".
+// reaching the page level from below), on the outside checker's transitions to confirmed,
+// on host silence, and once when its own feed stalls. Every decision and its page are
+// stored in PostgreSQL in one transaction before the NATS message is acked; an outbox
+// worker delivers pages (one JSON line on stdout each, and a signed webhook POST) with
+// retries across restarts. Several instances may run: the one holding the database's
+// leader lock works, the others wait as hot standbys (README "Running a standby"). See
+// README "Backend".
 package alerter
 
 import (

@@ -1,8 +1,9 @@
 // Package verifier is `portwarden verifier` (also installed as portwarden-verifier), the
 // outside checker: run it on a machine outside the servers' networks (fixed source
-// addresses with a clear reverse DNS name, design §9). It probes what the inventory requests (pwb.probe.<host>.request, built from stored state), on
-// addresses inside its allowlist (non-public ones only when listed for the host), and
-// publishes pwb.verifier.<host>.exposure. See README "Backend".
+// addresses with a clear reverse DNS name, design §9). It probes what the inventory
+// requests (pwb.probe.<host>.request, built from stored state), on addresses inside its
+// allowlist (non-public ones only when listed for the host), and publishes
+// pwb.verifier.<host>.exposure. See README "Backend".
 package verifier
 
 import (

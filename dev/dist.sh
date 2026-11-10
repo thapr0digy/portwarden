@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Builds the release artifacts (make dist): static binaries for linux/amd64 and
-# linux/arm64, a .deb per architecture for portwarden-agent and portwarden-backend,
-# a CycloneDX SBOM per binary, and SHA256SUMS. Runs on Linux or macOS with the pinned Go
+# Builds the release artifacts (make dist): two static binaries for linux/amd64 and
+# linux/arm64, portwarden-agent (the eBPF agent) and portwarden (the backend services and
+# tools as subcommands), a .deb per architecture for portwarden-agent and
+# portwarden-backend (portwarden plus its portwarden-<command> symlinks), a CycloneDX SBOM
+# per binary, and SHA256SUMS. Runs on Linux or macOS with the pinned Go
 # toolchain (go.mod); nFPM and cyclonedx-gomod run with `go run` at pinned versions.
 #
 # Reproducible: CGO off, -trimpath, -buildvcs=false, no build id, the version stamped
@@ -19,7 +21,8 @@ cd "$(dirname "$0")/.."
 
 NFPM=github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.46.3
 CYCLONEDX=github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
-COMMANDS=(agent inventory alerter verifier natsauth watch)
+# The shipped binaries, each built from ./cmd/<name>.
+BINARIES=(portwarden-agent portwarden)
 ARCHES=${ARCHES:-amd64 arm64}
 
 check=false
@@ -97,9 +100,9 @@ echo "dist: version $VERSION, SOURCE_DATE_EPOCH $SOURCE_DATE_EPOCH ($mtime), int
 
 ldflags="-s -w -buildid= -X github.com/thapr0digy/portwarden/internal/version.Version=$VERSION"
 for arch in $ARCHES; do
-	for c in "${COMMANDS[@]}"; do
+	for b in "${BINARIES[@]}"; do
 		CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -buildvcs=false -ldflags "$ldflags" \
-			-o "$out/bin/linux_$arch/portwarden-$c" "./cmd/portwarden-$c"
+			-o "$out/bin/linux_$arch/$b" "./cmd/$b"
 	done
 done
 
@@ -133,11 +136,11 @@ if [ "${SBOM:-1}" != 0 ]; then
 	# are reproducible too.
 	install_tool "$CYCLONEDX" "$out/work"
 	for arch in $ARCHES; do
-		for c in "${COMMANDS[@]}"; do
+		for b in "${BINARIES[@]}"; do
 			# GOOS/GOARCH: it labels the purls with them (its own platform otherwise).
 			GOOS=linux GOARCH=$arch "$out/work/cyclonedx-gomod" bin -json -noserial -notimestamp -version "$VERSION" \
-				-output "$out/sbom/portwarden-${c}_linux_$arch.cdx.json" "$out/bin/linux_$arch/portwarden-$c" 2>/dev/null ||
-				{ echo "dist: SBOM for portwarden-$c ($arch) failed" >&2; exit 1; }
+				-output "$out/sbom/${b}_linux_$arch.cdx.json" "$out/bin/linux_$arch/$b" 2>/dev/null ||
+				{ echo "dist: SBOM for $b ($arch) failed" >&2; exit 1; }
 		done
 	done
 fi

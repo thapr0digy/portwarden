@@ -15,7 +15,7 @@
 #          an arm64 host, KVM on an x86_64 one): every package's unit tests and the
 #          integration tests, cross-compiled for amd64 on the host and run as root in the
 #          VM (they load and attach the real BPF objects), then dev/deb-check.sh runs the
-#          amd64 .deb from dist/ (make dist) through install, upgrade, disable, purge.
+#          amd64 .debs from dist/ (make dist) through install, upgrade, disable, purge.
 # A missing VM is created and provisioned (dev/provision.sh from this checkout). VMs are
 # left running for the next run: `limactl stop <vm>` or `limactl delete -f <vm>` removes
 # them. Logs go to .matrix/<leg>/. MATRIX_MOUNT (CI) mounts that directory instead of
@@ -92,7 +92,7 @@ run_cross() {
 		local name=${pkg//\//_} tags=integration skip=""
 		case $pkg in
 		*/pgstate | */inventory/pg | */backend/leader) continue ;; # need PostgreSQL (make itest covers them)
-		*/cmd/portwarden-alerter | */cmd/portwarden-inventory) skip=Handover ;; # the two-instance tests need PostgreSQL
+		*/internal/cmd/alerter | */internal/cmd/inventory) skip=Handover ;; # the two-instance tests need PostgreSQL
 		esac
 		CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -tags "$tags" -o "$bin/$name.test" "$pkg" >>"$out/$leg/tests.log" 2>&1 ||
 			{ echo "BUILD FAIL $pkg" >>"$out/$leg/tests.log"; status=FAIL; continue; }
@@ -105,9 +105,9 @@ run_cross() {
 			status=FAIL
 		fi
 	done <<<"$pkgs"
-	# The .deb lifecycle (dev/deb-check.sh): install dist/'s amd64 agent package, upgrade it
-	# to a second build with a higher version (checking the upgrade is not tamper), keep
-	# an administrator's disable, purge.
+	# The .deb lifecycle (dev/deb-check.sh): install dist/'s amd64 agent and backend
+	# packages, upgrade each to a second build with a higher version (for the agent,
+	# checking the upgrade is not tamper), keep an administrator's disable, purge.
 	local debfile
 	debfile=$(ls dist/portwarden-agent_*_amd64.deb 2>/dev/null | head -1 || true)
 	if [ -n "$debfile" ]; then
@@ -116,9 +116,13 @@ run_cross() {
 		base=${debfile#dist/portwarden-agent_}
 		base=${base%-1_amd64.deb}
 		rm -rf "${v2dir:?}"
+		# The backend .deb the same way (dev/deb-check-backend.sh): its verifier unit is
+		# restarted onto the new binary through its portwarden-verifier symlink.
 		if ARCHES=amd64 SBOM=0 VERSION="$base+upgradetest" DIST_DIR="$v2dir" dev/dist.sh >"$out/$leg/dist-upgrade.log" 2>&1 &&
 			limactl shell "$vm" bash -c "cd '$repo' && dev/deb-check.sh '$repo/$debfile' '$(ls "$v2dir"/portwarden-agent_*_amd64.deb)'" \
-				</dev/null >"$out/$leg/deb.log" 2>&1; then
+				</dev/null >"$out/$leg/deb.log" 2>&1 &&
+			limactl shell "$vm" bash -c "cd '$repo' && dev/deb-check.sh '$repo/${debfile/portwarden-agent_/portwarden-backend_}' '$(ls "$v2dir"/portwarden-backend_*_amd64.deb)'" \
+				</dev/null >>"$out/$leg/deb.log" 2>&1; then
 			deb=ok
 		fi
 	fi

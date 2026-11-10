@@ -23,7 +23,7 @@
 #      :18082 updates the routes; the backend that then opens on :18082 carries
 #      behind=nginx:<pid>:/ on its OPENED. In the efficiency step the connect hook must not
 #      run for the 10 000 non-proxy connections, and must run for requests through nginx.
-#  10. backend (M5): NATS runs with nkey users minted by portwarden-natsauth (the agent as
+#  10. backend (M5): NATS runs with nkey users minted by `portwarden natsauth` (the agent as
 #      its host user, which cannot publish under another host's prefix); portwarden-inventory
 #      (a throwaway PostgreSQL database), portwarden-alerter (a local HMAC-checking webhook)
 #      and portwarden-verifier (in its own netns, probing the VM over a veth pair) run. A
@@ -287,12 +287,12 @@ natscli() { nats --server "$nats_url" --nkey "$work/users/admin.nk" "$@"; }
 nats_setup() {
 	local role
 	for role in admin inventory alerter verifier; do
-		"$work/portwarden-natsauth" mint --dir "$work/users" --role "$role" >/dev/null
+		"$work/portwarden" natsauth mint --dir "$work/users" --role "$role" >/dev/null
 	done
-	"$work/portwarden-natsauth" mint --dir "$work/users" --role host --host "$host_id" >/dev/null
-	"$work/portwarden-natsauth" mint --dir "$work/users" --role host --host e2eother >/dev/null # dev/fakehost
-	"$work/portwarden-natsauth" mint --dir "$work/users" --role host --host e2eghost >/dev/null # dev/fakehost, forgotten (M8)
-	"$work/portwarden-natsauth" render --dir "$work/users" --out "$work/users.conf" >/dev/null
+	"$work/portwarden" natsauth mint --dir "$work/users" --role host --host "$host_id" >/dev/null
+	"$work/portwarden" natsauth mint --dir "$work/users" --role host --host e2eother >/dev/null # dev/fakehost
+	"$work/portwarden" natsauth mint --dir "$work/users" --role host --host e2eghost >/dev/null # dev/fakehost, forgotten (M8)
+	"$work/portwarden" natsauth render --dir "$work/users" --out "$work/users.conf" >/dev/null
 	cat >"$work/nats.conf" <<CONF
 listen: 0.0.0.0:$NATS_PORT
 jetstream { store_dir: "$work/js" }
@@ -348,9 +348,11 @@ mkdir -p "$work/www"
 
 log "building"
 go build -o "$work/portwarden-agent" ./cmd/portwarden-agent
-go build -o "$work/portwarden-watch" ./cmd/portwarden-watch
-for b in portwarden-natsauth portwarden-inventory portwarden-alerter portwarden-verifier; do
-	go build -o "$work/$b" "./cmd/$b"
+# The backend is one binary: the services run through portwarden-<command> symlinks, as
+# their units do; natsauth and watch run as subcommands.
+go build -o "$work/portwarden" ./cmd/portwarden
+for c in inventory alerter verifier; do
+	ln -sf portwarden "$work/portwarden-$c"
 done
 go build -o "$work/fakehost" ./dev/fakehost
 systemctl is-active --quiet postgresql || fail "postgresql is not running (dev/install-postgres.sh)"
@@ -366,7 +368,7 @@ natscli stream add ASM_EVENTS --subjects 'asm.>' --subjects 'pwb.>' --storage fi
 start_agent
 wait_for "stream ASM_EVENTS" 15 stream_ready
 
-"$work/portwarden-watch" --nats-url "$nats_url" --nats-nkey "$work/users/admin.nk" --since 0s >"$work/watch.log" 2>&1 &
+"$work/portwarden" watch --nats-url "$nats_url" --nats-nkey "$work/users/admin.nk" --since 0s >"$work/watch.log" 2>&1 &
 pids+=($!)
 # A heartbeat arriving proves the consumer is live before any listener is opened.
 wait_for "first heartbeat in portwarden-watch" 10 seen HEARTBEAT 1
@@ -683,7 +685,7 @@ agent_stopped_at=$(now_ns)
 stop_agent
 start_agent
 start_nats
-"$work/portwarden-watch" --nats-url "$nats_url" --nats-nkey "$work/users/admin.nk" --since 5m >"$work/watch-replay.log" 2>&1 &
+"$work/portwarden" watch --nats-url "$nats_url" --nats-nkey "$work/users/admin.nk" --since 5m >"$work/watch-replay.log" 2>&1 &
 pids+=($!)
 wait_for "replayed OPENED tcp 0.0.0.0:$SPOOL_PORT" 30 \
 	seen_in "$work/watch-replay.log" "OPENED tcp 0.0.0.0:$SPOOL_PORT " 1

@@ -7,7 +7,7 @@ image:
 nats:
   url: tls://nats.example:4222
   # The Secret with the NATS credentials. credentialType:
-  #   nkey-dir (default): one key per node, host-<machine-id>.nk (portwarden-natsauth mint
+  #   nkey-dir (default): one key per node, host-<machine-id>.nk (portwarden natsauth mint
   #     --role host --host <machine-id>); each agent uses its own node's seed, so nodes
   #     stay unable to publish for each other. A node without its key fails to start.
   #   nkey: one seed (key credentialKey), valid for exactly one host id: singleNode only.

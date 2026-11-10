@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Package lifecycle check for the agent .deb, run as a sudo user on a disposable Ubuntu
+# Package lifecycle check for the agent .deb (for the backend .deb it runs
+# dev/deb-check-backend.sh), run as a sudo user on a disposable Ubuntu
 # machine without portwarden-agent installed (dev/matrix.sh's x86_64 leg; the x86 test
 # checklist). Usage: dev/deb-check.sh <old.deb> <new.deb> (new must be a higher version).
 #   1. install old: the unit is enabled and active, logs "started" and watches its unit file;
@@ -12,6 +13,10 @@
 set -euo pipefail
 old=$(realpath "$1")
 new=$(realpath "$2")
+# A pair of portwarden-backend packages gets the backend's check instead.
+if [ "$(dpkg-deb --field "$new" Package)" = portwarden-backend ]; then
+	exec "$(dirname "$0")/deb-check-backend.sh" "$old" "$new"
+fi
 fail() { echo "deb-check: FAIL: $*" >&2; sudo journalctl -u portwarden-agent -o cat --no-pager | tail -n 20 >&2; exit 1; }
 log() { echo "deb-check: $*"; }
 # The journal is read into a variable before grep: under pipefail, `journalctl | grep -q`

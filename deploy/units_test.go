@@ -117,3 +117,83 @@ func TestBackendUnits(t *testing.T) {
 		}
 	}
 }
+
+// packageEntry is one item of an nFPM config's contents list.
+type packageEntry struct{ src, dst, typ string }
+
+// packageContents reads the contents list of an nFPM config: only the src, dst and type
+// keys, which is all these configs use besides file_info.
+func packageContents(t *testing.T, path string) []packageEntry {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []packageEntry
+	in := false
+	for _, line := range strings.Split(string(b), "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case line == "contents:":
+			in = true
+			continue
+		case in && line != "" && !strings.HasPrefix(line, " "):
+			in = false
+		}
+		if !in || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if v, ok := strings.CutPrefix(trimmed, "- src: "); ok {
+			out = append(out, packageEntry{src: v})
+			continue
+		}
+		if len(out) == 0 {
+			continue
+		}
+		e := &out[len(out)-1]
+		if v, ok := strings.CutPrefix(trimmed, "dst: "); ok {
+			e.dst = v
+		} else if v, ok := strings.CutPrefix(trimmed, "type: "); ok {
+			e.typ = v
+		}
+	}
+	return out
+}
+
+// The backend .deb ships one binary, /usr/bin/portwarden, and each former binary's name
+// as a relative symlink to it: the units' ExecStart (TestBackendUnits) runs those names,
+// and the binary picks the command from its argv[0].
+func TestBackendPackageLayout(t *testing.T) {
+	entries := packageContents(t, "packaging/nfpm-backend.yaml")
+	bins := map[string]packageEntry{}
+	for _, e := range entries {
+		if strings.HasPrefix(e.dst, "/usr/bin/") {
+			bins[e.dst] = e
+		}
+	}
+	if e := bins["/usr/bin/portwarden"]; e.src != "${PW_BIN}/portwarden" || e.typ != "" {
+		t.Errorf("/usr/bin/portwarden: %+v, want the built binary", e)
+	}
+	names := []string{"inventory", "alerter", "verifier", "natsauth", "watch"}
+	for _, c := range names {
+		dst := "/usr/bin/portwarden-" + c
+		if e := bins[dst]; e.src != "portwarden" || e.typ != "symlink" {
+			t.Errorf("%s: %+v, want a symlink to portwarden", dst, e)
+		}
+	}
+	if len(bins) != 1+len(names) {
+		t.Errorf("/usr/bin holds %d entries, want portwarden and %d symlinks: %v", len(bins), len(names), bins)
+	}
+	for _, svc := range []string{"inventory", "alerter", "verifier"} {
+		unit := "portwarden-" + svc + ".service"
+		exec := strings.Fields(strings.Join(directives(t, unit)["ExecStart"], ""))
+		if len(exec) == 0 || bins[exec[0]].typ != "symlink" {
+			t.Errorf("%s: ExecStart %v does not run a name the package installs", unit, exec)
+		}
+	}
+	for _, e := range entries {
+		if strings.Contains(e.dst, "portwarden-agent") {
+			t.Errorf("the backend package ships %s, the agent's", e.dst)
+		}
+	}
+}

@@ -15,12 +15,14 @@ mtime: ${PW_MTIME}
 umask: 0o022
 description: |-
   Portwarden backend: inventory, alerter, outside checker, NATS users
-  portwarden-inventory (events to PostgreSQL, read-only API, cloud look-up),
-  portwarden-alerter (pages on newly reachable listeners, host silence and
-  agent tamper signals), portwarden-verifier (the outside checker),
-  portwarden-natsauth (least-privilege NATS users) and portwarden-watch (a
-  stream viewer). The systemd units are installed but not enabled: each
-  needs its config in /etc/portwarden first (examples in
+  One static binary, portwarden, with a subcommand per service and tool:
+  inventory (events to PostgreSQL, read-only API, cloud look-up), alerter
+  (pages on newly reachable listeners, host silence and agent tamper
+  signals), verifier (the outside checker), natsauth (least-privilege NATS
+  users) and watch (a stream viewer). Each is also installed under its
+  former name, /usr/bin/portwarden-<command>, a symlink that runs it. The
+  systemd units are installed but not enabled: each needs its config in
+  /etc/portwarden first (examples in
   /usr/share/doc/portwarden-backend/examples).
 depends:
   - init-system-helpers (>= 1.54)
@@ -30,21 +32,26 @@ suggests:
   - nats-server
   - postgresql
 contents:
-  - src: ${PW_BIN}/portwarden-inventory
+  - src: ${PW_BIN}/portwarden
+    dst: /usr/bin/portwarden
+    file_info: {mode: 0755}
+  # The former binaries' names: relative symlinks to portwarden, which runs the command
+  # its argv[0] names (the units' ExecStart uses them).
+  - src: portwarden
     dst: /usr/bin/portwarden-inventory
-    file_info: {mode: 0755}
-  - src: ${PW_BIN}/portwarden-alerter
+    type: symlink
+  - src: portwarden
     dst: /usr/bin/portwarden-alerter
-    file_info: {mode: 0755}
-  - src: ${PW_BIN}/portwarden-verifier
+    type: symlink
+  - src: portwarden
     dst: /usr/bin/portwarden-verifier
-    file_info: {mode: 0755}
-  - src: ${PW_BIN}/portwarden-natsauth
+    type: symlink
+  - src: portwarden
     dst: /usr/bin/portwarden-natsauth
-    file_info: {mode: 0755}
-  - src: ${PW_BIN}/portwarden-watch
+    type: symlink
+  - src: portwarden
     dst: /usr/bin/portwarden-watch
-    file_info: {mode: 0755}
+    type: symlink
   - src: deploy/portwarden-inventory.service
     dst: /usr/lib/systemd/system/portwarden-inventory.service
     file_info: {mode: 0644}

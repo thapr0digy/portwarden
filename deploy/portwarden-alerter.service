@@ -14,6 +14,8 @@ LoadCredential=dsn:/etc/portwarden/alerter.dsn
 # Several instances may run (on other machines, same config and database): one leads,
 # the others stand by (README "Running a standby"). On losing the lead it exits 1 and
 # Restart= brings it back as a standby.
+# /usr/bin/portwarden-alerter is the backend .deb's symlink to /usr/bin/portwarden, which runs
+# its alerter subcommand (`portwarden alerter`) under this name.
 ExecStart=/usr/bin/portwarden-alerter --config /etc/portwarden/alerter.json
 DynamicUser=yes
 NoNewPrivileges=yes

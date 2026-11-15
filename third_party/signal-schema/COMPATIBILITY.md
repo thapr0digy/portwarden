@@ -115,3 +115,12 @@ Signal's ingest door listens only on the NetBird overlay, so the address a reque
 (`IngestResponse.observed_remote_addr`) is the overlay address, not a public one. The door leaves the
 field empty. A producer must not use it as a public-IP candidate (`via=ingest-observed`); it takes its
 public address from its own sources (cloud metadata, `publicip`) or the NetBird management API.
+
+## 10. Key ids
+
+A key registered with the product has the id `sign.KeyID` derives from its public key (README,
+"Key ids": the RFC 7638 thumbprint of the RFC 8037 OKP key). The rule is part of the contract:
+changing it is a breaking change (a producer computes its id itself), and a second rule would be a
+new function beside it, never an edit. The receiver looks a key up by whatever id it stored, so a
+key registered before the rule keeps its random id and keeps working. Added in v1 as a MINOR
+change (a new function; no wire change).

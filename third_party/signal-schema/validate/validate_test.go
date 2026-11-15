@@ -63,6 +63,38 @@ func toolOutputEvent(inline []byte) *ev.Event {
 	}
 }
 
+const exampleFP = "SHA256:9Puo8/7xmKbG5DEoJXYw8dSkfzAUovRGBQCMFLPuQBM"
+
+func signInEvent() *ev.Event {
+	at := timestamppb.New(now.Add(-time.Minute))
+	return &ev.Event{
+		Id: "01JC8Z6X4Q00000000000000S1", Type: "asm.host.sign_ins",
+		Source: "urn:asm:agent:" + hostID, Subject: "host:" + hostID,
+		Time:     timestamppb.New(now),
+		Sequence: &ev.Sequence{RunId: runID, Seq: 58},
+		Data: &ev.Event_SignIns{SignIns: &ev.SignInSummary{
+			WindowEnd: timestamppb.New(now),
+			Groups: []*ev.SignInGroup{{Account: "pants", Method: ev.SignInGroup_CERTIFICATE, KeyId: "oidc-ada@example.com",
+				CaFingerprint: exampleFP, Serial: "12", FromIp: "192.0.2.10", Count: 1, FirstAt: at, LastAt: at}},
+		}},
+	}
+}
+
+func accessEvent() *ev.Event {
+	return &ev.Event{
+		Id: "01JC8Z6X4Q00000000000000S2", Type: "asm.host.access",
+		Source: "urn:asm:agent:" + hostID, Subject: "host:" + hostID,
+		Time:     timestamppb.New(now),
+		Sequence: &ev.Sequence{RunId: runID, Seq: 59},
+		Data: &ev.Event_HostAccess{HostAccess: &ev.HostAccess{
+			Sshd:     &ev.Sshd{Read: true, TrustedUserCaKeys: []*ev.TrustedKey{{Fingerprint: exampleFP, Label: "vault ssh/prod"}}},
+			Accounts: []*ev.AccountAccess{{Account: "pants", StaticKeysRead: true, StaticKeys: []string{exampleFP}}},
+		}},
+	}
+}
+
+func grp(e *ev.Event) *ev.SignInGroup { return e.GetSignIns().GetGroups()[0] }
+
 func fr(e *ev.Event) *ev.FindingReport { return e.GetFindingReported() }
 
 func with(e *ev.Event, f func(*ev.Event)) *ev.Event { f(e); return e }
@@ -76,6 +108,26 @@ func TestValidateTable(t *testing.T) {
 	}{
 		{"valid finding", finding(), "", ""},
 		{"valid listener", listenerEvent(), "", ""},
+		{"valid sign-ins", signInEvent(), "", ""},
+		{"valid access state", accessEvent(), "", ""},
+		{"sign-in without a method", with(signInEvent(), func(e *ev.Event) { grp(e).Method = ev.SignInGroup_METHOD_UNSPECIFIED }), CodeInvalidPayload, "sign_ins.groups[0].method"},
+		{"sign-in with no count", with(signInEvent(), func(e *ev.Event) { grp(e).Count = 0 }), CodeInvalidPayload, "sign_ins.groups[0].count"},
+		{"sign-in last before first", with(signInEvent(), func(e *ev.Event) { grp(e).FirstAt = timestamppb.New(now) }), CodeInvalidPayload, "sign_ins.groups[0].last_at"},
+		{"sign-in after the window", with(signInEvent(), func(e *ev.Event) { e.GetSignIns().WindowEnd = timestamppb.New(now.Add(-time.Hour)) }), CodeInvalidPayload, "sign_ins.groups[0].last_at"},
+		{"sign-in account not a user name", with(signInEvent(), func(e *ev.Event) { grp(e).Account = "Pants Root" }), CodeInvalidPayload, "sign_ins.groups[0].account"},
+		{"sign-in key ID with a space", with(signInEvent(), func(e *ev.Event) { grp(e).KeyId = "oidc-a b" }), CodeInvalidPayload, "sign_ins.groups[0].key_id"},
+		{"sign-in key ID over its cap", with(signInEvent(), func(e *ev.Event) { grp(e).KeyId = strings.Repeat("a", 257) }), CodeTooLarge, "sign_ins.groups[0].key_id"},
+		{"sign-in CA not a fingerprint", with(signInEvent(), func(e *ev.Event) { grp(e).CaFingerprint = "MD5:aa" }), CodeInvalidPayload, "sign_ins.groups[0].ca_fingerprint"},
+		{"sign-in from a non-canonical IP", with(signInEvent(), func(e *ev.Event) { grp(e).FromIp = "::ffff:192.0.2.1" }), CodeInvalidPayload, "sign_ins.groups[0].from_ip"},
+		{"jump hop without a person", with(signInEvent(), func(e *ev.Event) {
+			e.GetSignIns().Hops = []*ev.JumpHop{{Target: "box-1", Count: 1, FirstAt: grp(e).FirstAt, LastAt: grp(e).LastAt}}
+		}), CodeInvalidPayload, "sign_ins.hops[0].person"},
+		{"access key not a fingerprint", with(accessEvent(), func(e *ev.Event) { e.GetHostAccess().Accounts[0].StaticKeys = []string{"ssh-ed25519 AAAA"} }), CodeInvalidPayload, "host_access.accounts[0].static_keys[0]"},
+		{"access trusted key label over its cap", with(accessEvent(), func(e *ev.Event) { e.GetHostAccess().Sshd.TrustedUserCaKeys[0].Label = strings.Repeat("a", 65) }), CodeTooLarge, "host_access.sshd.trusted_user_ca_keys[0].label"},
+		{"unchanged access with a body", with(accessEvent(), func(e *ev.Event) {
+			e.GetHostAccess().Unchanged = true
+			e.GetHostAccess().Digest = strings.Repeat("a", 64)
+		}), CodeInvalidPayload, "host_access.unchanged"},
 		{"inline at the cap", toolOutputEvent(make([]byte, 256<<10)), "", ""},
 		{"inline over the cap", toolOutputEvent(make([]byte, 256<<10+1)), CodeTooLarge, "tool_output.inline"},
 		{"tool output without a body", with(toolOutputEvent(nil), func(e *ev.Event) { e.GetToolOutput().Body = nil }), CodeInvalidPayload, "tool_output.body"},

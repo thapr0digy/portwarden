@@ -139,3 +139,26 @@ func TestRejectedEventStillAdvancesCursor(t *testing.T) {
 		t.Fatalf("%+v %+v", p.Items, p.State)
 	}
 }
+
+// An access state rides with the snapshot: a known unchanged digest is confirmed, an unknown one
+// asks for the snapshot resync that also carries the access state.
+func TestUnchangedAccessState(t *testing.T) {
+	acc := func(seq uint64, digest string, unchanged bool) *eventsv1.Event {
+		e := hb("r1", seq)
+		e.Type = "asm.host.access"
+		e.Data = &eventsv1.Event_HostAccess{HostAccess: &eventsv1.HostAccess{Digest: digest, Unchanged: unchanged}}
+		return e
+	}
+	st := State{Run: Run{ID: "r1", BootID: "b1", RunNumber: 1}}
+	p := PlanBatch(agent, st, els(acc(1, "aa", false), acc(2, "aa", true)), Options{Now: time.Unix(1000, 0)})
+	if p.Items[0].Verdict != Store || p.Items[1].Verdict != Confirm || len(p.Directives) != 0 {
+		t.Fatalf("known digest: %+v %+v", p.Items, p.Directives)
+	}
+	p = PlanBatch(agent, p.State, els(acc(3, "bb", true)), Options{Now: time.Unix(1001, 0)})
+	if p.Items[0].Verdict != Confirm || len(p.Directives) != 1 || p.Directives[0].Kind != eventsv1.Directive_RESYNC_SNAPSHOT {
+		t.Fatalf("unknown digest must ask for a resync: %+v %+v", p.Items, p.Directives)
+	}
+	if p.State.Digests["access"] != "" {
+		t.Fatalf("the resync forgets the access digest: %+v", p.State.Digests)
+	}
+}

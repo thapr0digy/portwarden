@@ -1,0 +1,127 @@
+// asm.events.v1. What a host agent (Portwarden) reports about who may sign in to its own host
+// over SSH, and who did (the identity join, phase 5; docs/notes/identity.md "Observed sign-ins").
+//
+// Both types: subject "host:<machine-id>" (the authenticated agent's own), `sequence` set.
+// Nothing here carries a public key, a rule's text, a command line or a journal line: keys are
+// SHA-256 fingerprints ("SHA256:<43 unpadded base64>", as ssh-keygen -l prints them), sudo is
+// presence only. Each part says whether the agent could read it, so a part it could not read is
+// never taken for "none".
+syntax = "proto3";
+
+package asm.events.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/slidehq/signal/schema/eventsv1;eventsv1";
+
+// asm.host.access: the host's whole SSH access state. Sent at the start of each run, when it
+// changes, at the recheck (unchanged=true with the digest and nothing else) and on a
+// RESYNC_SNAPSHOT directive, as asm.host.snapshot is.
+message HostAccess {
+  Sshd sshd = 1;
+  // Local accounts the agent looked at (at least pants and root), each once.
+  repeated AccountAccess accounts = 2;
+  // Lowercase hex SHA-256 of the deterministic encoding of sshd and accounts (sorted by
+  // account).
+  string digest = 3;
+  bool unchanged = 4;
+}
+
+// What sshd's effective configuration says about certificates and keys.
+message Sshd {
+  // False when the configuration could not be read; unreadable says why (at most 256 bytes).
+  bool read = 1;
+  string unreadable = 2;
+  // TrustedUserCAKeys, each key by fingerprint with its comment as the label (at most 64 bytes).
+  repeated TrustedKey trusted_user_ca_keys = 3;
+  // AuthorizedKeysFile as configured ("none" when keys are off; "" for sshd's default).
+  string authorized_keys_file = 4;
+  // AuthorizedPrincipalsFile as configured ("none" or "" when unset).
+  string authorized_principals_file = 5;
+  // True when an AuthorizedPrincipalsCommand is set (the jump host's).
+  bool authorized_principals_command = 6;
+}
+
+message TrustedKey {
+  string fingerprint = 1;
+  string label = 2;
+}
+
+// One local account: the certificate principals it accepts, the static keys it keeps and its
+// sudo rule. A part with its *_read false was not readable (unreadable says why).
+message AccountAccess {
+  // A POSIX user name: [a-z_][a-z0-9_.-]{0,31}.
+  string account = 1;
+  bool principals_read = 2;
+  // The principals file's names (at most 256).
+  repeated string principals = 3;
+  // Reading authorized_keys needs a capability the agent may not hold.
+  bool static_keys_read = 4;
+  // The keys authorized_keys holds, by fingerprint (at most 64).
+  repeated string static_keys = 5;
+  bool sudo_read = 6;
+  SudoRule sudo = 7;
+  string unreadable = 8;
+}
+
+// A sudo rule for the account, by presence: never its text.
+message SudoRule {
+  bool present = 1;
+  bool nopasswd = 2;
+  // The rule lets every command (ALL).
+  bool all_commands = 3;
+}
+
+// asm.host.sign_ins: the sign-ins sshd accepted since the previous report (a delta), grouped.
+// Sent when there is something to say, at most every minute.
+message SignInSummary {
+  google.protobuf.Timestamp window_start = 1;
+  google.protobuf.Timestamp window_end = 2;
+  // At most 1,024; dropped counts the groups past that.
+  repeated SignInGroup groups = 3;
+  // Only from a jump host: the jump app's own log of who went where (at most 1,024).
+  repeated JumpHop hops = 4;
+  // True when the sshd journal could not be read (unreadable says why): no groups then means
+  // "cannot tell", never "nobody".
+  bool journal_unreadable = 5;
+  string unreadable = 6;
+  uint64 dropped = 7;
+}
+
+// Sign-ins that share account, method, certificate and source.
+message SignInGroup {
+  enum Method {
+    METHOD_UNSPECIFIED = 0;
+    CERTIFICATE = 1;
+    KEY = 2;
+    PASSWORD = 3;
+    OTHER = 4;
+  }
+  string account = 1;
+  Method method = 2;
+  // The certificate's key ID as sshd logs it ("oidc-<email>", "approle", "token-…"; at most
+  // 256 bytes); "" for a plain key or when the certificate has none.
+  string key_id = 3;
+  // The last certificate serial seen in the group (decimal).
+  string serial = 4;
+  // The fingerprint of the CA that signed the certificate.
+  string ca_fingerprint = 5;
+  // The fingerprint of a plain key.
+  string key_fingerprint = 6;
+  // Where the connection came from: a canonical IP.
+  string from_ip = 7;
+  uint64 count = 8;
+  google.protobuf.Timestamp first_at = 9;
+  google.protobuf.Timestamp last_at = 10;
+}
+
+// One person's hops through the jump app to one target, as the app logs them.
+message JumpHop {
+  // The person as the jump app names them (its SLIDE_USER; at most 320 bytes).
+  string person = 1;
+  // The target the app connected to (a name or address; at most 256 bytes).
+  string target = 2;
+  uint64 count = 3;
+  google.protobuf.Timestamp first_at = 4;
+  google.protobuf.Timestamp last_at = 5;
+}

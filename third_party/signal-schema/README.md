@@ -18,13 +18,14 @@ checks.
 | `proto/asm/events/v1/envelope.proto` | `Event` (envelope + `oneof data`), `Producer`, `Sequence`, `Batch`, `IngestResponse`, `Directive`, `StoredEvent` |
 | `proto/asm/events/v1/common.proto` | `AssetRef`, `BlobRef`, `Severity`, and Portwarden's listener, process, exposure, host, proxy and tamper types, with their field numbers unchanged |
 | `proto/asm/events/v1/agent.proto` | host-agent payloads (Portwarden) |
+| `proto/asm/events/v1/access.proto` | host-agent SSH access state and sign-ins (the identity join) |
 | `proto/asm/events/v1/exposure.proto` | product-service payloads: cloud verdict, outside probe, forget |
 | `proto/asm/events/v1/discovery.proto` | tool payloads: scans, services, assets, SBOMs, raw tool output |
 | `proto/asm/events/v1/finding.proto` | `FindingReport` |
 | `eventsv1/` | the generated Go types (`*.pb.go`, checked in) and `registry.go`, the one registry |
 | `validate/` | the checks the server runs, for producers to run first: `Event`, `Batch`, `DecodeBinary`, `Element`, `Default` limits |
 | `cejson/` | the CloudEvents JSON codec: `DecodeBatch`, `DecodeEvent`, `EncodeEvent`, `EncodeBatch` |
-| `sign/` | RFC 9421 Ed25519 request signatures over an RFC 9530 `Content-Digest`: `Sign`, `ParseHeaders` (no body read), `Verify` |
+| `sign/` | RFC 9421 Ed25519 request signatures over an RFC 9530 `Content-Digest`: `Sign`, `ParseHeaders` (no body read), `Verify`, `KeyID` (the key id a public key signs with) |
 | `protocol/` | the server's decisions, pure: `Authorize` (type and subject scope per principal kind), `PlanBatch` (run cursor, dedupe, gaps, unchanged digests, heartbeat sampling, directives) |
 | `ingesttest/` | an in-memory reference server for producers' tests; runs `protocol` and `sign`, can answer 413, 429, 503 on demand |
 | `examples/` | one CloudEvents JSON example per type, a batch request and a response |
@@ -77,6 +78,8 @@ payload and the case number are frozen once released (COMPATIBILITY.md).
 | `asm.listener.owner_changed` | `ListenerChange` (27) | agent | `host:<own id>` | delta | `asm.<h>.listener.owner_changed` |
 | `asm.exposure.changed` | `ExposureChange` (28) | agent | `host:<own id>` | delta | `asm.<h>.exposure.changed` |
 | `asm.proxy.routes` | `ProxyRoutes` (29) | agent | `host:<own id>` | full state of one proxy (or `unchanged` + digest) | `asm.<h>.proxy.routes` |
+| `asm.host.access` | `HostAccess` (30) | agent | `host:<own id>` | **full state** of SSH trust (or `unchanged` + digest) | new |
+| `asm.host.sign_ins` | `SignInSummary` (31) | agent | `host:<own id>` | delta (grouped sign-ins since the last) | new |
 | `asm.exposure.cloud_assessed` | `CloudExposureAssessment` (40) | service | `host:<id>` | verdict | `pwb.cloud.<h>.exposure` |
 | `asm.exposure.probed` | `ProbeResult` (41) | prober, service | `host:<id>` or `svc:…` | verdict | `pwb.verifier.<h>.exposure` |
 | `asm.host.forgotten` | `HostForgotten` (42) | service (operator action) | `host:<id>` | marker | `pwb.inventory.<h>.forgotten` |
@@ -169,6 +172,18 @@ lossless in both directions for every attribute above, with three edges: an empt
 `producer` or `sequence` message is the same as none (the validator treats an empty
 `sequence` as absent in both forms), and unknown fields a binary event kept are not
 written to JSON (JSON cannot carry them).
+
+## Key ids
+
+A request names its key in the signature's `keyid`. A key registered from this version on
+(an admin command, an import or enrolment) has the id `sign.KeyID(pub)`: the RFC 7638 JWK
+thumbprint of the Ed25519 public key as an RFC 8037 OKP key, that is base64url without
+padding of the SHA-256 of `{"crv":"Ed25519","kty":"OKP","x":"<base64url of the 32-byte key>"}`
+(43 characters). A producer computes it from its own key, so nobody has to copy it to the
+host; any JOSE library gives the same value. A key registered earlier keeps the random id it
+was given (`ak_` and 13 characters), which `signal admin ingest principal list` prints. The id
+names the key and proves nothing; the signature does. One key belongs to one sender: the
+same key registered twice is refused.
 
 ## Limits
 

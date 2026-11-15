@@ -44,7 +44,7 @@ type State struct {
 	// Retired holds the ids of the principal's runs a newer one replaced: a late event of
 	// one is history, never a reason to adopt it again.
 	Retired map[string]bool
-	// Digests maps "snapshot" and "routes:<proxy id>" to the last full state's digest.
+	// Digests maps "snapshot", "access" and "routes:<proxy id>" to the last full state's digest.
 	Digests map[string]string
 	// HeartbeatStoredAt and HeartbeatFields describe the last stored heartbeat of this run.
 	HeartbeatStoredAt time.Time
@@ -164,6 +164,18 @@ func PlanBatch(p Principal, st State, els []validate.Element, o Options) Plan {
 				case pr.GetRoutesDigest() != "":
 					cur.Digests[key] = pr.GetRoutesDigest()
 				}
+			case *eventsv1.Event_HostAccess:
+				// The SSH access state rides with the snapshot: an unknown digest asks for the
+				// same resync, whose answer carries both.
+				acc := d.HostAccess
+				switch {
+				case acc.GetUnchanged() && cur.Digests["access"] != "" && acc.GetDigest() == cur.Digests["access"]:
+					it.Verdict = Confirm
+				case acc.GetUnchanged():
+					it.Verdict, wantSnapshot = Confirm, true
+				case acc.GetDigest() != "":
+					cur.Digests["access"] = acc.GetDigest()
+				}
 			case *eventsv1.Event_Heartbeat:
 				fields := heartbeatFields(d.Heartbeat)
 				due := o.HeartbeatEvery <= 0 || cur.HeartbeatStoredAt.IsZero() ||
@@ -196,6 +208,7 @@ func PlanBatch(p Principal, st State, els []validate.Element, o Options) Plan {
 	if wantSnapshot {
 		plan.Directives = append(plan.Directives, resync(eventsv1.Directive_RESYNC_SNAPSHOT, "sequence gap or unknown snapshot digest"))
 		delete(cur.Digests, "snapshot")
+		delete(cur.Digests, "access")
 	}
 	if wantProxies {
 		plan.Directives = append(plan.Directives, resync(eventsv1.Directive_RESYNC_PROXIES, "unknown route digest"))

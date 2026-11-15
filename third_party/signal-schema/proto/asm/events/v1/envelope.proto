@@ -16,6 +16,7 @@ syntax = "proto3";
 
 package asm.events.v1;
 
+import "asm/events/v1/access.proto";
 import "asm/events/v1/agent.proto";
 import "asm/events/v1/discovery.proto";
 import "asm/events/v1/exposure.proto";
@@ -82,6 +83,8 @@ message Event {
     ListenerChange listener_change = 27;        // asm.listener.opened|closed|owner_changed
     ExposureChange exposure_change = 28;        // asm.exposure.changed
     ProxyRoutes proxy_routes = 29;              // asm.proxy.routes
+    HostAccess host_access = 30;                // asm.host.access
+    SignInSummary sign_ins = 31;                // asm.host.sign_ins
 
     // Product services (cloud look-up, outside prober, operator actions).
     CloudExposureAssessment cloud_exposure = 40; // asm.exposure.cloud_assessed

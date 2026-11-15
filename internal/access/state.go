@@ -290,9 +290,15 @@ func (g groupDB) gidsOf(u user) []string {
 // reason is an error as an unreadable reason: at most 256 bytes.
 func reason(err error) string { return clip(err.Error(), maxReasonBytes) }
 
-// clip cuts s to at most n bytes at a character boundary, as valid UTF-8.
+// clip makes host-controlled text fit for Signal: valid UTF-8, each control character
+// (NUL included) as "?", at most n bytes cut at a character boundary.
 func clip(s string, n int) string {
-	s = strings.ToValidUTF8(s, "")
+	s = strings.Map(func(r rune) rune {
+		if isControl(r) {
+			return '?'
+		}
+		return r
+	}, strings.ToValidUTF8(s, ""))
 	for len(s) > n {
 		_, size := utf8.DecodeLastRuneInString(s)
 		s = s[:len(s)-size]

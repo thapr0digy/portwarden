@@ -1,10 +1,13 @@
-// Package publish sends listener events to NATS JetStream.
+// Package publish sends listener events to NATS JetStream or, with Config.Ingest, to
+// Signal's ingest door over HTTPS (one or the other).
 //
 // Changes and Snapshot only enqueue; one sender goroutine does all network I/O, so the
 // caller (the agent loop draining the kernel ring buffer) never waits on the network.
 // The queue is a spool (internal/spool): on disk when Config.SpoolDir is set, so
 // messages not yet sent survive a restart and go out, with their original run_id and
-// seq, before the new run's own.
+// seq, before the new run's own. The spool holds asm.v1 messages under their NATS
+// subjects whatever the destination; the HTTPS sender converts them as it sends
+// (signalEvent), so a spool written under one destination drains to the other.
 package publish
 
 import (
@@ -12,17 +15,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/netip"
 	"os"
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/oklog/ulid/v2"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -35,15 +34,11 @@ import (
 )
 
 const (
-	streamName      = "ASM_EVENTS"
 	defaultSpoolMax = 64 << 20
 	// spoolSegmentBytes is the spool's segment size; a smaller SpoolMax caps it, so
 	// the oldest segment can always be evicted to stay under the limit.
 	spoolSegmentBytes = 4 << 20
-	publishTimeout    = 2 * time.Second
 	closeFlushWindow  = 2 * time.Second
-	dedupeWindow      = 2 * time.Minute
-	streamMaxAge      = 7 * 24 * time.Hour
 )
 
 // reconnectWait is the delay between connection attempts and between send retries.
@@ -52,6 +47,9 @@ var reconnectWait = time.Second
 
 // Config configures a Publisher. SpoolDir "" keeps unsent messages in memory only,
 // where SpoolMax counts each message as 1 KiB. Zero SpoolMax means 64 MiB.
+//
+// The destination is NATS (URL and its credential and TLS files) or, when Ingest is
+// set, Signal's ingest door; the NATS fields must then be empty.
 type Config struct {
 	URL, CredsFile, CAFile, CertFile, KeyFile string
 	// NkeyFile is an nkey user seed file (portwarden-natsauth mint), an alternative to
@@ -77,6 +75,8 @@ type Config struct {
 	// stops on it: wrong credentials for this host must show as silence, not as a
 	// running agent whose messages vanish. It must not block.
 	OnDenied func(subject string)
+	// Ingest, when set, sends to Signal's ingest door instead of NATS.
+	Ingest *IngestConfig
 }
 
 // Publisher implements agent.Sink on top of a JetStream stream.
@@ -88,8 +88,7 @@ type Publisher struct {
 	// agentVersion and exeSHA256 are Config.AgentVersion and Config.ExeSHA256.
 	agentVersion string
 	exeSHA256    string
-	nc           *nats.Conn
-	js           jetstream.JetStream
+	tr           transport
 	q            *spool.Spool
 
 	mu       sync.Mutex // orders seq assignment with q.Push
@@ -114,25 +113,24 @@ type Publisher struct {
 	// first pass.
 	tamper *asmv1.TamperStatus
 
-	// usingExistingLogged is touched only by the sender goroutine.
-	usingExistingLogged bool
-
-	perms    permTracker
 	onDenied func(subject string)
 
-	reconnected atomic.Bool
-	wake        chan struct{}
-	stop        chan struct{}
-	stopOnce    sync.Once
-	done        chan struct{}
+	wake     chan struct{}
+	stop     chan struct{}
+	stopOnce sync.Once
+	done     chan struct{}
+	// sendCtx bounds the sender's requests: it is cancelled closeFlushWindow after
+	// shutdown starts, so Close never waits on a slow destination for longer.
+	sendCtx    context.Context
+	cancelSend context.CancelFunc
 }
 
-// New connects to NATS and starts the sender. NATS being unreachable is not an error:
-// the sender connects, ensures the stream and drains the queue once it is up.
-// New fails only on bad configuration.
+// New starts the sender. The destination being unreachable is not an error: the sender
+// connects (NATS: and ensures the stream; Signal: and enrols) and drains the queue once it
+// is up. New fails only on bad configuration.
 func New(ctx context.Context, cfg Config) (*Publisher, error) {
-	if cfg.URL == "" || cfg.HostID == "" {
-		return nil, errors.New("publish: URL and HostID are required")
+	if cfg.HostID == "" {
+		return nil, errors.New("publish: HostID is required")
 	}
 	if strings.ContainsAny(cfg.HostID, ".*> \t\r\n") {
 		return nil, fmt.Errorf("publish: HostID %q is not a single subject token", cfg.HostID)
@@ -143,22 +141,6 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	if cfg.SpoolMax == 0 {
 		cfg.SpoolMax = defaultSpoolMax
 	}
-	if cfg.CredsFile != "" && cfg.NkeyFile != "" {
-		return nil, errors.New("publish: CredsFile and NkeyFile are exclusive")
-	}
-	for _, f := range []string{cfg.CredsFile, cfg.NkeyFile, cfg.CAFile, cfg.CertFile, cfg.KeyFile} {
-		if err := readable(f); err != nil {
-			return nil, err
-		}
-	}
-	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
-		return nil, errors.New("publish: CertFile and KeyFile must be set together")
-	}
-	q, err := spool.Open(cfg.SpoolDir, cfg.SpoolMax, min(spoolSegmentBytes, cfg.SpoolMax))
-	if err != nil {
-		return nil, fmt.Errorf("publish: %w", err)
-	}
-
 	p := &Publisher{
 		hostID:  cfg.HostID,
 		current: make(map[model.ListenerKey]state.Listener),
@@ -167,81 +149,30 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 		bootID:  cfg.BootID, runNumber: cfg.RunNumber,
 		agentVersion: cfg.AgentVersion, exeSHA256: cfg.ExeSHA256,
 		onDenied: cfg.OnDenied,
-		q:        q,
 		wake:     make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
-
-	opts := []nats.Option{
-		nats.Name("portwarden"),
-		nats.MaxReconnects(-1),
-		nats.RetryOnFailedConnect(true),
-		// Turn off nats.go's own reconnect buffer so the spool is the only buffer and
-		// its drop counter is true.
-		nats.ReconnectBufSize(-1),
-		nats.ReconnectWait(reconnectWait),
-		// Reply inboxes (request replies and JetStream publish acks) live under
-		// _INBOX_<host>.>, so a host user's subscribe permission can be limited to its
-		// own inboxes instead of _INBOX.>, which would let it read every consumer's
-		// deliveries.
-		nats.CustomInboxPrefix(InboxPrefix(cfg.HostID)),
-		// With RetryOnFailedConnect the first successful connect runs ConnectedCB,
-		// later ones ReconnectedCB.
-		nats.ConnectHandler(func(*nats.Conn) { p.signal() }),
-		nats.ReconnectHandler(func(*nats.Conn) {
-			p.reconnected.Store(true)
-			p.signal()
-		}),
-		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
-			if errors.Is(err, nats.ErrPermissionViolation) {
-				if !p.perms.record(err) {
-					slog.Warn("nats permission violation", "subject", violationSubject(err), "err", err)
-				}
-				return
-			}
-			slog.Warn("nats async error", "err", err)
-		}),
-		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-			slog.Warn("nats disconnected", "err", err)
-		}),
+	var err error
+	switch {
+	case cfg.Ingest != nil && (cfg.URL != "" || cfg.CredsFile != "" || cfg.NkeyFile != "" || cfg.CAFile != "" || cfg.CertFile != "" || cfg.KeyFile != ""):
+		return nil, errors.New("publish: Ingest excludes the NATS settings")
+	case cfg.Ingest != nil:
+		p.tr, err = newIngest(cfg)
+	case cfg.URL == "":
+		return nil, errors.New("publish: URL or Ingest is required")
+	default:
+		p.tr, err = newNATS(cfg, p.signal)
 	}
-	if cfg.CredsFile != "" {
-		opts = append(opts, nats.UserCredentials(cfg.CredsFile))
-	}
-	if cfg.NkeyFile != "" {
-		nk, err := nats.NkeyOptionFromSeed(cfg.NkeyFile)
-		if err != nil {
-			_ = q.Close()
-			return nil, fmt.Errorf("publish: nkey: %w", err)
-		}
-		opts = append(opts, nk)
-	}
-	if cfg.CAFile != "" {
-		opts = append(opts, nats.RootCAs(cfg.CAFile))
-	}
-	if cfg.LocalAddr != nil {
-		opts = append(opts, nats.SetCustomDialer(&localAddrDialer{
-			d:      net.Dialer{Timeout: nats.DefaultTimeout},
-			notify: cfg.LocalAddr,
-		}))
-	}
-	if cfg.CertFile != "" {
-		opts = append(opts, nats.ClientCert(cfg.CertFile, cfg.KeyFile))
-	}
-
-	nc, err := nats.Connect(cfg.URL, opts...)
 	if err != nil {
-		_ = q.Close()
-		return nil, fmt.Errorf("publish: connect: %w", err)
+		return nil, err
 	}
-	js, err := jetstream.New(nc)
-	if err != nil {
-		nc.Close()
-		_ = q.Close()
-		return nil, fmt.Errorf("publish: jetstream: %w", err)
+	// The spool is opened last, so a bad destination setting leaves nothing open.
+	if p.q, err = spool.Open(cfg.SpoolDir, cfg.SpoolMax, min(spoolSegmentBytes, cfg.SpoolMax)); err != nil {
+		p.tr.close()
+		return nil, fmt.Errorf("publish: %w", err)
 	}
-	p.nc, p.js = nc, js
+	p.sendCtx, p.cancelSend = context.WithCancel(context.Background())
 
 	go p.run()
 	go func() {
@@ -253,9 +184,6 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 	}()
 	return p, nil
 }
-
-// InboxPrefix is the reply-inbox prefix the agent uses for hostID: _INBOX_<hostID>.
-func InboxPrefix(hostID string) string { return "_INBOX_" + hostID }
 
 func readable(path string) error {
 	if path == "" {
@@ -463,14 +391,20 @@ func (p *Publisher) Heartbeat(ringbufDrops uint64) {
 func (p *Publisher) Close() error {
 	p.shutdown()
 	<-p.done
-	p.nc.Close()
+	p.cancelSend()
+	p.tr.close()
 	if err := p.q.Close(); err != nil {
 		return fmt.Errorf("publish: close spool: %w", err)
 	}
 	return nil
 }
 
-func (p *Publisher) shutdown() { p.stopOnce.Do(func() { close(p.stop) }) }
+func (p *Publisher) shutdown() {
+	p.stopOnce.Do(func() {
+		close(p.stop)
+		time.AfterFunc(closeFlushWindow, p.cancelSend)
+	})
+}
 
 func (p *Publisher) signal() {
 	select {
@@ -622,34 +556,72 @@ func (p *Publisher) resnapshotLocked() {
 	p.enqueueSnapshot(listeners, p.sortedProxiesLocked())
 }
 
-// run is the single sender goroutine. A message that fails stays at the head and is
-// retried with the same event_id and seq; JetStream dedupes on Nats-Msg-Id. The loop
-// looks at the head before it first waits, so messages a previous run left in the
-// spool are sent without waiting for a new Push.
+// transport delivers spooled messages to the destination: NATS JetStream (nats.go) or
+// Signal's ingest door (ingest.go). Only the sender goroutine calls deliver and resync.
+type transport interface {
+	// deliver offers msgs, the oldest queued messages in spool order (within
+	// batchLimits), and says what became of them. ctx ends at the close deadline.
+	deliver(ctx context.Context, msgs []spool.Msg) delivery
+	// batchLimits is how many messages, and how many bytes of their Data, one deliver
+	// takes at most.
+	batchLimits() (n, bytes int)
+	// maxMessage is the largest one message may be; proxy route sets are cut to half.
+	maxMessage() int64
+	// resync reports, once, that the receiver may have missed messages (a NATS
+	// reconnect, Signal's RESYNC_SNAPSHOT), so a fresh snapshot must follow.
+	resync() bool
+	close()
+}
+
+// delivery is the outcome of one deliver.
+type delivery struct {
+	// sent is how many of the offered messages, from the first, the receiver has: they
+	// are popped.
+	sent int
+	// undeliverable means the message after those can never be delivered: it is
+	// dropped, and with denied (refused for lack of permission) OnDenied is called.
+	undeliverable, denied bool
+	// err says why the rest was not delivered; it is logged once per failing streak.
+	err error
+	// wait is how long to wait before the next attempt; 0 retries at once after a
+	// success and after reconnectWait after a failure.
+	wait time.Duration
+	// halt stops sending for the rest of the run (Signal's STOP); the spool keeps
+	// filling and drains on a later run.
+	halt bool
+}
+
+// run is the single sender goroutine. Messages a delivery does not take stay at the head
+// and are offered again with the same event_id and seq; the destination dedupes them
+// (JetStream on Nats-Msg-Id, Signal on the event id and run cursor). The loop looks at the
+// head before it first waits, so messages a previous run left in the spool are sent
+// without waiting for a new Push.
 func (p *Publisher) run() {
 	defer close(p.done)
-	streamReady := false
 	var flushEnd time.Time
-	failing := false
+	failing, halted := false, false
 
 	for {
 		stopping := isClosed(p.stop)
 		if stopping && flushEnd.IsZero() {
 			flushEnd = time.Now().Add(closeFlushWindow)
 		}
-		if stopping && time.Now().After(flushEnd) {
+		if stopping && (halted || time.Now().After(flushEnd)) {
 			return
 		}
-		if p.reconnected.Swap(false) {
-			streamReady = false
+		if p.tr.resync() {
 			p.resnapshot()
 		}
-		m, ok := p.q.Head()
-		if !ok {
+		n, size := p.tr.batchLimits()
+		var msgs []spool.Msg
+		if !halted {
+			msgs = p.q.Peek(n, size)
+		}
+		if len(msgs) == 0 {
 			if stopping {
 				return
 			}
-			if p.resnapshotAfterOverflow() {
+			if !halted && p.resnapshotAfterOverflow() {
 				continue
 			}
 			select {
@@ -660,237 +632,52 @@ func (p *Publisher) run() {
 			continue
 		}
 
-		err := p.sendOne(m, &streamReady)
-		var perm *permanentError
-		if errors.As(err, &perm) {
+		d := p.tr.deliver(p.sendCtx, msgs)
+		for _, m := range msgs[:d.sent] {
+			p.q.Pop(m.ID)
+		}
+		if d.undeliverable {
+			m := msgs[d.sent]
 			slog.Error("dropping message that can never be published",
-				"subject", m.Subject, "seq", m.Seq, "event_id", m.ID, "err", perm.err, "permission_denied", perm.denied)
+				"subject", m.Subject, "seq", m.Seq, "event_id", m.ID, "err", d.err, "permission_denied", d.denied)
 			p.q.Discard(m.ID)
-			if perm.denied && p.onDenied != nil {
+			if d.denied && p.onDenied != nil {
 				p.onDenied(m.Subject)
 			}
 			continue
 		}
-		if err == nil {
-			p.q.Pop(m.ID)
+		if d.halt {
+			halted = true
+			slog.Error("the destination told this agent to stop sending; events are kept in the spool until a restart",
+				"err", d.err, "queued", p.q.Len())
+			continue
+		}
+		wait := d.wait
+		if d.err == nil {
 			if failing {
-				slog.Info("nats publishing resumed")
+				slog.Info("publishing resumed")
 				failing = false
 			}
+		} else {
+			if !failing {
+				slog.Warn("publish failed, will retry", "err", d.err)
+				failing = true
+			}
+			if wait == 0 {
+				wait = reconnectWait
+			}
+		}
+		if wait == 0 {
 			continue
 		}
 		if stopping {
 			return
 		}
-		if !failing {
-			slog.Warn("nats publish failed, will retry", "err", err)
-			failing = true
-		}
 		select {
-		case <-time.After(reconnectWait):
+		case <-time.After(wait):
 		case <-p.wake:
 		case <-p.stop:
 		}
-	}
-}
-
-func (p *Publisher) sendOne(m spool.Msg, streamReady *bool) error {
-	if !p.nc.IsConnected() {
-		return nats.ErrDisconnected
-	}
-	if !*streamReady {
-		// Its own deadline: a denied lookup (host users) times out, and must not use up
-		// the publish's time.
-		ensureCtx, cancelEnsure := context.WithTimeout(context.Background(), publishTimeout)
-		mark := p.perms.expect(streamAPIPrefix)
-		err := p.ensureStream(ensureCtx)
-		p.perms.expect("")
-		cancelEnsure()
-		if err != nil {
-			if !p.ensureRefused(err, mark) {
-				return fmt.Errorf("ensure stream: %w", err)
-			}
-			slog.Error("cannot look up or create stream; assuming an operator manages it",
-				"stream", streamName, "err", err)
-		}
-		*streamReady = true
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
-	defer cancel()
-	mark := p.perms.expect(m.Subject)
-	msg := &nats.Msg{Subject: m.Subject, Data: m.Data}
-	_, err := p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(m.ID))
-	p.perms.expect("")
-	if err != nil {
-		err = fmt.Errorf("publish %s: %w", m.Subject, err)
-		if errors.Is(err, jetstream.ErrNoStreamResponse) {
-			*streamReady = false // stream vanished; re-ensure before the retry
-		}
-		if p.publishNeverSucceeds(err, m.Subject, mark) {
-			return &permanentError{err: err, denied: p.perms.denied(mark, m.Subject)}
-		}
-		return err
-	}
-	return nil
-}
-
-// permanentError marks a failure that retrying cannot fix.
-type permanentError struct {
-	err    error
-	denied bool // the server refused it for lack of permission
-}
-
-func (e *permanentError) Error() string { return e.err.Error() }
-func (e *permanentError) Unwrap() error { return e.err }
-
-// publishNeverSucceeds reports whether err means this exact message can never be
-// accepted (too large, bad subject, not permitted, over the stream's message limit).
-// Timeouts, no responders and disconnects are transient and return false.
-func (p *Publisher) publishNeverSucceeds(err error, subject string, permMark uint64) bool {
-	if errors.Is(err, nats.ErrMaxPayload) || errors.Is(err, nats.ErrBadSubject) {
-		return true
-	}
-	var api *jetstream.APIError
-	if errors.As(err, &api) && api.ErrorCode == jetstream.JSErrCodeStreamMessageExceedsMaximum {
-		return true
-	}
-	// The server reports a denied publish only through an async -ERR; the request itself
-	// then just times out.
-	return p.perms.denied(permMark, subject)
-}
-
-const streamAPIPrefix = "$JS.API.STREAM."
-
-// ensureRefused reports whether a stream ensure failed in a way that retrying cannot fix:
-// the user may not look up or create streams, or the server refuses the agent's config.
-// Every other error (no leader, insufficient resources, timeouts) is transient.
-func (p *Publisher) ensureRefused(err error, permMark uint64) bool {
-	return configRefused(err) || p.perms.denied(permMark, streamAPIPrefix)
-}
-
-// Error codes from nats-server v2.15.2 server/jetstream_errors_generated.go.
-const (
-	jsStreamInvalidConfig  jetstream.ErrorCode = 10052 // JSStreamInvalidConfigF
-	jsStreamSubjectOverlap jetstream.ErrorCode = 10065 // JSStreamSubjectOverlapErr
-	httpForbidden                              = 403
-)
-
-// configRefused reports whether err is the server refusing our stream definition for
-// good: an invalid or overlapping configuration, a name-in-use refusal (ensureStream
-// already treats that one as an existing stream), or an explicit authorization failure.
-func configRefused(err error) bool {
-	var api *jetstream.APIError
-	if !errors.As(err, &api) {
-		return false
-	}
-	switch api.ErrorCode {
-	case jetstream.JSErrCodeStreamNameInUse, jsStreamInvalidConfig, jsStreamSubjectOverlap:
-		return true
-	}
-	return api.Code == httpForbidden
-}
-
-// permTracker remembers permission violations that the server reports asynchronously.
-type permTracker struct {
-	mu      sync.Mutex
-	n       uint64
-	errs    []string
-	pending string // subject (or prefix) of the request in flight; "" when none
-}
-
-// expect sets the subject of the request about to be sent ("" when it is done) and
-// returns the violation count to pass to denied.
-func (t *permTracker) expect(subject string) uint64 {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.pending = subject
-	return t.n
-}
-
-// record stores a violation and reports whether it concerns the request in flight,
-// whose caller reports the failure itself.
-func (t *permTracker) record(err error) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.n++
-	t.errs = append(t.errs, err.Error())
-	if len(t.errs) > 16 {
-		t.errs = t.errs[1:]
-	}
-	return t.pending != "" && strings.Contains(err.Error(), t.pending)
-}
-
-func (t *permTracker) count() uint64 {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.n
-}
-
-// violationSubject extracts the quoted subject from a server permissions violation
-// ("Permissions Violation for Subscription to \"_INBOX_x.*\""), or "" if there is none.
-func violationSubject(err error) string {
-	msg := err.Error()
-	end := strings.LastIndex(msg, `"`)
-	if end <= 0 {
-		return ""
-	}
-	start := strings.LastIndex(msg[:end], `"`)
-	if start < 0 {
-		return ""
-	}
-	return msg[start+1 : end]
-}
-
-// denied reports whether a violation mentioning subject was recorded after mark.
-func (t *permTracker) denied(mark uint64, subject string) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	fresh := int(t.n - mark)
-	if fresh > len(t.errs) {
-		fresh = len(t.errs)
-	}
-	for _, e := range t.errs[len(t.errs)-fresh:] {
-		if strings.Contains(e, subject) {
-			return true
-		}
-	}
-	return false
-}
-
-// ensureStream creates ASM_EVENTS with the agent's definition only when it does not
-// exist. An existing stream is used as it is: an operator's retention, replicas or limits
-// are never changed.
-func (p *Publisher) ensureStream(ctx context.Context) error {
-	_, err := p.js.Stream(ctx, streamName)
-	if err == nil {
-		p.logUsingExisting()
-		return nil
-	}
-	if !errors.Is(err, jetstream.ErrStreamNotFound) {
-		return err
-	}
-	_, err = p.js.CreateStream(ctx, jetstream.StreamConfig{
-		Name:       streamName,
-		Subjects:   []string{"asm.>", "pwb.>"},
-		Storage:    jetstream.FileStorage,
-		MaxAge:     streamMaxAge,
-		Duplicates: dedupeWindow,
-	})
-	if errors.Is(err, jetstream.ErrStreamNameAlreadyInUse) {
-		// Someone else created it between the lookup and the create.
-		p.logUsingExisting()
-		return nil
-	}
-	if err == nil {
-		slog.Info("created stream", "stream", streamName, "max_age", streamMaxAge)
-	}
-	return err
-}
-
-func (p *Publisher) logUsingExisting() {
-	if !p.usingExistingLogged {
-		p.usingExistingLogged = true
-		slog.Info("using existing stream as-is; its configuration is not changed", "stream", streamName)
 	}
 }
 
@@ -950,23 +737,6 @@ func hostToProto(h model.HostInfo) *asmv1.HostInfo {
 		out.PublicIps = append(out.PublicIps, &asmv1.PublicIP{Ip: ip.IP.String(), Via: ip.Via, Dir: ip.Dir, Iface: ip.Iface})
 	}
 	return out
-}
-
-// localAddrDialer dials NATS and reports each connection's local address.
-type localAddrDialer struct {
-	d      net.Dialer
-	notify func(netip.Addr)
-}
-
-func (l *localAddrDialer) Dial(network, address string) (net.Conn, error) {
-	c, err := l.d.Dial(network, address)
-	if err != nil {
-		return nil, err
-	}
-	if ap, perr := netip.ParseAddrPort(c.LocalAddr().String()); perr == nil {
-		l.notify(ap.Addr().Unmap())
-	}
-	return c, nil
 }
 
 func processesToProto(procs []model.Process) []*asmv1.Process {

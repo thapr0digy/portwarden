@@ -40,6 +40,10 @@ const (
 	// KindEventsDropped: the ring buffer dropped events since the last pass;
 	// informational unless the drop rate reaches the agent's --tamper-drop-rate.
 	KindEventsDropped = "events_dropped"
+	// KindIngestRefused: Signal's ingest door refuses the agent (an unknown key, a bad
+	// signature, clock skew, a disabled sender, STOP, a failed enrolment) or answers with a
+	// key other than the pinned one. Subject "signal", fingerprint the refusal's code.
+	KindIngestRefused = "ingest_refused"
 	// KindUpgraded (informational): the executable or a unit file was replaced by the
 	// agent's own package upgrade (the prerm marker is fresh and dpkg's md5sums for the
 	// version being installed list exactly this content).

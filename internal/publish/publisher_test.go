@@ -475,15 +475,15 @@ func TestConfigRefusedClassification(t *testing.T) {
 			t.Errorf("%s: configRefused = %v, want %v", c.name, got, c.want)
 		}
 	}
-	var p Publisher
-	if p.ensureRefused(errors.New("timeout"), 0) {
+	var tr natsTransport
+	if tr.ensureRefused(errors.New("timeout"), 0) {
 		t.Error("plain error must not be refused without a recorded permission violation")
 	}
-	p.perms.record(fmt.Errorf("%w: Permissions Violation for Publish to \"$JS.API.STREAM.UPDATE.ASM_EVENTS\"", nats.ErrPermissionViolation))
-	if !p.ensureRefused(context.DeadlineExceeded, 0) {
+	tr.perms.record(fmt.Errorf("%w: Permissions Violation for Publish to \"$JS.API.STREAM.UPDATE.ASM_EVENTS\"", nats.ErrPermissionViolation))
+	if !tr.ensureRefused(context.DeadlineExceeded, 0) {
 		t.Error("permission violation on stream API must be refused")
 	}
-	if p.ensureRefused(context.DeadlineExceeded, p.perms.count()) {
+	if tr.ensureRefused(context.DeadlineExceeded, tr.perms.count()) {
 		t.Error("violation recorded before the attempt must not count")
 	}
 }
@@ -670,10 +670,10 @@ func TestReplyInboxesUseHostPrefix(t *testing.T) {
 	port := freePort(t)
 	startServer(t, port, t.TempDir())
 	p := newPublisher(t, port)
-	if got, want := p.nc.NewRespInbox(), InboxPrefix(testHost)+"."; !strings.HasPrefix(got, want) {
+	if got, want := p.nats().nc.NewRespInbox(), InboxPrefix(testHost)+"."; !strings.HasPrefix(got, want) {
 		t.Fatalf("resp inbox = %q, want prefix %q", got, want)
 	}
-	if got, want := p.nc.NewInbox(), InboxPrefix(testHost)+"."; !strings.HasPrefix(got, want) {
+	if got, want := p.nats().nc.NewInbox(), InboxPrefix(testHost)+"."; !strings.HasPrefix(got, want) {
 		t.Fatalf("inbox = %q, want prefix %q", got, want)
 	}
 }
@@ -967,3 +967,6 @@ func TestNewRejectsNegativeSpoolMax(t *testing.T) {
 		t.Fatal("want error for a negative SpoolMax")
 	}
 }
+
+// nats is the publisher's NATS transport (tests of the NATS path only).
+func (p *Publisher) nats() *natsTransport { return p.tr.(*natsTransport) }

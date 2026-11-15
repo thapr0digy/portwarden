@@ -30,7 +30,8 @@ FUZZ_TARGETS := \
 	internal/redact:FuzzCmdline \
 	internal/spool:FuzzDecodeRecord \
 	internal/spool:FuzzOpen \
-	internal/inventory:FuzzHandle
+	internal/inventory:FuzzHandle \
+	internal/ingest:FuzzAnswer
 
 fuzz:
 	@for t in $(FUZZ_TARGETS); do \

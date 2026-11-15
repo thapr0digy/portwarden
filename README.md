@@ -1,6 +1,6 @@
 # Portwarden
 
-A Go agent with C eBPF programs that reports listening TCP sockets and explicitly bound UDP sockets, in every network namespace (host and containers), to NATS JetStream, with the program, systemd unit and container that hold each one, how exposed each one is (bind address, host firewall, Docker and Kubernetes port mappings), which reverse-proxy routes (nginx, Apache, HAProxy) end at it, and the server's public-IP candidates. The backend (M5) keeps the current state in PostgreSQL behind a read-only API (`portwarden inventory`, which also runs the cloud look-up for level 3), pages on newly reachable listeners and silent hosts (`portwarden alerter`), and confirms exposure from outside (`portwarden verifier`, level 4); see "Backend". The backend services and tools are one static binary, `portwarden`, with a subcommand each; the eBPF agent is its own binary, `portwarden-agent`.
+A Go agent with C eBPF programs that reports listening TCP sockets and explicitly bound UDP sockets, in every network namespace (host and containers), to NATS JetStream (or, with `--ingest-url`, to Signal's signed HTTPS ingest door; see "Pushing to Signal"), with the program, systemd unit and container that hold each one, how exposed each one is (bind address, host firewall, Docker and Kubernetes port mappings), which reverse-proxy routes (nginx, Apache, HAProxy) end at it, and the server's public-IP candidates. The backend (M5) keeps the current state in PostgreSQL behind a read-only API (`portwarden inventory`, which also runs the cloud look-up for level 3), pages on newly reachable listeners and silent hosts (`portwarden alerter`), and confirms exposure from outside (`portwarden verifier`, level 4); see "Backend". The backend services and tools are one static binary, `portwarden`, with a subcommand each; the eBPF agent is its own binary, `portwarden-agent`.
 Kernel floor 6.8 (Ubuntu 24.04+).
 
 M2 decisions (where the design left room): container network namespaces are reported, each listener carrying its netns (the foreign-netns filter is gone, and the heartbeat's `dropped_foreign_netns` stays only as a deprecated field, always 0); there are no exec or exit tracepoints, so each event carries the cgroup id read in the hook, which still yields unit and container after the process is gone, while exe, cmdline and sha256 come from `/proc` when the process is still there; UDP opens use `fexit/udp_lib_get_port` with a nonzero requested port rather than a cgroup bind program, so client autobinds and `bind(:0)` are not listeners and no `CAP_NET_ADMIN` is needed; a restart is an `owner_changed`, because a close is held for a grace window (`--close-grace`, 2 s) and a reopen of the same key inside it replaces the owners; a recheck every 5 minutes (`--recheck`, and early when ring-buffer drops rise) reconciles a fresh dump and publishes the periodic snapshot; and a size-capped disk spool (64 MiB under `/var/lib/portwarden/spool`, oldest segment dropped when full) replaces the memory queue, so messages survive NATS outages and agent restarts with their original timestamps.
@@ -37,7 +37,7 @@ Kernel-touching work happens in a Lima VM named `portwarden` (Ubuntu 24.04), whi
 
 ### Fuzzing
 
-Each parser of untrusted input has a native Go fuzz target (no extra tool), seeded from the package's testdata or test cases: `nft -j` JSON (`internal/exposure/nft` `FuzzParse`), `iptables-save` (`internal/exposure/iptables` `FuzzParse`), the nginx, Apache and HAProxy loaders (`internal/proxy/{nginx,apache,haproxy}` `FuzzLoad`, whose input is a file tree packed as `path NUL content NUL …`, the first path being the main config; see `conf.DecodeFiles`; Apache's seeds include the macro case), the admin answers (`internal/proxy/caddy` `FuzzParse` over a `/config/` body, `internal/proxy/haproxy` `FuzzServersState` over a `show servers state` answer folded into routes, which must never lose a file backend), command-line redaction (`internal/redact` `FuzzCmdline`), spool records and segment recovery (`internal/spool` `FuzzDecodeRecord`, `FuzzOpen`), and the inventory's decode and quarantine path (`internal/inventory` `FuzzHandle`, two messages per input on one consumer; every error must be permanent). Each input must not panic, must stay within a time and allocation budget (`internal/fuzzcheck`; `PORTWARDEN_FUZZ_REPORT=1 go test -v -run '^Fuzz' ./...` prints each seed's share of it) and the parser's own output caps; the proxy loaders' `TestLoadAtTheReadLimitFitsBudgetAndMemory` checks that a config at the read limit fits that budget and grows the heap by at most 85 MiB.
+Each parser of untrusted input has a native Go fuzz target (no extra tool), seeded from the package's testdata or test cases: `nft -j` JSON (`internal/exposure/nft` `FuzzParse`), `iptables-save` (`internal/exposure/iptables` `FuzzParse`), the nginx, Apache and HAProxy loaders (`internal/proxy/{nginx,apache,haproxy}` `FuzzLoad`, whose input is a file tree packed as `path NUL content NUL …`, the first path being the main config; see `conf.DecodeFiles`; Apache's seeds include the macro case), the admin answers (`internal/proxy/caddy` `FuzzParse` over a `/config/` body, `internal/proxy/haproxy` `FuzzServersState` over a `show servers state` answer folded into routes, which must never lose a file backend), command-line redaction (`internal/redact` `FuzzCmdline`), spool records and segment recovery (`internal/spool` `FuzzDecodeRecord`, `FuzzOpen`), and the inventory's decode and quarantine path (`internal/inventory` `FuzzHandle`, two messages per input on one consumer; every error must be permanent), and Signal's answers to the agent (`internal/ingest` `FuzzAnswer`: an ingest response body in either form and a `Retry-After`, whose wait must stay within 0 to 1 h). Each input must not panic, must stay within a time and allocation budget (`internal/fuzzcheck`; `PORTWARDEN_FUZZ_REPORT=1 go test -v -run '^Fuzz' ./...` prints each seed's share of it) and the parser's own output caps; the proxy loaders' `TestLoadAtTheReadLimitFitsBudgetAndMemory` checks that a config at the read limit fits that budget and grows the heap by at most 85 MiB.
 
 `make fuzz` runs every target briefly (`FUZZTIME`, default 30 s; `FUZZMINIMIZETIME`, default 10 s, bounds the shrinking of each new input). Deep runs stay manual, one target at a time, for as long as you like:
 
@@ -207,6 +207,12 @@ Fixtures (`internal/proxy/*/testdata`, recorded on Ubuntu 24.04 with nginx 1.24.
 | `--tamper-interval` | `30s` | interval between tamper self-checks (see "Tamper signals"); `0s` disables them (heartbeats then carry no tamper status) |
 | `--tamper-drop-rate` | `1000` | ring-buffer drops per minute at which `events_dropped` pages; below it the flag is informational (`0` never pages) |
 | `--nats-nkey-dir` | | directory of per-host seeds `host-<host id>.nk` (as `portwarden natsauth mint` writes them); the agent uses its own host's. For one Secret serving a Kubernetes cluster. Excludes `--nats-nkey` and `--nats-creds` |
+| `--ingest-url` | | Signal's ingest door, `https://<overlay address>:<port>`: the agent sends there instead of NATS (see "Pushing to Signal"). Excludes every NATS flag above (`--nats-*`, `--tls-*`) |
+| `--ingest-pin` | | the door's key pin, `sha256/<base64>` (`signal admin ingest pin`); required with `--ingest-url` |
+| `--ingest-key` | `<ingest-dir>/key.nk` | the host's nkey user seed: the one `portwarden natsauth mint --role host` made (as for `--nats-nkey`), or, when the agent enrols with a join code and the file is missing, one it creates (mode 0600) |
+| `--ingest-key-id` | | the key id Signal assigned to the host's key (Settings → Ingest); default: the one enrolment stored in `<ingest-dir>/keyid` |
+| `--ingest-join-code-file` | | a file holding a one-time join code (`signal admin ingest enroll-token create`); used only while the agent has no key id |
+| `--ingest-dir` | `/var/lib/portwarden/ingest` | where enrolment keeps the assigned key id (`keyid`) and a key it created (`key.nk`) |
 | `--tamper-files` | | comma-separated absolute paths of extra files whose change is a tamper signal (`file_changed`), e.g. the NATS credentials; a missing one is a startup error |
 | `--version` | | prints the version stamped by `make dist` (`dev` otherwise) and exits; every Portwarden command has it |
 
@@ -322,6 +328,57 @@ If messages are dropped because the spool is full (`--spool-max`, e.g. NATS unre
 
 A listener held by several processes (socket-activated sshd: systemd and sshd) lists every holder in the baseline snapshot.
 
+## Pushing to Signal (`--ingest-url`)
+
+The agent can send its events to Signal's ingest door instead of NATS: one HTTPS endpoint on the NetBird overlay, `POST /v1/ingest/batch` (appsec-signal `docs/notes/ingest-push.md`). It is one or the other per agent: `--ingest-url` excludes the NATS flags. Everything above the transport is unchanged: the same events, the same disk spool (`--spool-dir`, `--spool-max`; events keep their original time, id and seq, and messages a NATS run left in the spool go out to Signal first, and back), the same resnapshots.
+
+```
+PORTWARDEN_AGENT_ARGS="--ingest-url https://100.64.0.5:8443 --ingest-pin sha256/Qm9… --ingest-key /etc/portwarden/agent/host.nk --ingest-key-id ak_01J…"
+```
+
+**Enrolment**, either way:
+
+- **The natsauth host key.** `signal admin ingest import-nkeys <dir>` registers each `host-<id>.json` that `portwarden natsauth mint --role host` wrote (public keys only). Give the agent the matching seed with `--ingest-key` (the same file as `--nats-nkey`) and the key id Signal assigned with `--ingest-key-id` (Settings → Ingest lists it; Signal does not print it on import yet).
+- **A join code.** `signal admin ingest enroll-token create --count N` prints a one-time code; put it in a file (mode 0600) and start the agent with `--ingest-join-code-file <file>`. While it has no key id, the agent creates a host key if `--ingest-key` does not exist, enrols (`POST /v1/enroll`, signed with that key; machine id and hostname), and stores the key id Signal returns in `<ingest-dir>/keyid`; later starts read it and never enrol again (the code is spent). A refused enrolment (`bad_token`, `duplicate_host`) stops sending for the run and raises `ingest_refused`. For a Kubernetes DaemonSet one code with `--count` = nodes would serve every node, with `--ingest-dir` on a hostPath so each node keeps its own key; the chart and `deploy/kubernetes` do not carry the ingest flags yet.
+
+**On the wire.** Each request is a binary `Batch` of Signal's schema (`asm.events.v1`), gzipped, at most 1,000 events and 3 MiB of spooled bytes (under the door's 4 MiB body and 16 MiB expanded limits), signed with the host's Ed25519 key (RFC 9421 over an RFC 9530 `Content-Digest`). TLS 1.3 only, and the server must present the pinned key: there is no CA, no name check, no proxy and no redirect, so a peer that takes the overlay address cannot answer. The private key never leaves the process and is never logged; the join code is read once and dropped after use.
+
+| Spooled subject (asm.v1) | Signal type | Payload |
+| --- | --- | --- |
+| `listener.opened`, `.closed`, `.owner_changed` | `asm.listener.opened`, `.closed`, `.owner_changed` | `ListenerChange` |
+| `snapshot` | `asm.host.snapshot` | `HostSnapshot` (always full: `unchanged` digests are not sent yet) |
+| `heartbeat` | `asm.agent.heartbeat` | `Heartbeat` |
+| `exposure.changed` | `asm.exposure.changed` | `ExposureChange` |
+| `host.changed` | `asm.host.changed`, or `asm.agent.stopping` for the clean-shutdown marker | `HostChange`, `AgentStopping` |
+| `tamper` | `asm.agent.tamper` | `TamperChange` |
+| `proxy.routes` | `asm.proxy.routes` | `ProxyRoutes` |
+
+Each event's envelope: `id` = the event id, `time` = when it was observed, `subject` = `host:<machine id>`, `source` = `urn:asm:agent:<machine id>`, `producer` = `portwarden-agent/<version>`, `sequence` = run id, seq, boot id and run number (Signal's run cursor; one seq per run across all types, as on NATS). Signal's payloads are asm.v1's messages with the same field numbers (`TestSignalPayloadsKeepAsmV1FieldNumbers` fails if that stops being true), so the spooled bytes decode as the payload directly; command lines are masked by the agent first ("Command-line redaction") and Signal redacts every text again.
+
+**Answers.**
+
+| Answer | The agent |
+| --- | --- |
+| `200` | drops the batch from the spool (duplicates and quarantined events included: Signal says not to resend them; each quarantined one is logged), then follows the directives |
+| `429`, `503` | waits `Retry-After` (at most 1 h), and at least its backoff, then resends the same batch |
+| `401` | raises `ingest_refused` with the code and keeps retrying with backoff (a key registered later works at once) |
+| `403` | raises `ingest_refused`; with `STOP` (a disabled sender) stops sending for the rest of the run: events keep spooling, up to `--spool-max`, and go out after a restart once the sender is enabled |
+| `413`, `400`, `415`, `422` | halves the batch until the refused event is alone, then drops that one (logged) |
+| no answer, other statuses | exponential backoff from 1 s to 5 min, jittered |
+
+| Directive | The agent |
+| --- | --- |
+| `RESYNC_SNAPSHOT`, `RESYNC_PROXIES` | queues a full snapshot (which carries every proxy's route set after it) |
+| `BACKOFF` | sends nothing until `after` (at most 1 h ahead) |
+| `LIMITS` | sends at most `max_events` events and `max_bytes` bytes per batch from then on (never more than its own limits) |
+| `STOP` | as for `403` |
+
+An answer can only slow the agent, make its batches smaller, stop it sending or ask for a snapshot it would send anyway; nothing in it is run or followed.
+
+**Not sent yet:** `asm.agent.started`, `asm.agent.spool_overflow` (a gap from an overflow is answered by the resnapshot that follows it, as on NATS), heartbeats' `spool_events`, `spool_bytes`, `clock_skew_ms` and `state_digest`, and `unchanged` snapshots and route sets. The backend's own publishers (cloud verdicts, probe results, forgotten hosts) stay on NATS: in a deployment whose agents push to Signal they have no agent events to work from, and Signal's door cannot register the "service" sender cloud verdicts need yet.
+
+**The schema dependency.** The contract is Signal's Go module `github.com/slidehq/signal/schema`, which has no public home yet. `third_party/signal-schema` is a pinned copy of it (the commit is in its `UPSTREAM` file), and `go.mod` points the module there with a `replace`, so every build (`make test`, `make dist`, CI) is reproducible and needs no access to Signal. `dev/sync-signal-schema.sh [<signal checkout>]` refreshes it from a local checkout's committed `schema/`; review the diff like any dependency bump. When Signal tags the module, the copy and the `replace` go and `go.mod` requires the tag. Tests use the module's own reference server (`schema/ingesttest`, the door's decision code without a database) behind pinned TLS (`internal/ingest/doortest`): `TestE2EListenerOpenedOnTheAgentIsStoredBySignal` runs the agent loop, opens a listener and finds `asm.listener.opened` stored by it, in one run with seqs 1..n, nothing quarantined and no gap.
+
 ## Tamper signals
 
 These checks catch accidents and clumsy or unprivileged interference with the agent. They do not stop an attacker who has root on the host: see "What root can still do" below. The agent checks itself every `--tamper-interval` (30 s) with fixed rules (`internal/tamper`) and reports what it sees; it never stops or repairs itself. A flag is a kind, a subject and a fingerprint (what was observed: the new content's hash, the tracer's pid, the link's program id); a new fingerprint for the same subject is a new flag and pages again, so a second edit of an already flagged file is never hidden by the first.
@@ -336,6 +393,7 @@ These checks catch accidents and clumsy or unprivileged interference with the ag
 | `file_changed` | a `--tamper-files` path | that file changed or disappeared | the file is restored |
 | `counter_reset` | `ringbuf_drops` | the ring buffer's drop counter (a kernel map) went down: the map was written. Raised for the pass that saw it; a later reset raises again | the next pass |
 | `events_dropped` | `ringbuf_drops` | the ring buffer dropped events since the last pass (the agent also rechecks at once). Informational unless the rate reaches `--tamper-drop-rate` (1000 per minute) | a pass with no new drops |
+| `ingest_refused` | `signal`, fingerprint the refusal's code | (`--ingest-url` only) Signal refuses the agent: `401` (`unknown_key`, `bad_signature`, `bad_digest`, `clock_skew`), `403` (`principal_disabled`), a `STOP` directive (`stop`), a refused enrolment (`bad_token`, `duplicate_host`), or the server's key is not the pinned one (`pin_mismatch`) | Signal accepts a batch again |
 | `upgraded` (informational) | the executable or unit file | the agent's own package replaced it: the marker `/run/portwarden-agent/upgrading` that the `.deb`'s `prerm upgrade` writes is less than 10 minutes old, dpkg's status says that version is being installed, and dpkg's `md5sums` for it list exactly the content on disk. While the upgrade runs and dpkg does not list the file yet, the check reports unknown; anything else is `binary_replaced` / `unit_changed` | the agent restarts onto the new version (`postinst`) |
 
 Informational flags are published and logged (at info level) but never page. A check that cannot read its evidence (D-Bus down, a file unreadable) is reported under `unknown` and keeps its previous flags: it never raises or clears anything. A check that cannot take its baseline yet is retried every pass and reported as `unknown: … not started yet: …` meanwhile, never dropped: at boot the agent starts at `sysinit.target`, before the system bus, and its unit check starts once D-Bus answers (the baseline is the unit files at that moment). Outside a systemd service (a container) the unit check stays `unknown: … not running as a systemd service`. Files are re-hashed only when their stat signature (device, inode, size, mode, mtime, ctime) changes, so a pass costs a few `stat`s, a `/proc` read per thread, one `bpf()` info call per link and two D-Bus calls. Whenever a pass raises or clears a flag the agent publishes a `TamperEvent` on `asm.<host>.tamper` (`raised`, `cleared` and the full `status`); every heartbeat carries the last `TamperStatus` (`flags` with `fingerprint` and `info`, `checks`, `unknown`, `checked_at`, `ringbuf_drops`, and `prog_run_counts` while `kernel.bpf_stats_enabled` is 1). Host NATS users need the new subject: re-render the auth block (`portwarden natsauth render`) after upgrading; until then the agent logs that its tamper events are refused. A restart of the agent is how an operator accepts a deliberate change to its unit or files. `portwarden watch` prints:

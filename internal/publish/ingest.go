@@ -227,9 +227,12 @@ func (t *ingestTransport) answer(a ingest.Answer, n int) delivery {
 		return t.retry(err, 0)
 	case a.Status == http.StatusTooManyRequests || a.Status == http.StatusServiceUnavailable:
 		return t.retry(err, a.RetryAfter)
+	case a.Status == http.StatusUnsupportedMediaType || (a.Status == http.StatusBadRequest && code == "bad_encoding"):
+		t.health.set(code, "Signal cannot read this host's requests ("+code+"): its door and this agent disagree on the encoding")
+		return t.retry(err, 0)
 	case a.Status == http.StatusRequestEntityTooLarge:
 		return t.tooLarge(n, err)
-	case a.Status == http.StatusBadRequest || a.Status == http.StatusUnsupportedMediaType || a.Status == http.StatusUnprocessableEntity:
+	case a.Status == http.StatusBadRequest || a.Status == http.StatusUnprocessableEntity:
 		// The batch as a whole is refused: find the event that does it by halving.
 		return t.tooLarge(n, err)
 	}
@@ -312,7 +315,8 @@ func (t *ingestTransport) enrol(ctx context.Context) delivery {
 	case http.StatusForbidden, http.StatusConflict:
 		// bad_token (unknown, spent or expired) or duplicate_host: neither changes without
 		// an operator, so the run stops sending; a restart with a new code tries again.
-		t.health.set(code, "Signal refused enrolment ("+code+")")
+		t.health.set(code, "Signal refused enrolment ("+code+"). If an earlier enrolment's answer was lost, this host's key may already be registered: "+
+			"find its key id in Signal Settings -> Ingest or with `signal admin ingest principal list`, then pass --ingest-key-id or write it to "+t.keyIDFile)
 		return delivery{halt: true, err: fmt.Errorf("enrol: signal answered %d %s", a.Status, code)}
 	default:
 		return t.retry(fmt.Errorf("enrol: signal answered %d %s", a.Status, code), a.RetryAfter)
@@ -364,7 +368,7 @@ func (h *ingestHealth) flags() []tamper.Flag {
 }
 
 // ingestCheck raises ingest_refused while Signal refuses the host (401, 403, STOP, a failed
-// enrolment) or the server's key is not the pinned one.
+// enrolment, a request it cannot read) or the server's key is not the pinned one.
 type ingestCheck struct{ h *ingestHealth }
 
 func (ingestCheck) Name() string                  { return "ingest" }

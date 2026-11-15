@@ -138,6 +138,65 @@ func TestIngestUnknownKeyRaisesTheFlagUntilTheKeyIsRegistered(t *testing.T) {
 	}
 }
 
+func healthDetail(p *Publisher) string {
+	flags, _ := p.IngestCheck().Run()
+	if len(flags) == 0 {
+		return ""
+	}
+	return flags[0].Detail
+}
+
+// A 401 whose body names no code (a proxy's page, an empty answer) is still a refusal.
+func TestIngestUnauthorizedWithoutABodyRaisesTheFlag(t *testing.T) {
+	keyFile, _ := hostSeed(t)
+	var refuse atomic.Bool
+	refuse.Store(true)
+	ts, pin := doortest.Start(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if refuse.Load() {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		out, _ := proto.Marshal(ok(1))
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		_, _ = w.Write(out)
+	}), 0)
+	p := ingestPublisher(t, IngestConfig{URL: ts.URL, Pin: pin, KeyID: testKeyID, KeyFile: keyFile})
+	p.Heartbeat(1)
+	eventually(t, "the http_401 flag", func() bool { return healthFlag(p) == "http_401" })
+	refuse.Store(false)
+	eventually(t, "the flag to clear once a batch is accepted", func() bool { return healthFlag(p) == "" })
+}
+
+// A 415 is about the request's encoding, not an event: nothing is split or dropped.
+func TestIngestUnsupportedMediaTypeRetriesAndDropsNothing(t *testing.T) {
+	keyFile, _ := hostSeed(t)
+	var refuse atomic.Bool
+	refuse.Store(true)
+	var delivered atomic.Int32
+	ic, calls := scriptedDoor(t, func(_ int, b *eventsv1.Batch) (int, *eventsv1.IngestResponse) {
+		if refuse.Load() {
+			return http.StatusUnsupportedMediaType, &eventsv1.IngestResponse{Error: &eventsv1.ErrorInfo{Code: "unsupported_media_type"}}
+		}
+		delivered.Add(int32(len(b.GetEvents()))) //nolint:gosec // a test batch
+		return http.StatusOK, ok(len(b.GetEvents()))
+	})
+	ic.KeyFile = keyFile
+	p := ingestPublisher(t, ic)
+	for i := uint64(1); i <= 3; i++ {
+		p.Heartbeat(i)
+	}
+	eventually(t, "the unsupported_media_type flag", func() bool { return healthFlag(p) == "unsupported_media_type" })
+	eventually(t, "several refused attempts", func() bool { return calls.Load() >= 4 })
+	if p.q.Dropped() != 0 || p.q.Len() != 3 {
+		t.Fatalf("after 415s: dropped %d, spooled %d: want nothing dropped and all 3 kept", p.q.Dropped(), p.q.Len())
+	}
+	refuse.Store(false)
+	eventually(t, "all three heartbeats", func() bool { return delivered.Load() == 3 })
+	if p.q.Dropped() != 0 {
+		t.Fatalf("dropped %d", p.q.Dropped())
+	}
+}
+
 func TestIngestStopHaltsSendingAndKeepsSpooling(t *testing.T) {
 	keyFile, pub := hostSeed(t)
 	ref, ic, hits := refDoor(t, pub, true)
@@ -377,6 +436,42 @@ func TestIngestRefusedEnrolmentHalts(t *testing.T) {
 	}
 	if _, err := os.Stat(ic.KeyIDFile); err == nil {
 		t.Fatal("a key id file was written for a refused enrolment")
+	}
+}
+
+// The door registers the key and spends the code, but its 201 never reaches the agent: the
+// retry is refused, and the flag says how to recover.
+func TestIngestRefusedEnrolmentAfterALostAnswerSaysHowToRecover(t *testing.T) {
+	var enrols atomic.Int32
+	ts, pin := doortest.Start(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if enrols.Add(1) == 1 {
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"code":"bad_token"}}`)
+	}), 0)
+	dir := t.TempDir()
+	ic := IngestConfig{URL: ts.URL, Pin: pin, Hostname: "web-1",
+		KeyFile: filepath.Join(dir, "key.nk"), KeyIDFile: filepath.Join(dir, "keyid"), JoinCodeFile: filepath.Join(dir, "join")}
+	if err := os.WriteFile(ic.JoinCodeFile, []byte("join-good"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := ingestPublisher(t, ic)
+	p.Heartbeat(1)
+	eventually(t, "the bad_token flag", func() bool { return healthFlag(p) == "bad_token" })
+	detail := healthDetail(p)
+	for _, want := range []string{"already be registered", "signal admin ingest principal list", "--ingest-key-id", ic.KeyIDFile} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("flag detail %q does not mention %q", detail, want)
+		}
+	}
+	if enrols.Load() != 2 {
+		t.Fatalf("enrolment attempts %d: want the lost one and the refused retry", enrols.Load())
 	}
 }
 

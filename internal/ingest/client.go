@@ -102,8 +102,17 @@ type Answer struct {
 	RetryAfter time.Duration
 }
 
-// Code is the answer's error code ("rate_limited", "unknown_key", ...), "" when none.
-func (a Answer) Code() string { return a.Resp.GetError().GetCode() }
+// Code is the answer's error code ("rate_limited", "unknown_key", ...). An error status
+// whose body names no code is "http_<status>", so a refusal never reads as none; "" otherwise.
+func (a Answer) Code() string {
+	if code := a.Resp.GetError().GetCode(); code != "" {
+		return code
+	}
+	if a.Status >= http.StatusBadRequest {
+		return "http_" + strconv.Itoa(a.Status)
+	}
+	return ""
+}
 
 // New checks the configuration and returns a client. It makes no connection.
 func New(cfg Config) (*Client, error) {

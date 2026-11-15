@@ -152,9 +152,10 @@ func TestSudoNegationExcludes(t *testing.T) {
 	}
 }
 
-// Assumption: while part of the policy is unread, an item that may exclude the user but is
-// defined there (an undefined User_Alias, a %group with /etc/group unread) makes presence
-// unknown, not "present": sudo would read that definition, the agent cannot.
+// Assumption: while part of the policy is unread, an item defined there (an undefined
+// User_Alias, a %group with /etc/group unread) may or may not name the user: negated after
+// a match it makes presence unknown, while after the user's own name it cannot undo the
+// match; %#gid of the user's primary gid (from /etc/passwd) needs no /etc/group.
 func TestSudoUnresolvableExclusionIsUnknown(t *testing.T) {
 	alice := user{name: "alice", uid: "1003", gid: "1003"}
 	admin := groupDB{"admin": {gid: "110", members: []string{"alice"}}}
@@ -169,6 +170,11 @@ func TestSudoUnresolvableExclusionIsUnknown(t *testing.T) {
 		{"!ADMINS, ALL ALL = ALL\n", admin, true, true},
 		{"ALL, !bob ALL = ALL\n", admin, true, true},
 		{"ALL, !%admin ALL = ALL\n", admin, false, false},
+		{"alice, ADMINS ALL = ALL\n", admin, true, true},
+		{"alice, %ops ALL = ALL\n", nil, true, true},
+		{"ALL, !%#1003 ALL = ALL\n", nil, false, false},
+		{"%#1003 ALL = ALL\n", nil, true, true},
+		{"ADMINS ALL = ALL\n", admin, false, false},
 	} {
 		p := &sudoPolicy{aliases: map[string][]string{}}
 		p.parse(c.spec, func(bool, string) {})

@@ -230,27 +230,38 @@ func (p *sudoPolicy) rule(u user, groups groupDB) (rule *eventsv1.SudoRule, know
 	return rule, rule.Present || p.unread == nil
 }
 
-// userMatch is what a user list, or one of its items, says of a user.
-type userMatch int
+// userMatch is what a user list, or one of its items, may say of a user: a set of the
+// possible answers. It holds one answer when the agent read everything the answer depends
+// on, and more when an item is defined in a file the agent could not read (an undefined
+// User_Alias, a %group while /etc/group is unread: either names the user or does not).
+type userMatch uint8
 
 const (
 	// matchNone: no item mentions the user.
-	matchNone userMatch = iota
+	matchNone userMatch = 1 << iota
 	matchAllow
 	matchDeny
-	// matchUnknown: an item that may mention the user is defined in a file the agent
-	// could not read (an undefined User_Alias, or a %group while /etc/group is unread).
-	matchUnknown
+	matchMaybe = matchAllow | matchNone
 )
 
 func (m userMatch) negate() userMatch {
-	switch m {
-	case matchAllow:
-		return matchDeny
-	case matchDeny:
-		return matchAllow
+	out := m & matchNone
+	if m&matchAllow != 0 {
+		out |= matchDeny
 	}
-	return m
+	if m&matchDeny != 0 {
+		out |= matchAllow
+	}
+	return out
+}
+
+// then is what a list that says m so far says after an item that says next: the item
+// decides where it mentions the user and leaves m where it does not.
+func (m userMatch) then(next userMatch) userMatch {
+	if next&matchNone != 0 {
+		return next&^matchNone | m
+	}
+	return next
 }
 
 // aliasNameRe is the shape sudoers(5) gives an alias name.
@@ -272,9 +283,7 @@ func (p *sudoPolicy) names(list []string, u user, groups groupDB, depth int) use
 		if negated {
 			m = m.negate()
 		}
-		if m != matchNone {
-			result = m
-		}
+		result = result.then(m)
 	}
 	return result
 }
@@ -287,10 +296,12 @@ func (p *sudoPolicy) matches(item string, u user, groups groupDB, depth int) use
 		return matchNone
 	case item == "ALL" || item == u.name || item == "#"+u.uid:
 		return matchAllow
+	case strings.HasPrefix(item, "%#") && item[2:] == u.gid:
+		return matchAllow
 	case strings.HasPrefix(item, "%") && groups == nil:
-		return matchUnknown
+		return matchMaybe
 	case strings.HasPrefix(item, "%#"):
-		if item[2:] == u.gid || slices.Contains(groups.gidsOf(u), item[2:]) {
+		if slices.Contains(groups.gidsOf(u), item[2:]) {
 			return matchAllow
 		}
 		return matchNone
@@ -304,7 +315,7 @@ func (p *sudoPolicy) matches(item string, u user, groups groupDB, depth int) use
 		return p.names(a, u, groups, depth+1)
 	}
 	if p.unread != nil && aliasNameRe.MatchString(item) {
-		return matchUnknown
+		return matchMaybe
 	}
 	return matchNone
 }

@@ -46,6 +46,7 @@ const (
 	recheckSettle    = 250 * time.Millisecond
 	defaultSpoolMax  = "64MiB"
 	defaultSpoolDir  = "/var/lib/portwarden/spool"
+	defaultIngestDir = "/var/lib/portwarden/ingest"
 	defaultCloseWait = 2 * time.Second
 	defaultRecheck   = 5 * time.Minute
 	defaultFWPoll    = 30 * time.Second
@@ -80,7 +81,12 @@ type options struct {
 	tamperFiles                                                         []string
 	tamperDropRate                                                      float64
 	natsNkeyDir                                                         string
+	// Signal's ingest door (README "Pushing to Signal"); ingestURL "" sends to NATS.
+	ingestURL, ingestPin, ingestDir, ingestKey, ingestKeyID, ingestJoinCode string
 }
+
+// natsFlags are the NATS settings, which --ingest-url replaces.
+var natsFlags = []string{"nats-url", "nats-creds", "nats-nkey", "nats-nkey-dir", "tls-ca", "tls-cert", "tls-key"}
 
 func parseFlags(args []string) (options, error) {
 	var o options
@@ -106,6 +112,12 @@ func parseFlags(args []string) (options, error) {
 	fs.DurationVar(&o.tamperInterval, "tamper-interval", defaultTamper, "interval between tamper self-checks (0 disables them)")
 	fs.Float64Var(&o.tamperDropRate, "tamper-drop-rate", defaultDropRate, "ring-buffer drops per minute at which events_dropped pages (below it the flag is informational; 0 never pages)")
 	fs.StringVar(&o.natsNkeyDir, "nats-nkey-dir", "", "directory of per-host nkey seeds (host-<host id>.nk, as portwarden-natsauth mint writes them): the agent uses its own host's (one Secret for a whole Kubernetes cluster)")
+	fs.StringVar(&o.ingestURL, "ingest-url", "", "Signal's ingest door, https://<overlay address>:<port>: send there instead of NATS")
+	fs.StringVar(&o.ingestPin, "ingest-pin", "", "the door's key pin, sha256/<base64> (signal admin ingest pin); required with --ingest-url")
+	fs.StringVar(&o.ingestDir, "ingest-dir", defaultIngestDir, "where enrolment keeps the key id Signal assigned (keyid) and a host key it created (key.nk)")
+	fs.StringVar(&o.ingestKey, "ingest-key", "", "the host's nkey user seed, e.g. the one portwarden natsauth minted for --nats-nkey (default <ingest-dir>/key.nk)")
+	fs.StringVar(&o.ingestKeyID, "ingest-key-id", "", "the key id Signal assigned to the host key (default: the one enrolment stored in <ingest-dir>/keyid)")
+	fs.StringVar(&o.ingestJoinCode, "ingest-join-code-file", "", "file holding a one-time join code (signal admin ingest enroll-token create): the agent enrols with it when it has no key id")
 	tamperFiles := fs.String("tamper-files", "", "comma-separated absolute paths of extra files whose change is a tamper signal (e.g. the NATS credentials)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
@@ -115,6 +127,9 @@ func parseFlags(args []string) (options, error) {
 	}
 	if o.natsNkeyDir != "" && (o.natsNkey != "" || o.natsCreds != "") {
 		return o, errors.New("--nats-nkey-dir excludes --nats-nkey and --nats-creds")
+	}
+	if err := checkIngestFlags(fs, &o); err != nil {
+		return o, err
 	}
 	if o.tamperInterval < 0 {
 		return o, fmt.Errorf("--tamper-interval must not be negative, got %s", o.tamperInterval)
@@ -163,6 +178,46 @@ func parseFlags(args []string) (options, error) {
 	}
 	o.spoolMax = n
 	return o, nil
+}
+
+// checkIngestFlags makes the destination one or the other: --ingest-url with its pin and
+// no NATS setting, or no ingest setting at all.
+func checkIngestFlags(fs *flag.FlagSet, o *options) error {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if o.ingestURL == "" {
+		for _, name := range []string{"ingest-pin", "ingest-dir", "ingest-key", "ingest-key-id", "ingest-join-code-file"} {
+			if set[name] {
+				return fmt.Errorf("--%s needs --ingest-url", name)
+			}
+		}
+		return nil
+	}
+	for _, name := range natsFlags {
+		if set[name] {
+			return fmt.Errorf("--ingest-url sends to Signal instead of NATS: drop --%s", name)
+		}
+	}
+	if o.ingestPin == "" {
+		return errors.New("--ingest-url needs --ingest-pin (signal admin ingest pin)")
+	}
+	if o.ingestKey == "" {
+		o.ingestKey = filepath.Join(o.ingestDir, "key.nk")
+	}
+	return nil
+}
+
+// publisherConfig is the destination part of the publisher's configuration.
+func publisherConfig(opts options, hostname string) publish.Config {
+	if opts.ingestURL == "" {
+		return publish.Config{URL: opts.natsURL, CredsFile: opts.natsCreds, NkeyFile: opts.natsNkey,
+			CAFile: opts.tlsCA, CertFile: opts.tlsCert, KeyFile: opts.tlsKey}
+	}
+	return publish.Config{Ingest: &publish.IngestConfig{
+		URL: opts.ingestURL, Pin: opts.ingestPin, KeyFile: opts.ingestKey,
+		KeyID: opts.ingestKeyID, KeyIDFile: filepath.Join(opts.ingestDir, "keyid"), JoinCodeFile: opts.ingestJoinCode,
+		Hostname: hostname,
+	}}
 }
 
 func main() {
@@ -283,25 +338,24 @@ func run(opts options, log *slog.Logger) error {
 		runNumber = 0
 	}
 	self := selfIdentity(log)
-	pub, err := publish.New(ctx, publish.Config{
-		URL: opts.natsURL, CredsFile: opts.natsCreds, NkeyFile: opts.natsNkey,
-		CAFile: opts.tlsCA, CertFile: opts.tlsCert, KeyFile: opts.tlsKey,
-		HostID:   host,
-		SpoolDir: opts.spoolDir, SpoolMax: opts.spoolMax,
-		BootID: publish.ReadBootID(publish.BootIDPath), RunNumber: runNumber,
-		AgentVersion: version.Version, ExeSHA256: self.hash,
-		LocalAddr: hostInfo.SetIngestLocal,
-		OnDenied: func(subject string) {
-			if strings.HasSuffix(subject, "."+bus.KindTamper) {
-				log.Error("NATS refuses tamper events: re-render the auth block (portwarden-natsauth render) for this release", "subject", subject)
-				return
-			}
-			err := fmt.Errorf("NATS refuses this agent's publishes (%s): its credentials are not host %s's user", subject, host)
-			if deniedErr.CompareAndSwap(nil, &err) {
-				stop()
-			}
-		},
-	})
+	hostname, _ := os.Hostname() // only names the host at enrolment; "" is allowed
+	pubCfg := publisherConfig(opts, hostname)
+	pubCfg.HostID = host
+	pubCfg.SpoolDir, pubCfg.SpoolMax = opts.spoolDir, opts.spoolMax
+	pubCfg.BootID, pubCfg.RunNumber = publish.ReadBootID(publish.BootIDPath), runNumber
+	pubCfg.AgentVersion, pubCfg.ExeSHA256 = version.Version, self.hash
+	pubCfg.LocalAddr = hostInfo.SetIngestLocal
+	pubCfg.OnDenied = func(subject string) {
+		if strings.HasSuffix(subject, "."+bus.KindTamper) {
+			log.Error("NATS refuses tamper events: re-render the auth block (portwarden-natsauth render) for this release", "subject", subject)
+			return
+		}
+		err := fmt.Errorf("NATS refuses this agent's publishes (%s): its credentials are not host %s's user", subject, host)
+		if deniedErr.CompareAndSwap(nil, &err) {
+			stop()
+		}
+	}
+	pub, err := publish.New(ctx, pubCfg)
 	if err != nil {
 		_ = pr.Close()
 		return fmt.Errorf("publisher: %w", err)
@@ -326,8 +380,12 @@ func run(opts options, log *slog.Logger) error {
 			go publicip.RunIMDS(ctx, publicip.NewClient("", imdsTimeout), cloud, refresh, imdsRetry, hostInfo.SetCloud)
 		}
 	}
-	log.Info("started", "version", version.Version, "host_id", host, "netns", hostNetNS, "nats_url", opts.natsURL,
-		"spool_dir", opts.spoolDir, "spool_max", opts.spoolMax)
+	dest := []any{"nats_url", opts.natsURL}
+	if opts.ingestURL != "" {
+		dest = []any{"ingest_url", opts.ingestURL}
+	}
+	log.Info("started", append([]any{"version", version.Version, "host_id", host, "netns", hostNetNS,
+		"spool_dir", opts.spoolDir, "spool_max", opts.spoolMax}, dest...)...)
 
 	var beats sync.WaitGroup
 	beats.Add(1)
@@ -354,7 +412,7 @@ func run(opts options, log *slog.Logger) error {
 	}
 
 	if opts.tamperInterval > 0 {
-		mon := newTamperMonitor(self, extraFiles, opts.tamperDropRate, pr, proxyConns, hardenErr, log)
+		mon := newTamperMonitor(self, extraFiles, opts.tamperDropRate, pr, proxyConns, pub.IngestCheck(), hardenErr, log)
 		beats.Add(1)
 		go func() {
 			defer beats.Done()
@@ -457,7 +515,7 @@ func heartbeatLoop(ctx context.Context, every time.Duration, pr *probes.Probes, 
 	}
 }
 
-// loggingSink logs each snapshot's size as it is queued; delivery to NATS is separate.
+// loggingSink logs each snapshot's size as it is queued; delivery is separate.
 type loggingSink struct {
 	*publish.Publisher
 	log *slog.Logger

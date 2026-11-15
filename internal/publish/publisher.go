@@ -7,7 +7,9 @@
 // messages not yet sent survive a restart and go out, with their original run_id and
 // seq, before the new run's own. The spool holds asm.v1 messages under their NATS
 // subjects whatever the destination; the HTTPS sender converts them as it sends
-// (signalEvent), so a spool written under one destination drains to the other.
+// (signalEvent), so a spool written under one destination drains to the other. The host
+// identity facts (HostAccess, SignIns) are the exception: Signal-only, spooled as Signal
+// events and dropped by the NATS sender (access.go).
 package publish
 
 import (
@@ -23,6 +25,7 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
+	"github.com/slidehq/signal/schema/eventsv1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -112,6 +115,9 @@ type Publisher struct {
 	// tamper is the last tamper status (SetTamper), carried on heartbeats; nil until the
 	// first pass.
 	tamper *asmv1.TamperStatus
+
+	// access is the last full SSH access state queued (HostAccess); nil until the first.
+	access *eventsv1.HostAccess
 
 	onDenied func(subject string)
 
@@ -518,12 +524,16 @@ func cloneExposure(e model.Exposure) model.Exposure {
 
 // resnapshot queues a snapshot of the current listener set (the last snapshot plus every
 // change since) after a reconnect, so a consumer that missed events while the link was
-// down can resynchronise without a stale snapshot undoing a later change.
+// down can resynchronise without a stale snapshot undoing a later change. The SSH access
+// state goes with it: Signal forgets its digest on the same resync.
 func (p *Publisher) resnapshot() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.haveSnap {
 		p.resnapshotLocked()
+	}
+	if p.access != nil {
+		p.enqueueAccessLocked()
 	}
 }
 

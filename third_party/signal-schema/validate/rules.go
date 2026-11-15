@@ -2,11 +2,13 @@ package validate
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	ev "github.com/slidehq/signal/schema/eventsv1"
 )
@@ -39,6 +41,12 @@ var rules = map[protoreflect.FullName]rule{
 	name(&ev.HostSnapshot{}):       typed(hostSnapshot),
 	name(&ev.ProxyState{}):         typed(proxyState),
 	name(&ev.ProxyRoutes{}):        typed(proxyRoutes),
+	name(&ev.HostAccess{}):         typed(hostAccess),
+	name(&ev.TrustedKey{}):         typed(trustedKey),
+	name(&ev.AccountAccess{}):      typed(accountAccess),
+	name(&ev.SignInSummary{}):      typed(signInSummary),
+	name(&ev.SignInGroup{}):        typed(signInGroup),
+	name(&ev.JumpHop{}):            typed(jumpHop),
 	name(&ev.ScanCompleted{}):      typed(scanCompleted),
 	name(&ev.ServiceObservation{}): typed(serviceObservation),
 	name(&ev.AssetDiscovery{}):     typed(assetDiscovery),
@@ -264,4 +272,132 @@ func optionalHex(v, path string) *Problem {
 		return invalid(path, "want 64 lowercase hex characters")
 	}
 	return nil
+}
+
+// sshFingerprintRe is an SSH key's SHA-256 fingerprint as ssh-keygen -l prints it.
+var sshFingerprintRe = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
+
+// accountRe is a POSIX user name.
+var accountRe = regexp.MustCompile(`^[a-z_][a-z0-9_.-]{0,31}$`)
+
+func fingerprint(v, path string, required bool) *Problem {
+	if v == "" && !required {
+		return nil
+	}
+	if !sshFingerprintRe.MatchString(v) {
+		return invalid(path, "want SHA256: and 43 unpadded base64 characters")
+	}
+	return nil
+}
+
+func account(v, path string) *Problem {
+	if !accountRe.MatchString(v) {
+		return invalid(path, "not a POSIX user name")
+	}
+	return nil
+}
+
+func hostAccess(a *ev.HostAccess, path string) *Problem {
+	if a.GetUnchanged() {
+		if a.GetDigest() == "" {
+			return invalid(join(path, "digest"), "required when unchanged")
+		}
+		if a.GetSshd() != nil || len(a.GetAccounts()) > 0 {
+			return invalid(join(path, "unchanged"), "an unchanged access state carries no sshd or accounts")
+		}
+	}
+	return optionalHex(a.GetDigest(), join(path, "digest"))
+}
+
+func trustedKey(k *ev.TrustedKey, path string) *Problem {
+	return fingerprint(k.GetFingerprint(), join(path, "fingerprint"), true)
+}
+
+func accountAccess(a *ev.AccountAccess, path string) *Problem {
+	if p := account(a.GetAccount(), join(path, "account")); p != nil {
+		return p
+	}
+	for i, k := range a.GetStaticKeys() {
+		if p := fingerprint(k, fmt.Sprintf("%s[%d]", join(path, "static_keys"), i), true); p != nil {
+			return p
+		}
+	}
+	return nil
+}
+
+func signInSummary(s *ev.SignInSummary, path string) *Problem {
+	start, end := s.GetWindowStart(), s.GetWindowEnd()
+	switch {
+	case end == nil:
+		return invalid(join(path, "window_end"), "required")
+	case start != nil && end.AsTime().Before(start.AsTime()):
+		return invalid(join(path, "window_end"), "before window_start")
+	}
+	for i, g := range s.GetGroups() {
+		if g.GetLastAt() != nil && g.GetLastAt().AsTime().After(end.AsTime()) {
+			return invalid(fmt.Sprintf("%s[%d].last_at", join(path, "groups"), i), "after window_end")
+		}
+	}
+	return nil
+}
+
+func signInGroup(g *ev.SignInGroup, path string) *Problem {
+	if p := account(g.GetAccount(), join(path, "account")); p != nil {
+		return p
+	}
+	if g.GetMethod() == ev.SignInGroup_METHOD_UNSPECIFIED {
+		return invalid(join(path, "method"), "required")
+	}
+	if p := fingerprint(g.GetCaFingerprint(), join(path, "ca_fingerprint"), false); p != nil {
+		return p
+	}
+	if p := fingerprint(g.GetKeyFingerprint(), join(path, "key_fingerprint"), false); p != nil {
+		return p
+	}
+	if !printable(g.GetKeyId()) {
+		return invalid(join(path, "key_id"), "holds a space or a control character")
+	}
+	if g.GetSerial() != "" {
+		if _, err := strconv.ParseUint(g.GetSerial(), 10, 64); err != nil {
+			return invalid(join(path, "serial"), "not a decimal number")
+		}
+	}
+	if g.GetFromIp() != "" && canonicalIP(g.GetFromIp()) != nil {
+		return invalid(join(path, "from_ip"), "not a canonical IP address")
+	}
+	return counted(g.GetCount(), g.GetFirstAt(), g.GetLastAt(), path)
+}
+
+func jumpHop(h *ev.JumpHop, path string) *Problem {
+	switch {
+	case h.GetPerson() == "":
+		return invalid(join(path, "person"), "required")
+	case h.GetTarget() == "":
+		return invalid(join(path, "target"), "required")
+	}
+	return counted(h.GetCount(), h.GetFirstAt(), h.GetLastAt(), path)
+}
+
+// counted checks a group's count and its first and last times.
+func counted(n uint64, first, last *timestamppb.Timestamp, path string) *Problem {
+	switch {
+	case n == 0:
+		return invalid(join(path, "count"), "want at least 1")
+	case first == nil || last == nil:
+		return invalid(join(path, "first_at"), "first_at and last_at are required")
+	case last.AsTime().Before(first.AsTime()):
+		return invalid(join(path, "last_at"), "before first_at")
+	}
+	return nil
+}
+
+// printable reports whether s holds only printable ASCII other than a space (a key ID as sshd
+// logs it).
+func printable(s string) bool {
+	for i := range len(s) {
+		if s[i] <= ' ' || s[i] > '~' {
+			return false
+		}
+	}
+	return true
 }

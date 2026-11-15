@@ -74,6 +74,9 @@ func TestAgentUnit(t *testing.T) {
 	want(t, unit, d, "RestrictAddressFamilies", "AF_UNIX", "AF_NETLINK", "AF_INET", "AF_INET6")
 	want(t, unit, d, "SystemCallFilter", "@system-service", "bpf", "perf_event_open")
 	want(t, unit, d, "User", "portwarden-agent")
+	// Reading sshd's journal (host identity facts) is the one group it joins: no adm, no
+	// disk, no sudo.
+	want(t, unit, d, "SupplementaryGroups", "systemd-journal")
 	for k, v := range common {
 		want(t, unit, d, k, v)
 	}

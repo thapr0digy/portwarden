@@ -3,6 +3,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -142,5 +145,55 @@ func TestParseFlagsIngestReplacesNATS(t *testing.T) {
 		if _, err := parseFlags(args); err == nil {
 			t.Errorf("%v accepted", args)
 		}
+	}
+}
+
+func TestParseFlagsSSHAccess(t *testing.T) {
+	o, err := parseFlags(nil)
+	if err != nil || o.sshAccess != "auto" || strings.Join(o.sshAccounts, ",") != "pants,root" || o.sharedKeys != "" {
+		t.Fatalf("defaults %+v %v", o, err)
+	}
+	o, err = parseFlags([]string{"--ssh-access", "off", "--ssh-accounts", " deploy , pants ", "--shared-keys", "/etc/portwarden/shared-keys"})
+	if err != nil || o.sshAccess != "off" || strings.Join(o.sshAccounts, ",") != "deploy,pants" {
+		t.Fatalf("parsed %+v %v", o, err)
+	}
+	for _, args := range [][]string{{"--ssh-access", "on"}, {"--ssh-accounts", ""}, {"--ssh-accounts", "Admin"}, {"--ssh-accounts", "a b"}} {
+		if _, err := parseFlags(args); err == nil {
+			t.Errorf("%v accepted", args)
+		}
+	}
+}
+
+// The identity facts exist only in Signal's schema: the reader runs only with the door,
+// and a shared-key list that is not one fails the start.
+func TestHostAccessConfig(t *testing.T) {
+	door := []string{"--ingest-url", "https://100.64.0.5:8443", "--ingest-pin", "sha256/pin", "--ingest-dir", "/srv/pw"}
+	for _, args := range [][]string{nil, append(door[:6:6], "--ssh-access", "off")} {
+		o, err := parseFlags(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg, err := hostAccessConfig(o); cfg != nil || err != nil {
+			t.Fatalf("%v: %+v %v", args, cfg, err)
+		}
+	}
+	list := filepath.Join(t.TempDir(), "shared-keys")
+	if err := os.WriteFile(list, []byte("underpants SHA256:I8mg+yasAvN5VKOREFoeN54OIuc1hm+LJL6KAGScwsI\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o, err := parseFlags(append(door[:6:6], "--shared-keys", list))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := hostAccessConfig(o)
+	if err != nil || cfg == nil || cfg.SharedKeys["SHA256:I8mg+yasAvN5VKOREFoeN54OIuc1hm+LJL6KAGScwsI"] != "underpants" ||
+		cfg.CursorFile != "/srv/pw/journal-cursor" || cfg.Recheck != 5*time.Minute || cfg.Journal == nil {
+		t.Fatalf("config %+v %v", cfg, err)
+	}
+	if err := os.WriteFile(list, []byte("-----BEGIN OPENSSH PRIVATE KEY-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hostAccessConfig(o); err == nil || strings.Contains(err.Error(), "BEGIN") {
+		t.Fatalf("a list that is not one: %v", err)
 	}
 }

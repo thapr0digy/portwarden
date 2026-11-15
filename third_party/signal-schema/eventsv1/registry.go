@@ -102,6 +102,8 @@ var Registry = []TypeInfo{
 	{Type: "asm.listener.owner_changed", Case: 27, Message: "ListenerChange", Producers: agentOnly, Subjects: hostOnly, Sequenced: true},
 	{Type: "asm.exposure.changed", Case: 28, Message: "ExposureChange", Producers: agentOnly, Subjects: hostOnly, Sequenced: true},
 	{Type: "asm.proxy.routes", Case: 29, Message: "ProxyRoutes", Producers: agentOnly, Subjects: hostOnly, Sequenced: true},
+	{Type: "asm.host.access", Case: 30, Message: "HostAccess", Producers: agentOnly, Subjects: hostOnly, Sequenced: true},
+	{Type: "asm.host.sign_ins", Case: 31, Message: "SignInSummary", Producers: agentOnly, Subjects: hostOnly, Sequenced: true},
 
 	{Type: "asm.exposure.cloud_assessed", Case: 40, Message: "CloudExposureAssessment", Producers: []ProducerKind{ProducerService}, Subjects: hostOnly},
 	{Type: "asm.exposure.probed", Case: 41, Message: "ProbeResult", Producers: []ProducerKind{ProducerProber, ProducerService}, Subjects: []SubjectScheme{SchemeHost, SchemeSvc}},

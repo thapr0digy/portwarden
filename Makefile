@@ -31,7 +31,9 @@ FUZZ_TARGETS := \
 	internal/spool:FuzzDecodeRecord \
 	internal/spool:FuzzOpen \
 	internal/inventory:FuzzHandle \
-	internal/ingest:FuzzAnswer
+	internal/ingest:FuzzAnswer \
+	internal/access:FuzzSSHDConfig \
+	internal/access:FuzzJournalEntry
 
 fuzz:
 	@for t in $(FUZZ_TARGETS); do \

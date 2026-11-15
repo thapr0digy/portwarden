@@ -1,0 +1,7 @@
+{"specversion":"1.0","source":"urn:asm:agent:4f1c2a9e7b3d4c5e8f9a0b1c2d3e4f5a","subject":"host:4f1c2a9e7b3d4c5e8f9a0b1c2d3e4f5a","datacontenttype":"application/json","producer":"portwarden-agent/v0.9.3","runid":"01JC8Z6X4P9QK2M3N5R7T8V0WA","bootid":"6e0f9d1c-3b2a-4e8f-9c7d-5a4b3c2d1e0f","runnumber":"7","id":"01JC8Z6X4Q00000000000000A9","type":"asm.host.access","time":"2026-11-10T14:00:02.400Z","dataschema":"asm.events.v1/HostAccess","sequence":"4",
+ "data":{"sshd":{"read":true,"trusted_user_ca_keys":[{"fingerprint":"SHA256:9Puo8/7xmKbG5DEoJXYw8dSkfzAUovRGBQCMFLPuQBM","label":"vault ssh/prod"}],
+                 "authorized_keys_file":".ssh/authorized_keys","authorized_principals_file":"/etc/ssh/auth_principals/%u"},
+         "accounts":[{"account":"pants","principals_read":true,"principals":["pants"],"static_keys_read":true,
+                      "static_keys":["SHA256:I8mg+yasAvN5VKOREFoeN54OIuc1hm+LJL6KAGScwsI"],"sudo_read":true,"sudo":{"present":true,"nopasswd":true,"all_commands":true}},
+                     {"account":"root","principals_read":true,"static_keys_read":false,"unreadable":"/root/.ssh: permission denied","sudo_read":true}],
+         "digest":"5d1f0c4b2a39e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3"}}

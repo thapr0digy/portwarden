@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/thapr0digy/portwarden/internal/access"
 	"github.com/thapr0digy/portwarden/internal/agent"
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
 	"github.com/thapr0digy/portwarden/internal/baseline"
@@ -83,6 +84,10 @@ type options struct {
 	natsNkeyDir                                                         string
 	// Signal's ingest door (README "Pushing to Signal"); ingestURL "" sends to NATS.
 	ingestURL, ingestPin, ingestDir, ingestKey, ingestKeyID, ingestJoinCode string
+	// Host identity facts (README "Host identity facts"): auto runs with --ingest-url.
+	sshAccess   string
+	sshAccounts []string
+	sharedKeys  string
 }
 
 // natsFlags are the NATS settings, which --ingest-url replaces.
@@ -119,9 +124,20 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&o.ingestKeyID, "ingest-key-id", "", "the key id Signal assigned to the host key (default: the one enrolment stored in <ingest-dir>/keyid)")
 	fs.StringVar(&o.ingestJoinCode, "ingest-join-code-file", "", "file holding a one-time join code (signal admin ingest enroll-token create): the agent enrols with it when it has no key id")
 	tamperFiles := fs.String("tamper-files", "", "comma-separated absolute paths of extra files whose change is a tamper signal (e.g. the NATS credentials)")
+	fs.StringVar(&o.sshAccess, "ssh-access", "auto", "report the host's SSH trust and accepted sign-ins to Signal: auto (with --ingest-url) or off")
+	sshAccounts := fs.String("ssh-accounts", defaultSSHAccounts, "comma-separated local accounts whose principals and sudo presence are reported")
+	fs.StringVar(&o.sharedKeys, "shared-keys", "", "reviewed list of shared SSH keys, one \"<name> SHA256:<fingerprint>\" per line: the only plain-key fingerprints sent to Signal")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
+	if o.sshAccess != "auto" && o.sshAccess != "off" {
+		return o, fmt.Errorf("--ssh-access must be auto or off, got %q", o.sshAccess)
+	}
+	accounts, err := parseSSHAccounts(*sshAccounts)
+	if err != nil {
+		return o, err
+	}
+	o.sshAccounts = accounts
 	if o.tamperDropRate < 0 {
 		return o, fmt.Errorf("--tamper-drop-rate must not be negative, got %v", o.tamperDropRate)
 	}
@@ -325,6 +341,10 @@ func run(opts options, log *slog.Logger) error {
 			return fmt.Errorf("--tamper-files: %w", err)
 		}
 	}
+	accessCfg, err := hostAccessConfig(opts)
+	if err != nil {
+		return err
+	}
 
 	// Probes first, so no listener is missed while the baseline is taken.
 	pr, err := probes.Start()
@@ -393,6 +413,15 @@ func run(opts options, log *slog.Logger) error {
 		defer beats.Done()
 		heartbeatLoop(ctx, opts.heartbeat, pr, pub)
 	}()
+	if accessCfg != nil {
+		// Joined before the publisher closes: its last sign-in window is queued first.
+		accessCfg.Log = log.With("part", "ssh_access")
+		beats.Add(1)
+		go func() {
+			defer beats.Done()
+			access.Run(ctx, *accessCfg, pub)
+		}()
+	}
 
 	agentOpts := agent.Options{
 		Enrich:     enrich,

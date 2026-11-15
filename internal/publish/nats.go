@@ -149,6 +149,11 @@ func (t *natsTransport) resync() bool {
 }
 
 func (t *natsTransport) deliver(ctx context.Context, msgs []spool.Msg) delivery {
+	if signalOnly(msgs[0].Subject) {
+		// Left in the spool by a run that sent to Signal. Never published: a host's NATS
+		// user may not publish that subject, and a denied publish stops the agent.
+		return delivery{undeliverable: true, err: fmt.Errorf("%s goes only to Signal", msgs[0].Subject)}
+	}
 	err := t.sendOne(ctx, msgs[0])
 	var perm *permanentError
 	switch {

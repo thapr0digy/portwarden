@@ -220,7 +220,7 @@ func (p *sudoPolicy) userSpec(line string) {
 func (p *sudoPolicy) rule(u user, groups groupDB) (rule *eventsv1.SudoRule, known bool) {
 	rule = &eventsv1.SudoRule{}
 	for _, s := range p.specs {
-		if named, _ := p.names(s.users, u, groups, 0); !named {
+		if p.names(s.users, u, groups, 0) != matchAllow {
 			continue
 		}
 		rule.Present = true
@@ -230,41 +230,81 @@ func (p *sudoPolicy) rule(u user, groups groupDB) (rule *eventsv1.SudoRule, know
 	return rule, rule.Present || p.unread == nil
 }
 
-// names reports whether a user list names u as sudo reads it: the last item that decides
-// wins, and a matching negated item (!name) excludes u. decided is false when no item
-// decides (so an alias that excludes u excludes it where the alias is used, while one that
-// does not mention u leaves the list's answer alone).
-func (p *sudoPolicy) names(list []string, u user, groups groupDB, depth int) (named, decided bool) {
+// userMatch is what a user list, or one of its items, says of a user.
+type userMatch int
+
+const (
+	// matchNone: no item mentions the user.
+	matchNone userMatch = iota
+	matchAllow
+	matchDeny
+	// matchUnknown: an item that may mention the user is defined in a file the agent
+	// could not read (an undefined User_Alias, or a %group while /etc/group is unread).
+	matchUnknown
+)
+
+func (m userMatch) negate() userMatch {
+	switch m {
+	case matchAllow:
+		return matchDeny
+	case matchDeny:
+		return matchAllow
+	}
+	return m
+}
+
+// aliasNameRe is the shape sudoers(5) gives an alias name.
+var aliasNameRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+
+// names is what a user list says of u as sudo reads it: the last item that mentions u
+// decides, and a matching negated item (!name) excludes u. An alias that excludes u
+// excludes it where the alias is used; one that does not mention u leaves the list's
+// answer alone.
+func (p *sudoPolicy) names(list []string, u user, groups groupDB, depth int) userMatch {
+	result := matchNone
 	for _, item := range list {
 		item = strings.TrimSpace(item)
 		negated := false
 		for strings.HasPrefix(item, "!") {
 			item, negated = strings.TrimSpace(item[1:]), !negated
 		}
-		if m, ok := p.matches(item, u, groups, depth); ok {
-			named, decided = m != negated, true
+		m := p.matches(item, u, groups, depth)
+		if negated {
+			m = m.negate()
+		}
+		if m != matchNone {
+			result = m
 		}
 	}
-	return named, decided
+	return result
 }
 
-// matches reports whether one user list item decides for u: the name, ALL, %group, #uid
-// and %#gid match or not; a User_Alias decides as its own list does.
-func (p *sudoPolicy) matches(item string, u user, groups groupDB, depth int) (named, decided bool) {
+// matches is what one user list item says of u: the name, ALL, %group, #uid and %#gid
+// match or not; a User_Alias says what its own list does.
+func (p *sudoPolicy) matches(item string, u user, groups groupDB, depth int) userMatch {
 	switch {
 	case item == "" || strings.HasPrefix(item, "%:"):
-		return false, false
+		return matchNone
 	case item == "ALL" || item == u.name || item == "#"+u.uid:
-		return true, true
+		return matchAllow
+	case strings.HasPrefix(item, "%") && groups == nil:
+		return matchUnknown
 	case strings.HasPrefix(item, "%#"):
-		m := item[2:] == u.gid || slices.Contains(groups.gidsOf(u), item[2:])
-		return m, m
+		if item[2:] == u.gid || slices.Contains(groups.gidsOf(u), item[2:]) {
+			return matchAllow
+		}
+		return matchNone
 	case strings.HasPrefix(item, "%"):
-		m := groups.member(item[1:], u)
-		return m, m
+		if groups.member(item[1:], u) {
+			return matchAllow
+		}
+		return matchNone
 	}
 	if a, ok := p.aliases[item]; ok && depth < maxAliasDepth {
 		return p.names(a, u, groups, depth+1)
 	}
-	return false, false
+	if p.unread != nil && aliasNameRe.MatchString(item) {
+		return matchUnknown
+	}
+	return matchNone
 }

@@ -152,6 +152,38 @@ func TestSudoNegationExcludes(t *testing.T) {
 	}
 }
 
+// Assumption: while part of the policy is unread, an item that may exclude the user but is
+// defined there (an undefined User_Alias, a %group with /etc/group unread) makes presence
+// unknown, not "present": sudo would read that definition, the agent cannot.
+func TestSudoUnresolvableExclusionIsUnknown(t *testing.T) {
+	alice := user{name: "alice", uid: "1003", gid: "1003"}
+	admin := groupDB{"admin": {gid: "110", members: []string{"alice"}}}
+	for _, c := range []struct {
+		spec           string
+		groups         groupDB
+		present, known bool
+	}{
+		{"ALL, !ADMINS ALL = ALL\n", admin, false, false},
+		{"ALL, !%admin ALL = ALL\n", nil, false, false},
+		{"ALL, !%#110 ALL = ALL\n", nil, false, false},
+		{"!ADMINS, ALL ALL = ALL\n", admin, true, true},
+		{"ALL, !bob ALL = ALL\n", admin, true, true},
+		{"ALL, !%admin ALL = ALL\n", admin, false, false},
+	} {
+		p := &sudoPolicy{aliases: map[string][]string{}}
+		p.parse(c.spec, func(bool, string) {})
+		p.noteUnread(errors.New("/etc/sudoers: permission denied"))
+		if got, known := p.rule(alice, c.groups); got.GetPresent() != c.present || known != c.known {
+			t.Errorf("%q groups=%v: present %v known %v, want %v %v", c.spec, c.groups != nil, got.GetPresent(), known, c.present, c.known)
+		}
+	}
+	p := &sudoPolicy{aliases: map[string][]string{}}
+	p.parse("ALL, !ADMINS ALL = ALL\n", func(bool, string) {})
+	if got, known := p.rule(alice, admin); !got.GetPresent() || !known {
+		t.Errorf("with the whole policy read, an undefined alias names nobody: %v %v", got, known)
+	}
+}
+
 func TestSudoIncludes(t *testing.T) {
 	h := fsOf(map[string]string{
 		"etc/sudoers":      "#includedir /etc/sudoers.d\n@include extra\n",

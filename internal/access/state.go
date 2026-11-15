@@ -257,13 +257,13 @@ type group struct {
 	members []string
 }
 
-// groupDB is /etc/group by name.
+// groupDB is /etc/group by name; nil when /etc/group could not be read.
 type groupDB map[string]group
 
 func readGroups(root fs.FS) (groupDB, error) {
 	data, err := readFile(root, groupFile)
 	if err != nil {
-		return groupDB{}, err
+		return nil, err
 	}
 	out := groupDB{}
 	for _, line := range strings.Split(string(data), "\n") {

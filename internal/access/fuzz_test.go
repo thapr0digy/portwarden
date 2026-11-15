@@ -59,6 +59,7 @@ func FuzzSSHDConfig(f *testing.F) {
 	for _, name := range []string{"etc/ssh/sshd_config", "etc/ssh/sshd_config.d/10-vault.conf"} {
 		f.Add(string(h.files[name].Data), string(h.files["etc/ssh/ssh_trusted_user_ca_keys"].Data), "pants\n", "pants ALL=(ALL) NOPASSWD: ALL\n")
 	}
+	f.Add("AuthorizedKeysFile = none\nAuthorizedPrincipalsFile= =x\nTrustedUserCAKeys = /etc/ssh/ca\n", "ssh-ed25519 AAAA\n", "pants\n", "ALL, !pants ALL = NOPASSWD: ALL\n")
 	f.Add("Include x\nMatch all\nAuthorizedKeysFile \"a b\" c=d\n", "ssh-ed25519 AAAA\n", "from=\"x y\" p\n", "User_Alias A = %b, #1\nA ALL = ALL\n")
 	f.Fuzz(func(t *testing.T, config, ca, principals, sudoers string) {
 		h := fsOf(map[string]string{

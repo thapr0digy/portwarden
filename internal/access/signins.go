@@ -99,8 +99,8 @@ func maxTime(a, b time.Time) time.Time {
 }
 
 // Trust states: what a host lets in over SSH (the scout's cert-only, both and key-only).
-// Static keys are known only when AuthorizedKeysFile is none (no keys) or a plain key was
-// seen signing in (keys); otherwise the state is a pair of possibilities.
+// Static keys are known only when keys are off (AuthorizedKeysFile none and no
+// AuthorizedKeysCommand) or a plain key was seen signing in (keys); otherwise the state is a pair of possibilities.
 const (
 	TrustCertOnly     = "cert-only"
 	TrustBoth         = "both"
@@ -112,23 +112,22 @@ const (
 )
 
 // TrustState derives the host's trust state from its access state (does sshd trust a
-// signing key, are keys off) and whether a plain key was seen signing in.
-func TrustState(a *eventsv1.HostAccess, keySeen bool) string {
+// signing key), sshd's configuration (are keys off) and whether a plain key was seen
+// signing in.
+func TrustState(a *eventsv1.HostAccess, cfg SSHD, keySeen bool) string {
 	s := a.GetSshd()
 	if !s.GetRead() {
 		return TrustUnknown
 	}
 	cert := len(s.GetTrustedUserCaKeys()) > 0
-	// A key seen signing in wins over "AuthorizedKeysFile none": an AuthorizedKeysCommand,
-	// which this package does not read, can still supply keys.
 	switch {
 	case keySeen && cert:
 		return TrustBoth
 	case keySeen:
 		return TrustKeyOnly
-	case s.GetAuthorizedKeysFile() == "none" && cert:
+	case cfg.keysOff() && cert:
 		return TrustCertOnly
-	case s.GetAuthorizedKeysFile() == "none":
+	case cfg.keysOff():
 		return TrustNone
 	case cert:
 		return TrustCertOrBoth

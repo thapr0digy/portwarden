@@ -53,6 +53,9 @@ func TestReadHostAccessOnAnAnsibleHost(t *testing.T) {
 	if !pants.GetSudoRead() || !proto.Equal(pants.GetSudo(), &eventsv1.SudoRule{Present: true, Nopasswd: true, AllCommands: true}) {
 		t.Fatalf("pants sudo = %v", pants)
 	}
+	if !strings.Contains(pants.GetUnreadable(), "sudo: /etc/sudoers: permission denied (nopasswd and all_commands are a lower bound)") {
+		t.Fatalf("pants's sudo flags are a lower bound while /etc/sudoers is unread: %q", pants.GetUnreadable())
+	}
 	root := accountOf(t, a, "root")
 	if !root.GetPrincipalsRead() || len(root.GetPrincipals()) != 0 {
 		t.Fatalf("no principals file for root is a known empty list: %v", root)

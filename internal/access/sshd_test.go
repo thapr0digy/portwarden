@@ -16,8 +16,9 @@ func TestReadSSHDDefaults(t *testing.T) {
 	}
 }
 
-// Assumption: sshd's rules are first value wins, keywords in any case, "=" or spaces,
-// quoted arguments, Include in place in glob order, Match blocks not global.
+// Assumption: sshd's rules are first value wins, keywords in any case, "=" or spaces (and
+// "Keyword = value", one "=" skipped as OpenSSH's strdelim does), quoted arguments, Include
+// in place in glob order, Match blocks not global.
 func TestReadSSHDFollowsSSHDsRules(t *testing.T) {
 	h := fsOf(map[string]string{
 		"etc/ssh/sshd_config": `authorizedKeysFile=".ssh/authorized_keys" .ssh/keys2
@@ -28,6 +29,8 @@ Match Address 10.0.0.0/8
 Match all
 AuthorizedPrincipalsCommand /usr/bin/principals %u
 AuthorizedPrincipalsCommandUser nobody
+AuthorizedPrincipalsFile = /etc/ssh/principals/%u
+PasswordAuthentication	=	no
 TrustedUserCAKeys /etc/ssh/late_ca
 `,
 		"etc/ssh/conf.d/20-b.conf": "TRUSTEDUSERCAKEYS /etc/ssh/b_ca\nPermitRootLogin Without-Password\n",
@@ -38,9 +41,28 @@ TrustedUserCAKeys /etc/ssh/late_ca
 		t.Fatal(err)
 	}
 	want := SSHD{TrustedUserCAKeys: "/etc/ssh/a ca", AuthorizedKeysFile: ".ssh/authorized_keys .ssh/keys2",
-		AuthorizedPrincipalsCommand: true, PasswordAuthentication: true, PermitRootLogin: "without-password"}
+		AuthorizedPrincipalsFile: "/etc/ssh/principals/%u", AuthorizedPrincipalsCommand: true,
+		PermitRootLogin: "without-password"}
 	if cfg != want {
 		t.Fatalf("cfg = %+v\nwant  %+v", cfg, want)
+	}
+}
+
+// Assumption: OpenSSH skips one "=" after the keyword, not a second one, and keeps an "=" in
+// an argument: "AuthorizedKeysFile = none" turns keys off.
+func TestSSHDWordsSkipOneEquals(t *testing.T) {
+	for line, want := range map[string]string{
+		"AuthorizedKeysFile = none":      "AuthorizedKeysFile|none",
+		"AuthorizedKeysFile=none":        "AuthorizedKeysFile|none",
+		"AuthorizedKeysFile =none a=b":   "AuthorizedKeysFile|none|a=b",
+		"AuthorizedKeysFile = = none":    "AuthorizedKeysFile|=|none",
+		"AuthorizedKeysFile= =none":      "AuthorizedKeysFile|=none",
+		"TrustedUserCAKeys \"=/etc/ca\"": "TrustedUserCAKeys|=/etc/ca",
+	} {
+		got, err := sshdWords(line)
+		if err != nil || strings.Join(got, "|") != want {
+			t.Errorf("%q: %q %v, want %s", line, got, err, want)
+		}
 	}
 }
 
@@ -102,6 +124,31 @@ DEPLOYERS ALL = (root) NOPASSWD: RESTART , PASSWD: /bin/ls
 	}
 	if _, known := p.rule(pants, groups); !known {
 		t.Fatal("a rule seen is present whatever else is unread")
+	}
+}
+
+// Assumption: sudo reads a user list last match first, a matching !item excluding the user
+// (sudoers(5), "User_List"), through aliases too.
+func TestSudoNegationExcludes(t *testing.T) {
+	alice := user{name: "alice", uid: "1003", gid: "1003"}
+	bob := user{name: "bob", uid: "1004", gid: "1004"}
+	groups := groupDB{"admin": {gid: "110", members: []string{"alice", "bob"}}}
+	for spec, want := range map[string][2]bool{
+		"ALL, !alice ALL = ALL\n":                         {false, true},
+		"%admin, !alice ALL = ALL\n":                      {false, true},
+		"!alice, %admin ALL = ALL\n":                      {true, true},
+		"User_Alias OPS = %admin, !bob\nOPS ALL = ALL\n":  {true, false},
+		"User_Alias OPS = %admin, !bob\n!OPS ALL = ALL\n": {false, true},
+		"User_Alias OPS = !alice\nALL, OPS ALL = ALL\n":   {false, true},
+		"User_Alias OPS = !alice\nALL, !OPS ALL = ALL\n":  {true, true},
+	} {
+		p := &sudoPolicy{aliases: map[string][]string{}}
+		p.parse(spec, func(bool, string) {})
+		for i, u := range []user{alice, bob} {
+			if got, _ := p.rule(u, groups); got.GetPresent() != want[i] {
+				t.Errorf("%q: %s present %v, want %v", spec, u.name, got.GetPresent(), want[i])
+			}
+		}
 	}
 }
 

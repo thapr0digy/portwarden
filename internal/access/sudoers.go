@@ -220,7 +220,7 @@ func (p *sudoPolicy) userSpec(line string) {
 func (p *sudoPolicy) rule(u user, groups groupDB) (rule *eventsv1.SudoRule, known bool) {
 	rule = &eventsv1.SudoRule{}
 	for _, s := range p.specs {
-		if !p.names(s.users, u, groups, 0) {
+		if named, _ := p.names(s.users, u, groups, 0); !named {
 			continue
 		}
 		rule.Present = true
@@ -230,29 +230,41 @@ func (p *sudoPolicy) rule(u user, groups groupDB) (rule *eventsv1.SudoRule, know
 	return rule, rule.Present || p.unread == nil
 }
 
-// names reports whether a user list names u: the name, ALL, %group, #uid, %#gid or a
-// User_Alias. A negated item (!name) is not read as a match.
-func (p *sudoPolicy) names(list []string, u user, groups groupDB, depth int) bool {
+// names reports whether a user list names u as sudo reads it: the last item that decides
+// wins, and a matching negated item (!name) excludes u. decided is false when no item
+// decides (so an alias that excludes u excludes it where the alias is used, while one that
+// does not mention u leaves the list's answer alone).
+func (p *sudoPolicy) names(list []string, u user, groups groupDB, depth int) (named, decided bool) {
 	for _, item := range list {
 		item = strings.TrimSpace(item)
-		switch {
-		case item == "" || strings.HasPrefix(item, "!"):
-		case item == "ALL" || item == u.name || item == "#"+u.uid:
-			return true
-		case strings.HasPrefix(item, "%#"):
-			if item[2:] == u.gid || slices.Contains(groups.gidsOf(u), item[2:]) {
-				return true
-			}
-		case strings.HasPrefix(item, "%:"):
-		case strings.HasPrefix(item, "%"):
-			if groups.member(item[1:], u) {
-				return true
-			}
-		default:
-			if a, ok := p.aliases[item]; ok && depth < maxAliasDepth && p.names(a, u, groups, depth+1) {
-				return true
-			}
+		negated := false
+		for strings.HasPrefix(item, "!") {
+			item, negated = strings.TrimSpace(item[1:]), !negated
+		}
+		if m, ok := p.matches(item, u, groups, depth); ok {
+			named, decided = m != negated, true
 		}
 	}
-	return false
+	return named, decided
+}
+
+// matches reports whether one user list item decides for u: the name, ALL, %group, #uid
+// and %#gid match or not; a User_Alias decides as its own list does.
+func (p *sudoPolicy) matches(item string, u user, groups groupDB, depth int) (named, decided bool) {
+	switch {
+	case item == "" || strings.HasPrefix(item, "%:"):
+		return false, false
+	case item == "ALL" || item == u.name || item == "#"+u.uid:
+		return true, true
+	case strings.HasPrefix(item, "%#"):
+		m := item[2:] == u.gid || slices.Contains(groups.gidsOf(u), item[2:])
+		return m, m
+	case strings.HasPrefix(item, "%"):
+		m := groups.member(item[1:], u)
+		return m, m
+	}
+	if a, ok := p.aliases[item]; ok && depth < maxAliasDepth {
+		return p.names(a, u, groups, depth+1)
+	}
+	return false, false
 }

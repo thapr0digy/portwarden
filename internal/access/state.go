@@ -118,15 +118,20 @@ func accountAccess(root fs.FS, cfg SSHD, sshdRead bool, u user, policy *sudoPoli
 			a.PrincipalsRead, a.Principals = true, principals
 		}
 	}
-	if sshdRead && cfg.AuthorizedKeysFile == "none" && !cfg.AuthorizedKeysCommand {
+	if sshdRead && cfg.keysOff() {
 		a.StaticKeysRead = true // keys are off for everyone
 	} else {
 		why = append(why, errKeysNotRead.Error())
 	}
-	if rule, known := policy.rule(u, groups); known {
-		a.SudoRead, a.Sudo = true, rule
-	} else {
+	rule, known := policy.rule(u, groups)
+	switch {
+	case !known:
 		why = append(why, "sudo: "+policy.unread.Error())
+	case policy.unread != nil:
+		why = append(why, "sudo: "+policy.unread.Error()+" (nopasswd and all_commands are a lower bound)")
+	}
+	if known {
+		a.SudoRead, a.Sudo = true, rule
 	}
 	a.Unreadable = clip(strings.Join(why, "; "), maxReasonBytes)
 	return a

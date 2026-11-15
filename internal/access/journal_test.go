@@ -155,19 +155,22 @@ func TestTrustState(t *testing.T) {
 	ca := []*eventsv1.TrustedKey{{Fingerprint: caVaultFP}}
 	for _, c := range []struct {
 		sshd    *eventsv1.Sshd
+		cfg     SSHD
 		keySeen bool
 		want    string
 	}{
-		{&eventsv1.Sshd{}, true, TrustUnknown},
-		{&eventsv1.Sshd{Read: true, TrustedUserCaKeys: ca}, true, TrustBoth},
-		{&eventsv1.Sshd{Read: true, TrustedUserCaKeys: ca}, false, TrustCertOrBoth},
-		{&eventsv1.Sshd{Read: true, TrustedUserCaKeys: ca, AuthorizedKeysFile: "none"}, false, TrustCertOnly},
-		{&eventsv1.Sshd{Read: true}, true, TrustKeyOnly},
-		{&eventsv1.Sshd{Read: true}, false, TrustKeyOnlyOrNot},
-		{&eventsv1.Sshd{Read: true, AuthorizedKeysFile: "none"}, false, TrustNone},
+		{&eventsv1.Sshd{}, SSHD{}, true, TrustUnknown},
+		{&eventsv1.Sshd{Read: true, TrustedUserCaKeys: ca}, SSHD{}, true, TrustBoth},
+		{&eventsv1.Sshd{Read: true, TrustedUserCaKeys: ca}, SSHD{}, false, TrustCertOrBoth},
+		{&eventsv1.Sshd{Read: true, TrustedUserCaKeys: ca}, SSHD{AuthorizedKeysFile: "none"}, false, TrustCertOnly},
+		{&eventsv1.Sshd{Read: true, TrustedUserCaKeys: ca}, SSHD{AuthorizedKeysFile: "none", AuthorizedKeysCommand: true}, false, TrustCertOrBoth},
+		{&eventsv1.Sshd{Read: true}, SSHD{}, true, TrustKeyOnly},
+		{&eventsv1.Sshd{Read: true}, SSHD{}, false, TrustKeyOnlyOrNot},
+		{&eventsv1.Sshd{Read: true}, SSHD{AuthorizedKeysFile: "none"}, false, TrustNone},
+		{&eventsv1.Sshd{Read: true}, SSHD{AuthorizedKeysFile: "none", AuthorizedKeysCommand: true}, false, TrustKeyOnlyOrNot},
 	} {
-		if got := TrustState(&eventsv1.HostAccess{Sshd: c.sshd}, c.keySeen); got != c.want {
-			t.Errorf("%v seen=%v: %s, want %s", c.sshd, c.keySeen, got, c.want)
+		if got := TrustState(&eventsv1.HostAccess{Sshd: c.sshd}, c.cfg, c.keySeen); got != c.want {
+			t.Errorf("%v %+v seen=%v: %s, want %s", c.sshd, c.cfg, c.keySeen, got, c.want)
 		}
 	}
 }

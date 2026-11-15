@@ -142,7 +142,7 @@ func (r *reader) logTrustLocked() {
 	if r.access == nil {
 		return
 	}
-	s := TrustState(r.access, len(r.keysSeen) > 0)
+	s := TrustState(r.access, r.sshd, len(r.keysSeen) > 0)
 	if s == r.trust {
 		return
 	}
@@ -178,12 +178,13 @@ func (r *reader) followJournal(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if lines == 0 && cursor != "" {
+			ran := time.Since(started)
+			if lines == 0 && cursor != "" && ran < journalRetryMin {
 				// A cursor journald no longer knows (the journal was rotated away or the
-				// machine id changed) fails every follow: start over a day back.
+				// machine id changed) fails every follow at once: start over a day back.
 				r.dropCursor(cursor)
 			}
-			if time.Since(started) > journalRetryMax {
+			if ran > journalRetryMax {
 				wait = journalRetryMin
 			}
 		}
@@ -246,7 +247,7 @@ func (r *reader) dropCursor(cursor string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.cursor == cursor {
-		r.cfg.Log.Warn("the journal follow ended without a record after the saved cursor; starting a day back")
+		r.cfg.Log.Warn("the journal follow ended at once without a record after the saved cursor; starting a day back")
 		r.cursor = ""
 	}
 }

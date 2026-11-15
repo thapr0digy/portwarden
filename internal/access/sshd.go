@@ -47,6 +47,12 @@ type SSHD struct {
 	PermitRootLogin string
 }
 
+// keysOff reports whether sshd takes no plain keys from any account: AuthorizedKeysFile
+// none and no AuthorizedKeysCommand.
+func (c SSHD) keysOff() bool {
+	return c.AuthorizedKeysFile == "none" && !c.AuthorizedKeysCommand
+}
+
 // ErrConfig marks a configuration sshd itself would refuse (a keyword with no argument, an
 // Include loop or too deep): the trust it implies cannot be told.
 var ErrConfig = errors.New("sshd configuration")
@@ -172,14 +178,18 @@ func (r *sshdReader) setting(key string, args []string) {
 }
 
 // sshdWords splits a configuration line as sshd does: a keyword, then arguments separated
-// by white space (or one "=" after the keyword), double quotes grouping, "#" starting a
-// comment outside quotes.
+// by white space (and at most one "=" between the keyword and the first argument), double
+// quotes grouping, "#" starting a comment outside quotes.
 func sshdWords(line string) ([]string, error) {
 	var words []string
 	var cur strings.Builder
-	inWord, quoted := false, false
+	inWord, quoted, equalsSeen := false, false, false
 	for i := 0; i < len(line); i++ {
 		c := line[i]
+		keywordEquals := c == '=' && !quoted && !equalsSeen && (len(words) == 0 || (len(words) == 1 && !inWord))
+		if keywordEquals && (inWord || len(words) == 1) {
+			equalsSeen = true
+		}
 		switch {
 		case quoted && c == '"':
 			quoted = false
@@ -189,7 +199,7 @@ func sshdWords(line string) ([]string, error) {
 			quoted, inWord = true, true
 		case c == '#' && !inWord:
 			i = len(line)
-		case c == ' ' || c == '\t' || c == '\r' || (c == '=' && len(words) == 0):
+		case c == ' ' || c == '\t' || c == '\r' || keywordEquals:
 			if inWord {
 				words = append(words, cur.String())
 				cur.Reset()

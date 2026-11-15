@@ -20,8 +20,12 @@ var fingerprintRe = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
 // IsFingerprint reports whether s is an SSH SHA-256 fingerprint.
 func IsFingerprint(s string) bool { return fingerprintRe.MatchString(s) }
 
-// maxLabelBytes is Signal's cap on a trusted key's label (TrustedKey.label).
-const maxLabelBytes = 64
+const (
+	// maxLabelBytes is Signal's cap on a trusted key's label (TrustedKey.label).
+	maxLabelBytes = 64
+	// maxCAKeys is Signal's cap on a repeated field (Sshd.trusted_user_ca_keys).
+	maxCAKeys = 256
+)
 
 // Fingerprint is the SHA-256 fingerprint of a public key line's key ("<type> <base64>"):
 // the key blob must decode and name the line's type.
@@ -64,7 +68,9 @@ func parseCAKeys(text string) []*eventsv1.TrustedKey {
 			continue
 		}
 		seen[fp] = true
-		out = append(out, &eventsv1.TrustedKey{Fingerprint: fp, Label: label(strings.Join(f[2:], " "))})
+		if out = append(out, &eventsv1.TrustedKey{Fingerprint: fp, Label: label(strings.Join(f[2:], " "))}); len(out) == maxCAKeys {
+			break
+		}
 	}
 	return out
 }

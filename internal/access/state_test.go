@@ -1,6 +1,8 @@
 package access
 
 import (
+	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -178,6 +180,15 @@ func TestFingerprint(t *testing.T) {
 	f := strings.Fields(caVault)
 	if _, err := Fingerprint("ssh-rsa", f[1]); err == nil {
 		t.Fatal("a key blob of another type must not fingerprint")
+	}
+	// Signal takes at most 256 trusted keys: a longer file is cut, never refused whole.
+	var many strings.Builder
+	for i := range 300 {
+		blob := append([]byte{0, 0, 0, 11}, "ssh-ed25519"+fmt.Sprintf("%08d", i)...)
+		many.WriteString("ssh-ed25519 " + base64.StdEncoding.EncodeToString(blob) + "\n")
+	}
+	if n := len(parseCAKeys(many.String())); n != maxCAKeys {
+		t.Fatalf("%d CA keys, want %d", n, maxCAKeys)
 	}
 	if label(strings.Repeat("é", 40)+"\x07") != strings.Repeat("é", 32) {
 		t.Fatalf("label = %q", label(strings.Repeat("é", 40)))

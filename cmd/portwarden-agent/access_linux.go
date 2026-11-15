@@ -30,8 +30,8 @@ func parseSSHAccounts(list string) ([]string, error) {
 		}
 		out = append(out, a)
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("--ssh-accounts: name at least one account")
+	if len(out) == 0 || len(out) > access.MaxAccounts {
+		return nil, fmt.Errorf("--ssh-accounts: name 1 to %d accounts", access.MaxAccounts)
 	}
 	return out, nil
 }

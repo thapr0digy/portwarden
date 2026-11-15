@@ -26,6 +26,9 @@ const (
 	maxStringBytes = 1024
 )
 
+// MaxAccounts is Signal's cap on the accounts one access state reports.
+const MaxAccounts = 64
+
 // accountRe is a POSIX user name, as Signal checks it.
 var accountRe = regexp.MustCompile(`^[a-z_][a-z0-9_.-]{0,31}$`)
 

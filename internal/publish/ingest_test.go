@@ -89,14 +89,6 @@ func eventually(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-func types(evs []*eventsv1.Event) []string {
-	out := make([]string, len(evs))
-	for i, e := range evs {
-		out[i] = e.GetType()
-	}
-	return out
-}
-
 func healthFlag(p *Publisher) string {
 	flags, _ := p.IngestCheck().Run()
 	if len(flags) == 0 {

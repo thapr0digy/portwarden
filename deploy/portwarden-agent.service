@@ -14,6 +14,10 @@ Type=simple
 # Static system user (the .deb's postinst creates it; dev/install-agent.sh in the VM):
 #   useradd --system --no-create-home --shell /usr/sbin/nologin portwarden-agent
 User=portwarden-agent
+# Reads sshd's journal for accepted sign-ins (README "Host identity facts"): journald lets
+# the systemd-journal group read the system journal. A group, not a capability: it grants
+# reading logs and nothing else.
+SupplementaryGroups=systemd-journal
 # Unsent messages are spooled here (64 MiB cap by default) and survive restarts.
 # systemd creates /var/lib/portwarden owned by User, mode 0700, and keeps it writable
 # under ProtectSystem=strict.

@@ -34,24 +34,28 @@ var ErrToolMissing = errors.New("not installed")
 // lack /usr/sbin.
 var toolDirs = []string{"/usr/sbin", "/sbin", "/usr/bin", "/bin"}
 
+// ToolPath finds a system tool the agent runs as a child. The fixed system directories
+// come first: the tool runs with the agent's capabilities and groups, so a same-named
+// binary earlier in PATH must not win. ErrToolMissing when it is not installed.
+func ToolPath(name string) (string, error) {
+	for _, dir := range toolDirs {
+		if p, e := exec.LookPath(dir + "/" + name); e == nil {
+			return p, nil
+		}
+	}
+	p, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", name, ErrToolMissing)
+	}
+	return p, nil
+}
+
 // ExecRunner runs the real tools, each bounded by a 5 s deadline and 64 MiB of output;
 // a cut-off output is an error, never a partial ruleset.
 func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	// The fixed system directories come first: the tool runs with the agent's
-	// CAP_NET_ADMIN, so a same-named binary earlier in PATH must not win.
-	path := ""
-	for _, dir := range toolDirs {
-		if p, e := exec.LookPath(dir + "/" + name); e == nil {
-			path = p
-			break
-		}
-	}
-	if path == "" {
-		p, err := exec.LookPath(name)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", name, ErrToolMissing)
-		}
-		path = p
+	path, err := ToolPath(name)
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, toolTimeout)
 	defer cancel()

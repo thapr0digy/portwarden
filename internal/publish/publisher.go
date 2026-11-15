@@ -79,7 +79,7 @@ type Config struct {
 	Ingest *IngestConfig
 }
 
-// Publisher implements agent.Sink on top of a JetStream stream.
+// Publisher implements agent.Sink on top of the spool and one transport (NATS or Signal).
 type Publisher struct {
 	hostID    string
 	runID     string

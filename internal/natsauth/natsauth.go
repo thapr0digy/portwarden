@@ -18,6 +18,8 @@
 package natsauth
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -173,30 +175,13 @@ func Mint(dir string, r Role, host string) (User, string, error) {
 	}
 	name := UserName(r, host)
 	seedPath := filepath.Join(dir, name+".nk")
-	kp, err := nkeys.CreateUser()
+	kp, err := CreateUserSeed(seedPath)
 	if err != nil {
 		return User{}, "", err
 	}
-	seed, err := kp.Seed()
-	if err != nil {
-		return User{}, "", err
-	}
+	defer kp.Wipe()
 	pub, err := kp.PublicKey()
 	if err != nil {
-		return User{}, "", err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return User{}, "", err
-	}
-	f, err := os.OpenFile(seedPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return User{}, "", fmt.Errorf("seed: %w", err)
-	}
-	if _, err := f.Write(append(seed, '\n')); err != nil {
-		f.Close()
-		return User{}, "", err
-	}
-	if err := f.Close(); err != nil {
 		return User{}, "", err
 	}
 	u := User{Name: name, Role: r, Host: host, PublicKey: pub}
@@ -208,6 +193,68 @@ func Mint(dir string, r Role, host string) (User, string, error) {
 		return User{}, "", err
 	}
 	return u, seedPath, nil
+}
+
+// CreateUserSeed creates a new nkey user and writes its seed to path (mode 0600, its
+// directory 0700 when missing). An existing file is never overwritten. The caller wipes the
+// returned key pair when done with it.
+func CreateUserSeed(path string) (nkeys.KeyPair, error) {
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		return nil, err
+	}
+	seed, err := kp.Seed() // the key pair's own buffer: kp.Wipe clears it
+	if err != nil {
+		kp.Wipe()
+		return nil, err
+	}
+	if err := writeSeed(path, seed); err != nil {
+		kp.Wipe()
+		return nil, err
+	}
+	return kp, nil
+}
+
+func writeSeed(path string, seed []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("seed: %w", err)
+	}
+	if _, err := f.Write(append(seed, '\n')); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// ReadUserKey reads an nkey user seed file (as Mint and CreateUserSeed write it) and
+// returns its Ed25519 private key: the key a host signs Signal ingest requests with, so
+// the host key natsauth minted also identifies it to Signal (signal admin ingest
+// import-nkeys registers its public half). Errors never quote the file's content.
+func ReadUserKey(path string) (ed25519.PrivateKey, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer wipe(raw)
+	prefix, seed, err := nkeys.DecodeSeed(bytes.TrimSpace(raw))
+	if err != nil {
+		return nil, fmt.Errorf("%s: not an nkey seed", path)
+	}
+	defer wipe(seed)
+	if prefix != nkeys.PrefixByteUser {
+		return nil, fmt.Errorf("%s: not an nkey user seed", path)
+	}
+	return ed25519.NewKeyFromSeed(seed), nil
+}
+
+func wipe(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }
 
 // Load reads every <name>.json in dir, sorted by name.

@@ -2,6 +2,7 @@ package natsauth
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nkeys"
 )
 
 const hostA, hostB = "aaaa1111", "bbbb2222"
@@ -245,5 +247,57 @@ func TestBadHostIDs(t *testing.T) {
 	}
 	if _, _, err := Permissions("nobody", ""); err == nil {
 		t.Error("unknown role accepted")
+	}
+}
+
+// Signal's import-nkeys registers the Ed25519 key inside the public nkey of host-<id>.json;
+// the agent signs with the key ReadUserKey takes from the seed. They must be one key.
+func TestReadUserKeyIsTheKeyOfTheMintedPublicKey(t *testing.T) {
+	dir := t.TempDir()
+	u, seedPath, err := Mint(dir, RoleHost, hostA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, err := ReadUserKey(seedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := nkeys.Decode(nkeys.PrefixByteUser, []byte(u.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ed25519.PublicKey(raw).Equal(priv.Public()) {
+		t.Fatalf("the seed's key %x is not the public key %s", priv.Public(), u.PublicKey)
+	}
+}
+
+func TestReadUserKeyRefusesOtherFilesWithoutQuotingThem(t *testing.T) {
+	dir := t.TempDir()
+	acct, err := nkeys.CreateAccount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	acctSeed, err := acct.Seed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string][]byte{
+		"account.nk": acctSeed,
+		"garbage.nk": []byte("SUSECRETLOOKINGBUTNOTASEED"),
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ReadUserKey(path)
+		if err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
+		if strings.Contains(err.Error(), string(content[:8])) {
+			t.Fatalf("%s: the error quotes the file: %v", name, err)
+		}
+	}
+	if _, err := ReadUserKey(filepath.Join(dir, "missing.nk")); err == nil {
+		t.Fatal("a missing file was accepted")
 	}
 }

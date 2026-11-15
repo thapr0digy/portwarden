@@ -1,0 +1,55 @@
+// asm.events.v1. Exposure verdicts the product's own services produce about a
+// host's listener (Portwarden's backend pwb.* messages), and operator actions.
+// Producers: principals of kind `service` (in-process: the cloud look-up, the forget
+// action) or `prober` (the outside checker, which runs off the fleet and posts over
+// the same ingest). Never accepted from an agent principal.
+syntax = "proto3";
+
+package asm.events.v1;
+
+import "asm/events/v1/common.proto";
+
+option go_package = "github.com/slidehq/signal/schema/eventsv1;eventsv1";
+
+// asm.exposure.cloud_assessed (legacy ExposureEvent with origin=cloud on
+// pwb.cloud.<host>.exposure). Subject host:<id>.
+message CloudExposureAssessment {
+  Listener listener = 1;
+  // EXPOSURE_CLOUD_OPEN with evidence ("cloud: sg-0abc (web) allows tcp/443 from
+  // 0.0.0.0/0"), or the agent's level with the reason when it stopped being open.
+  Exposure exposure = 2;
+  Exposure previous = 3;
+  // open, closed, undetermined.
+  string verdict = 4;
+  // aws, gcp, azure.
+  string provider = 5;
+  // The cloud objects that decided it (security groups, firewall rules, NSGs, LBs).
+  repeated AssetRef decided_by = 6;
+}
+
+// asm.exposure.probed (legacy ExposureConfirmation on pwb.verifier.<host>.exposure).
+// Subject host:<id> when the probe was for an agent's listener; svc:<addr>:<proto>/<port>
+// for a probe of a service no agent reports.
+message ProbeResult {
+  Listener listener = 1;
+  // confirmed, unreachable, no_response.
+  string result = 2;
+  string target = 3;     // "198.51.100.7:443", "[2001:db8::1]:53"
+  string probe = 4;      // tcp-connect, http-head, dns, ntp, snmp, memcached, udp
+  string banner = 5;     // <= 256 bytes, non-printable escaped
+  string detail = 6;
+  uint32 rtt_ms = 7;
+  string checker = 8;    // e.g. portwarden-verifier@probe-1
+  Exposure exposure = 9; // CONFIRMED with the probe as evidence, when confirmed
+  // The job that asked for it (the product's probe request id).
+  string request_id = 10;
+}
+
+// asm.host.forgotten (legacy HostForgotten on pwb.inventory.<host>.forgotten): an
+// operator removed a decommissioned host. Events of the host already in the log before
+// this one are history; its agent's next event makes it a new host.
+message HostForgotten {
+  string actor = 1;      // who forgot it
+  string reason = 2;
+  bool forced = 3;       // forgotten while not silent
+}

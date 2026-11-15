@@ -1,0 +1,175 @@
+// asm.events.v1. What tools report: scans, services seen from the network,
+// discovered assets, SBOMs, and raw tool output for server-side adapters.
+// Producers: principals of kind `scanner` (nmap, naabu, httpx, nuclei, subfinder, dnsx,
+// tlsx, ...), `importer` (a one-off upload) or `service`. Subjects are the assets the
+// event is about; a scanner principal may be limited to target scopes (CIDRs, domains).
+syntax = "proto3";
+
+package asm.events.v1;
+
+import "asm/events/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/slidehq/signal/schema/eventsv1;eventsv1";
+
+// Scope says what a scan looked at. Absence inference depends on it: a service or
+// finding NOT reported by a COMPLETE scan whose scope covered it is resolved by the
+// product (the deps collector's "only repos actually scanned count" rule, generalized).
+message Scope {
+  repeated string targets = 1;   // AssetRef keys or CIDRs/hosts as given to the tool
+  repeated string ports = 2;     // "1-1024", "443", "top-1000"
+  repeated string protocols = 3; // tcp, udp
+  // Tool-specific selectors: nuclei template ids/tags, nmap scripts, httpx probes.
+  repeated string checks = 4;
+}
+
+// asm.scan.started. Subject: "scan:<this event's id>" (the one non-asset subject form;
+// scan.started and scan.completed only). Every event the scan produces carries
+// correlationid = this event's id.
+message ScanStarted {
+  string tool = 1;          // nmap, nuclei, httpx, naabu, ...
+  string tool_version = 2;
+  Scope scope = 3;
+  // The command line with secrets masked, for reproduction.
+  repeated string argv = 4;
+  // Who or what started it: a job id from the product, a CI run URL, a person.
+  string initiator = 5;
+  // Where it ran from (source addresses matter for "reachable from where").
+  string vantage = 6;       // e.g. "probe-1 (198.51.100.20)", "internal:nyc3"
+}
+
+// asm.scan.completed. correlationid = the ScanStarted id.
+message ScanCompleted {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    COMPLETE = 1;   // the whole scope was covered: absence may be inferred
+    PARTIAL = 2;    // stopped early, rate-limited, some targets unreachable: no absence
+    FAILED = 3;
+  }
+  Status status = 1;
+  google.protobuf.Timestamp started_at = 2;
+  google.protobuf.Timestamp finished_at = 3;
+  uint64 targets_scanned = 4;
+  uint64 events_emitted = 5;  // what the producer sent for this scan (completeness check)
+  repeated string errors = 6;
+  // When PARTIAL: which part of the scope was actually covered.
+  Scope covered = 7;
+}
+
+// asm.service.observed: a network service seen from the network (nmap, naabu, httpx,
+// tlsx, the outside prober's banners). Subject: svc:<ip-or-dns>:<proto>/<port>.
+message ServiceObservation {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    OPEN = 1;
+    CLOSED = 2;
+    FILTERED = 3;
+    OPEN_FILTERED = 4;  // UDP silence
+  }
+  string address = 1;     // the IP probed
+  string hostname = 2;    // the name used, when probed by name (SNI, Host header)
+  string proto = 3;       // tcp, udp
+  uint32 port = 4;
+  State state = 5;
+  string reason = 6;      // nmap's reason: syn-ack, conn-refused, no-response
+  // Service identification.
+  string service = 7;     // http, ssh, https, dns
+  string product = 8;     // nginx, OpenSSH
+  string version = 9;     // 1.24.0, 9.6p1
+  repeated string cpe = 10;
+  string banner = 11;     // <= 1 KiB, non-printable escaped
+  TlsInfo tls = 12;
+  HttpInfo http = 13;
+  uint32 rtt_ms = 14;
+  // Bulky evidence (full response, screenshot) by reference.
+  repeated BlobRef evidence = 15;
+}
+
+message TlsInfo {
+  string version = 1;                 // tls1.3
+  string cipher = 2;
+  repeated string subject_alt_names = 3;
+  string subject_cn = 4;
+  string issuer = 5;
+  google.protobuf.Timestamp not_before = 6;
+  google.protobuf.Timestamp not_after = 7;
+  string fingerprint_sha256 = 8;
+  bool self_signed = 9;
+  bool expired = 10;
+  bool hostname_mismatch = 11;
+  string ja3s = 12;
+  // What the server offers (tlsx version and cipher enumeration): every protocol version it
+  // accepts ("tls10", "tls12", ...) and the weak or insecure cipher names among its suites.
+  repeated string versions_offered = 13;
+  repeated string weak_ciphers = 14;
+}
+
+message HttpInfo {
+  string url = 1;                 // the URL requested (no query)
+  uint32 status_code = 2;
+  string title = 3;
+  string server = 4;              // Server header
+  repeated string technologies = 5; // httpx/wappalyzer names, e.g. "Next.js:14.2"
+  string location = 6;            // redirect target
+  uint64 content_length = 7;
+  string body_sha256 = 8;
+  string favicon_mmh3 = 9;
+  repeated string cdn = 10;       // CDN/WAF detected
+}
+
+// asm.asset.discovered: an asset or a relation between assets (subfinder, dnsx, cloud
+// listings, certificate transparency, asnmap). Subject: the discovered asset's key.
+message AssetDiscovery {
+  AssetRef asset = 1;
+  // How it was found: dns_bruteforce, passive_dns, ct_log, cloud_api, zone_transfer,
+  // reverse_dns, link, manual.
+  string method = 2;
+  // Attributes as observed, e.g. {"asn": "AS14061", "org": "DigitalOcean"}.
+  map<string, string> attributes = 3;
+  repeated Relation relations = 4;
+  // False when a re-check found it gone (NXDOMAIN, resource deleted): tombstone.
+  bool present = 5;
+}
+
+message Relation {
+  // resolves_to (dns -> ip), cname (dns -> dns), hosts (ip -> svc), serves (svc -> url),
+  // presents (svc -> cert), in_network (ip -> cidr), runs_on (host -> cloud), contains
+  // (image -> pkg), routes_to (url -> svc), owned_by (* -> account/org).
+  string kind = 1;
+  AssetRef to = 2;
+}
+
+// asm.sbom.published: an SBOM for a host, container image, or repository. Subject: the
+// asset it describes. The document goes as a blob (it is routinely MiBs).
+message SbomPublished {
+  enum Format {
+    FORMAT_UNSPECIFIED = 0;
+    CYCLONEDX_JSON = 1;
+    SPDX_JSON = 2;
+  }
+  Format format = 1;
+  string spec_version = 2;  // 1.6, 2.3
+  BlobRef document = 3;
+  uint32 component_count = 4;
+  // What generated it (syft, trivy, cdxgen) and from what (image digest, lockfile set).
+  string generator = 5;
+  string source = 6;
+}
+
+// asm.tool.output: a tool's native output, verbatim, for a server-side adapter to turn
+// into typed events (FindingReport, ServiceObservation, AssetDiscovery), each pointing
+// back here through causationid. Lets any tool push without a client library, keeps
+// the evidence, and lets an improved adapter be re-run over history (replay).
+message ToolOutput {
+  string tool = 1;           // nuclei, nmap, httpx, naabu, subfinder, sarif, cyclonedx
+  string tool_version = 2;
+  // nuclei-jsonl, nmap-xml, httpx-jsonl, naabu-jsonl, subfinder-jsonl, sarif-2.1.0,
+  // cyclonedx-1.6-json, openvex-0.2.0.
+  string format = 3;
+  oneof body {
+    bytes inline = 4;        // <= 256 KiB
+    BlobRef blob = 5;
+  }
+  // The adapter version the producer wants (empty: the product's current one).
+  string adapter = 6;
+}

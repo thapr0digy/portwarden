@@ -1,0 +1,5 @@
+{"specversion":"1.0","datacontenttype":"application/json","id":"01JC8Z7A0000000000000000C1","source":"urn:asm:service:cloud-lookup","subject":"host:4f1c2a9e7b3d4c5e8f9a0b1c2d3e4f5a","type":"asm.exposure.cloud_assessed","time":"2026-11-10T14:20:40.000Z","dataschema":"asm.events.v1/CloudExposureAssessment","producer":"asm-cloud-lookup/1.0.0","causationid":"01JC8Z6X4Q00000000000000E1",
+ "data":{"listener":{"netns":4026531840,"proto":"tcp","addr":"0.0.0.0","port":6379,"key":"4026531840/tcp/0.0.0.0:6379"},
+          "exposure":{"level":"EXPOSURE_CLOUD_OPEN","evidence":["cloud: sg-0abc (web) allows tcp/6379 from 0.0.0.0/0"]},
+          "previous":{"level":"EXPOSURE_HOST_FIREWALL_OPEN","evidence":["bind:any"]},"verdict":"open","provider":"aws",
+          "decided_by":[{"kind":"CLOUD_RESOURCE","key":"cloud:aws:123456789012:us-east-1:sg-0abc"}]}}

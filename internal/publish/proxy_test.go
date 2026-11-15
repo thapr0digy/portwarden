@@ -132,7 +132,7 @@ func TestProxyRoutesStayUnderMaxPayload(t *testing.T) {
 func waitConnected(t *testing.T, p *Publisher) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for !p.nc.IsConnected() {
+	for !p.nats().nc.IsConnected() {
 		if time.Now().After(deadline) {
 			t.Fatal("not connected")
 		}

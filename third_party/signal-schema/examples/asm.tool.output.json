@@ -1,0 +1,2 @@
+{"specversion":"1.0","datacontenttype":"application/json","source":"urn:asm:scanner:edge-scan-1","id":"01JC90AAAA0000000000000T01","subject":"scan:01JC90AAAA0000000000000S01","type":"asm.tool.output","time":"2026-11-10T20:07:40.000Z","dataschema":"asm.events.v1/ToolOutput","producer":"nuclei/3.3.7","correlationid":"01JC90AAAA0000000000000S01",
+ "data":{"tool":"nuclei","tool_version":"3.3.7","format":"nuclei-jsonl","blob":{"sha256":"ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d","size":"48211","media_type":"application/x-ndjson"}}}

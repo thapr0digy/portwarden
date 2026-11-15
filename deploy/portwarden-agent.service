@@ -1,5 +1,5 @@
 [Unit]
-Description=Portwarden agent (TCP/UDP listener inventory and exposure to NATS)
+Description=Portwarden agent (TCP/UDP listener inventory and exposure to NATS or Signal)
 Documentation=https://github.com/thapr0digy/portwarden
 DefaultDependencies=no
 Before=network-pre.target shutdown.target
@@ -21,6 +21,9 @@ StateDirectory=portwarden
 StateDirectoryMode=0700
 # Site settings (NATS URL, credentials, TLS) go in PORTWARDEN_AGENT_ARGS, e.g.
 #   PORTWARDEN_AGENT_ARGS="--nats-url tls://nats.example:4222 --nats-nkey /etc/portwarden/agent/host.nk --tls-ca /etc/portwarden/nats-ca.pem"
+# or, to send to Signal's ingest door instead (README "Pushing to Signal"; enrolment keeps
+# its key id under /var/lib/portwarden/ingest):
+#   PORTWARDEN_AGENT_ARGS="--ingest-url https://100.64.0.5:8443 --ingest-pin sha256/... --ingest-key /etc/portwarden/agent/host.nk --ingest-key-id <key id>"
 EnvironmentFile=-/etc/default/portwarden-agent
 ExecStart=/usr/bin/portwarden-agent --spool-dir /var/lib/portwarden/spool $PORTWARDEN_AGENT_ARGS
 Restart=always
@@ -57,8 +60,8 @@ UMask=0077
 
 # --- Kernel interfaces. AF_NETLINK: sock_diag, rtnetlink and nf_tables (the agent and
 # nft); AF_UNIX: the systemd bus and HAProxy/Caddy admin sockets; AF_INET/AF_INET6:
-# NATS, cloud metadata and local proxy admin APIs (README "Admin interfaces"). It never
-# listens. Namespaces are only read through /proc, never entered.
+# NATS or Signal's ingest door, cloud metadata and local proxy admin APIs (README "Admin
+# interfaces"). It never listens. Namespaces are only read through /proc, never entered.
 RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes

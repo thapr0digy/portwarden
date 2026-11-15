@@ -13,20 +13,11 @@ import (
 	"github.com/thapr0digy/portwarden/internal/model"
 )
 
-// defaultMaxPayload is NATS's default max_payload, used until the server said its own.
-const defaultMaxPayload = 1 << 20
-
-// payloadBudgetLocked is how large one proxy.routes message may be: half the server's
-// max_payload, so it never meets the limit and is dropped as unpublishable.
+// payloadBudgetLocked is how large one proxy.routes message may be: half the largest
+// message the destination takes (NATS: the server's max_payload; Signal: one event), so it
+// never meets the limit and is dropped as unpublishable.
 func (p *Publisher) payloadBudgetLocked() int {
-	mp := int64(0)
-	if p.nc != nil {
-		mp = p.nc.MaxPayload()
-	}
-	if mp <= 0 {
-		mp = defaultMaxPayload
-	}
-	return int(mp / 2)
+	return int(p.tr.maxMessage() / 2)
 }
 
 // enqueueProxyRoutesLocked queues one proxy.routes event, cutting its routes (keeping

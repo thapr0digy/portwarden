@@ -105,3 +105,42 @@ func TestParseFlagsM6FixWave(t *testing.T) {
 		}
 	}
 }
+
+func TestParseFlagsIngestReplacesNATS(t *testing.T) {
+	door := []string{"--ingest-url", "https://100.64.0.5:8443", "--ingest-pin", "sha256/pin"}
+	o, err := parseFlags(door)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.ingestKey != "/var/lib/portwarden/ingest/key.nk" {
+		t.Fatalf("default key %q", o.ingestKey)
+	}
+	cfg := publisherConfig(o, "web-1")
+	if cfg.URL != "" || cfg.Ingest == nil || cfg.Ingest.KeyIDFile != "/var/lib/portwarden/ingest/keyid" ||
+		cfg.Ingest.Pin != "sha256/pin" || cfg.Ingest.Hostname != "web-1" {
+		t.Fatalf("publisher config %+v %+v", cfg, cfg.Ingest)
+	}
+	o, err = parseFlags(append(door, "--ingest-key", "/etc/portwarden/agent/host.nk", "--ingest-key-id", "ak-1", "--ingest-dir", "/srv/pw"))
+	if err != nil || o.ingestKey != "/etc/portwarden/agent/host.nk" || o.ingestKeyID != "ak-1" {
+		t.Fatalf("parsed %+v %v", o, err)
+	}
+	if cfg := publisherConfig(o, ""); cfg.Ingest.KeyIDFile != "/srv/pw/keyid" || cfg.Ingest.KeyID != "ak-1" {
+		t.Fatalf("publisher config %+v", cfg.Ingest)
+	}
+	if o, err := parseFlags(nil); err != nil || publisherConfig(o, "").Ingest != nil {
+		t.Fatalf("NATS stays the default: %v", err)
+	}
+	for _, args := range [][]string{
+		{"--ingest-url", "https://100.64.0.5:8443"},                        // no pin
+		append(door[:4:4], "--nats-url", "nats://127.0.0.1:4222"),          // both destinations
+		append(door[:4:4], "--nats-nkey", "/etc/portwarden/agent/host.nk"), // a NATS credential
+		append(door[:4:4], "--tls-ca", "/etc/portwarden/ca.pem"),
+		{"--ingest-pin", "sha256/pin"}, // ingest settings without the door
+		{"--ingest-key-id", "ak-1"},
+		{"--ingest-join-code-file", "/etc/portwarden/join"},
+	} {
+		if _, err := parseFlags(args); err == nil {
+			t.Errorf("%v accepted", args)
+		}
+	}
+}

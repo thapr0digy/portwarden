@@ -418,6 +418,10 @@ func readRecordAt(path string, off int64) (Msg, int, error) {
 		return Msg{}, 0, err
 	}
 	defer f.Close()
+	return readRecord(f, off)
+}
+
+func readRecord(f *os.File, off int64) (Msg, int, error) {
 	buf := make([]byte, headerLen)
 	if _, err := f.ReadAt(buf, off); err != nil {
 		return Msg{}, 0, errTorn
@@ -431,6 +435,68 @@ func readRecordAt(path string, off int64) (Msg, int, error) {
 		return Msg{}, 0, errTorn
 	}
 	return decodeRecord(buf)
+}
+
+// Peek returns the oldest queued messages, in order, without removing them: at most n,
+// and only as many as fit in maxBytes of Data, but always the head. It stops early at a
+// record it cannot read (Head deals with that one once it is the head). The sender pops
+// what it delivered, in order, with Pop.
+func (s *Spool) Peek(n, maxBytes int) []Msg {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	head, ok := s.headLocked()
+	if !ok || n <= 0 {
+		return nil
+	}
+	out, size := []Msg{head}, len(head.Data)
+	fits := func(m Msg) bool { return len(out) < n && size+len(m.Data) <= maxBytes }
+	if s.disk > 0 && !s.peekDisk(&out, &size, fits) {
+		return out
+	}
+	// out now holds every disk record (the head among them when disk > 0) or just the
+	// head, the tail's first message.
+	for _, m := range s.tail[len(out)-s.disk:] {
+		if !fits(m) {
+			break
+		}
+		out, size = append(out, m), size+len(m.Data)
+	}
+	return out
+}
+
+// peekDisk appends the on-disk records after the head to out while fits allows, and
+// reports whether it went through every one of them.
+func (s *Spool) peekDisk(out *[]Msg, size *int, fits func(Msg) bool) bool {
+	for i, seg := range s.segs {
+		off, count := int64(0), seg.n
+		if i == 0 {
+			off, count = s.curOff+s.headLen, seg.n-s.consumed-1
+		}
+		if count <= 0 {
+			continue
+		}
+		if !s.peekSegment(seg, off, count, out, size, fits) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Spool) peekSegment(seg segment, off int64, count int, out *[]Msg, size *int, fits func(Msg) bool) bool {
+	f, err := os.Open(s.segPath(seg.index))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	for range count {
+		m, n, err := readRecord(f, off)
+		if err != nil || !fits(m) {
+			return false
+		}
+		*out, *size = append(*out, m), *size+len(m.Data)
+		off += int64(n)
+	}
+	return true
 }
 
 // Pop removes the head only if it is still the message with the given ID; it

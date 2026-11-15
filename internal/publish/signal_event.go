@@ -42,6 +42,14 @@ func signalEvent(m spool.Msg, hostID, agentVersion string) (*eventsv1.Event, err
 	if !ok {
 		return nil, fmt.Errorf("subject %q is not this host's", m.Subject)
 	}
+	if signalOnly(m.Subject) {
+		ev, err := spooledSignalEvent(m, suffix, hostID)
+		if err != nil {
+			return nil, err
+		}
+		stampProducer(ev, hostID, agentVersion)
+		return ev, nil
+	}
 	ev := &eventsv1.Event{}
 	var env legacyEnvelope
 	var at *timestamppb.Timestamp
@@ -91,10 +99,15 @@ func signalEvent(m spool.Msg, hostID, agentVersion string) (*eventsv1.Event, err
 		return nil, fmt.Errorf("%s: the body's host, id or time does not match the message", m.Subject)
 	}
 	ev.Id, ev.Time = m.ID, at
+	ev.Sequence = &eventsv1.Sequence{RunId: env.GetRunId(), Seq: env.GetSeq(), BootId: env.GetBootId(), RunNumber: env.GetRunNumber()}
+	stampProducer(ev, hostID, agentVersion)
+	return ev, nil
+}
+
+// stampProducer sets who sends ev: this host's agent, at this version.
+func stampProducer(ev *eventsv1.Event, hostID, agentVersion string) {
 	ev.Source, ev.Subject = "urn:asm:agent:"+hostID, string(eventsv1.SchemeHost)+hostID
 	ev.Producer = &eventsv1.Producer{Name: producerName, Version: agentVersion}
-	ev.Sequence = &eventsv1.Sequence{RunId: env.GetRunId(), Seq: env.GetSeq(), BootId: env.GetBootId(), RunNumber: env.GetRunNumber()}
-	return ev, nil
 }
 
 // decode reads data as the legacy message (for its envelope fields) and as the payload.

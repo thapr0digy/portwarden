@@ -1,0 +1,8 @@
+# make schema-gen: protoc-gen-go (pinned in the Makefile, installed into ./bin) writes
+# the Go types into eventsv1/ (the module prefix is stripped from go_package).
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: .
+    opt:
+      - module=github.com/slidehq/signal/schema

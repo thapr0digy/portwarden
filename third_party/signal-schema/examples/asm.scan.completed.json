@@ -1,0 +1,2 @@
+{"specversion":"1.0","datacontenttype":"application/json","source":"urn:asm:scanner:edge-scan-1","id":"01JC90AAAA0000000000000S99","subject":"scan:01JC90AAAA0000000000000S01","type":"asm.scan.completed","time":"2026-11-10T20:07:41.000Z","dataschema":"asm.events.v1/ScanCompleted","producer":"nmap/7.95","correlationid":"01JC90AAAA0000000000000S01",
+ "data":{"status":"COMPLETE","started_at":"2026-11-10T20:00:00Z","finished_at":"2026-11-10T20:07:41Z","targets_scanned":"16","events_emitted":"23"}}

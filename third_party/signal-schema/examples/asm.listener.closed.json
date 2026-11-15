@@ -1,0 +1,4 @@
+{"specversion":"1.0","source":"urn:asm:agent:4f1c2a9e7b3d4c5e8f9a0b1c2d3e4f5a","subject":"host:4f1c2a9e7b3d4c5e8f9a0b1c2d3e4f5a","datacontenttype":"application/json","producer":"portwarden-agent/v0.9.3","runid":"01JC8Z6X4P9QK2M3N5R7T8V0WA","bootid":"6e0f9d1c-3b2a-4e8f-9c7d-5a4b3c2d1e0f","runnumber":"7","id":"01JC8Z6X4Q00000000000000M2","type":"asm.listener.closed","time":"2026-11-10T14:41:00.002Z","dataschema":"asm.events.v1/ListenerChange","sequence":"88",
+ "data":{"source":"EBPF","listener":{"netns":4026531840,"proto":"tcp","addr":"0.0.0.0","port":6379,"key":"4026531840/tcp/0.0.0.0:6379"},
+          "processes":[{"pid":20511,"uid":112,"comm":"redis-server","exe":"/usr/bin/redis-server","unit":"redis-server.service","cgroup_id":"7533"}],
+          "exposure":{"level":"EXPOSURE_HOST_FIREWALL_OPEN","evidence":["bind:any","nft: accept tcp/6379 from 0/0 (eth0, inet filter input)"]}}}

@@ -1,0 +1,235 @@
+// asm.events.v1. Types shared by several payloads.
+//
+// The listener, process, exposure and host types are Portwarden's asm.v1 messages
+// (proto/asm/v1/events.proto at 38de58c) moved here with the SAME field numbers and
+// meanings, so the agent's existing conversion code and fixtures carry over.
+syntax = "proto3";
+
+package asm.events.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/slidehq/signal/schema/eventsv1;eventsv1";
+
+// AssetRef names what an event is about or points at. `key` is the canonical string
+// (the envelope's subject uses the same form); the typed fields are its parts.
+// Key forms (lowercase scheme, no spaces, at most 1024 bytes):
+//   host:<machine-id>                 a host running an agent (32 lowercase hex)
+//   ip:<address>                      an IP address (IPv6 compressed, no zone)
+//   cidr:<prefix>                     a network
+//   dns:<fqdn>                        a DNS name, lowercase, no trailing dot
+//   url:<absolute URL>                scheme://host[:port]/path, no query or fragment
+//   svc:<ip-or-dns>:<proto>/<port>    a network service, e.g. svc:198.51.100.7:tcp/443
+//   cloud:<provider>:<account>:<region>:<resource-id>
+//   image:<registry/repo>@sha256:<hex>
+//   repo:<host>/<owner>/<name>        a source repository
+//   pkg:<purl>                        a package (Package URL)
+//   cert:sha256:<hex>                 a certificate by fingerprint
+message AssetRef {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    HOST = 1;
+    IP = 2;
+    CIDR = 3;
+    DNS = 4;
+    URL = 5;
+    SERVICE = 6;
+    CLOUD_RESOURCE = 7;
+    CONTAINER_IMAGE = 8;
+    REPOSITORY = 9;
+    PACKAGE = 10;
+    CERTIFICATE = 11;
+  }
+  Kind kind = 1;
+  string key = 2;
+}
+
+// BlobRef points at a content-addressed blob uploaded with PUT /v1/blobs/sha256:<hex>
+// before the event that cites it (large or binary payloads: SBOMs, nmap XML, HTTP
+// responses, screenshots). The server refuses an event citing a blob it does not hold.
+message BlobRef {
+  string sha256 = 1;      // lowercase hex of the uncompressed bytes
+  uint64 size = 2;        // bytes, uncompressed
+  string media_type = 3;  // e.g. application/vnd.cyclonedx+json, application/xml
+}
+
+// Severity is the producer's own rating, normalized; the product rescores.
+message Severity {
+  enum Level {
+    LEVEL_UNSPECIFIED = 0;
+    INFO = 1;
+    LOW = 2;
+    MEDIUM = 3;
+    HIGH = 4;
+    CRITICAL = 5;
+  }
+  Level level = 1;
+  // The tool's own label as it printed it ("high", "4", "Severe").
+  string native = 2;
+  // A numeric score with its system, when the tool gives one.
+  double score = 3;            // e.g. 9.8
+  string score_system = 4;     // cvss_v3.1, cvss_v4.0, epss, tool
+  string vector = 5;           // e.g. CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H
+}
+
+// ---- Portwarden's types (unchanged numbers) ----
+
+message Listener {
+  uint32 netns = 1;
+  string proto = 2;   // tcp, udp
+  string addr = 3;    // bind address, IPv4-mapped IPv6 unmapped
+  uint32 port = 4;
+  string key = 5;     // netns/proto/addr:port, e.g. 4026531840/tcp/0.0.0.0:8080
+}
+
+message Container {
+  string runtime = 1;
+  string id = 2;
+}
+
+message Process {
+  uint32 pid = 1;
+  uint32 uid = 2;
+  string comm = 3;
+  string exe = 4;
+  // Secret arguments masked by the agent before sending (Portwarden internal/redact).
+  repeated string cmdline = 5;
+  string sha256 = 6;
+  string unit = 7;
+  string socket_unit = 8;
+  Container container = 9;
+  uint64 cgroup_id = 10;
+}
+
+// ExposureLevel is the design's level plus one (0 is unset). It only rises as evidence
+// comes in: the agent sets LOCAL..HOST_FIREWALL_OPEN, the cloud look-up CLOUD_OPEN, the
+// outside prober CONFIRMED.
+enum ExposureLevel {
+  EXPOSURE_LEVEL_UNSPECIFIED = 0;
+  EXPOSURE_LOCAL = 1;
+  EXPOSURE_BOUND = 2;
+  EXPOSURE_HOST_FIREWALL_OPEN = 3;
+  EXPOSURE_CLOUD_OPEN = 4;
+  EXPOSURE_CONFIRMED = 5;
+}
+
+message Exposure {
+  ExposureLevel level = 1;
+  repeated string evidence = 2;
+}
+
+message PublicIP {
+  string ip = 1;
+  // netlink, imds, ingest-observed (the ingest server's view of the agent's source
+  // address, from IngestResponse.observed_remote_addr; replaces ingest-local).
+  string via = 2;
+  string dir = 3;    // in, out
+  string iface = 4;
+}
+
+message HostInfo {
+  repeated PublicIP public_ips = 1;
+  string cloud = 2;
+  string instance_id = 3;
+  repeated string conditions = 4;
+  string region = 5;
+  optional string firewall_fingerprint = 6;
+  string cloud_resource = 7;
+  string agent_version = 8;
+  string exe_sha256 = 9;
+  // NEW in this schema: the host's name as the host knows it (static hostname, then
+  // FQDN when it resolves locally). The product keys fleet hosts on names; machine-id
+  // alone joins to nothing else (scout how-should-portwarden-qr).
+  string hostname = 10;
+  string fqdn = 11;
+  // NEW: OS identity from /etc/os-release and the kernel release.
+  string os_id = 12;          // ubuntu
+  string os_version = 13;     // 24.04
+  string kernel = 14;         // 6.8.0-49-generic
+}
+
+message ProxyRef {
+  string proxy_id = 1;
+  string kind = 2;
+  Process proxy = 3;
+  repeated Listener frontends = 4;
+  repeated string server_names = 5;
+  string path = 6;
+  bool config = 7;
+  bool seen = 8;
+}
+
+message ListenerState {
+  Listener listener = 1;
+  repeated Process processes = 2;
+  Exposure exposure = 3;
+  repeated ProxyRef behind_proxy = 4;
+}
+
+message Proxy {
+  string id = 1;
+  string kind = 2;
+  repeated Process processes = 3;
+  repeated Listener listeners = 4;
+  string config_path = 5;
+  repeated string config_files = 6;
+  repeated string notes = 7;
+  uint32 process_count = 8;
+}
+
+message ProxyBackend {
+  string address = 1;
+  string ip = 2;
+  uint32 port = 3;
+  string unix_path = 4;
+  Listener listener = 5;
+  repeated Process processes = 6;
+  bool config = 7;
+  bool seen = 8;
+  uint64 connections = 9;
+  google.protobuf.Timestamp last_seen = 10;
+  string note = 11;
+}
+
+message ProxyRoute {
+  repeated string listen = 1;
+  repeated Listener frontends = 2;
+  repeated string server_names = 3;
+  string path = 4;
+  string kind = 5;
+  string target = 6;
+  string upstream = 7;
+  string root = 8;
+  string source = 9;
+  bool inferred = 10;
+  repeated string notes = 11;
+  repeated ProxyBackend backends = 12;
+}
+
+message ProxyState {
+  Proxy proxy = 1;
+  reserved 2;            // routes: unused since Portwarden's M4 fix wave
+  reserved "routes";
+  uint32 route_count = 3;
+  // The first 16 bytes of a SHA-256 over the route set, lowercase hex (32 chars).
+  string routes_digest = 4;
+  bool truncated = 5;
+}
+
+message TamperFlag {
+  string kind = 1;
+  string subject = 2;
+  string detail = 3;
+  google.protobuf.Timestamp since = 4;
+  string fingerprint = 5;
+  bool info = 6;
+}
+
+message TamperStatus {
+  repeated TamperFlag flags = 1;
+  google.protobuf.Timestamp checked_at = 2;
+  repeated string checks = 3;
+  repeated string unknown = 4;
+  map<string, uint64> prog_run_counts = 5;
+  uint64 ringbuf_drops = 6;
+}

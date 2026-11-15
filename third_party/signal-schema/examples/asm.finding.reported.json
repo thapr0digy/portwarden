@@ -1,0 +1,5 @@
+{"specversion":"1.0","datacontenttype":"application/json","source":"urn:asm:scanner:edge-scan-1","id":"01JC90AAAA0000000000000F01","subject":"url:https://app.example.com/.git/config","type":"asm.finding.reported","time":"2026-11-10T20:07:40.500Z","dataschema":"asm.events.v1/FindingReport","producer":"nuclei/3.3.7","adapter":"asm-adapter-nuclei/1.0.0","correlationid":"01JC90AAAA0000000000000S01","causationid":"01JC90AAAA0000000000000T01",
+ "data":{"kind":"EXPOSURE","state":"PRESENT","rule_id":"git-config","title":"Git Config File - Detect","severity":{"level":"MEDIUM","native":"medium"},"ids":["CWE-200"],"confidence":95,
+          "location":{"url":"https://app.example.com/.git/config"},
+          "evidence":{"matcher":"word","extracted":["[core]"],"curl":"curl -X GET 'https://app.example.com/.git/config' -H 'User-Agent: [scanner]'"},
+          "remediation":"Block access to /.git in the web server configuration.","references":["https://github.com/projectdiscovery/nuclei-templates/blob/main/http/exposures/configs/git-config.yaml"],"tags":["config","git","exposure"]}}

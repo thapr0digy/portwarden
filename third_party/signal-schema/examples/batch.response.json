@@ -1,0 +1,3 @@
+{"accepted":1,"duplicates":0,"rejected":[],"cursor":{"run_id":"01JC8Z6X4P9QK2M3N5R7T8V0WA","seq":"10","boot_id":"6e0f9d1c-3b2a-4e8f-9c7d-5a4b3c2d1e0f","run_number":"7"},
+ "directives":[{"kind":"RESYNC_SNAPSHOT","reason":"digest c0535e4b… unknown for this host (server holds 77af…); send a full snapshot"}],
+ "server_time":"2026-11-10T14:05:02.114Z","observed_remote_addr":"203.0.113.10"}

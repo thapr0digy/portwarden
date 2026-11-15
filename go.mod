@@ -16,6 +16,7 @@ require (
 	github.com/nats-io/nats.go v1.55.0
 	github.com/nats-io/nkeys v0.4.16
 	github.com/oklog/ulid/v2 v2.1.2
+	github.com/slidehq/signal/schema v0.0.0-00010101000000-000000000000
 	golang.org/x/sys v0.49.0
 	golang.org/x/time v0.16.0
 	google.golang.org/protobuf v1.36.12
@@ -48,3 +49,7 @@ require (
 )
 
 tool github.com/cilium/ebpf/cmd/bpf2go
+
+// Signal's event contract, pinned and vendored until Signal publishes the module
+// (dev/sync-signal-schema.sh refreshes it; README "Pushing to Signal").
+replace github.com/slidehq/signal/schema => ./third_party/signal-schema

@@ -1,0 +1,160 @@
+// asm.events.v1. What a host agent (Portwarden) reports about its own host.
+//
+// Every agent event: subject "host:<machine-id>" (the authenticated agent's own),
+// `sequence` set (run_id, seq, boot_id, run_number). The legacy per-message fields
+// event_id, host_id, run_id, seq, observed_at/at/taken_at, boot_id and run_number moved
+// to the envelope; their numbers are reserved below so a legacy body can never be
+// misread as a new one with stale meanings.
+syntax = "proto3";
+
+package asm.events.v1;
+
+import "asm/events/v1/common.proto";
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/slidehq/signal/schema/eventsv1;eventsv1";
+
+// asm.agent.started: the first event of every run (NEW). Lets the product tell a
+// restart from a silence without inferring it from the next heartbeat.
+message AgentStarted {
+  // The previous run as the agent's spool directory remembers it, and whether it
+  // left a clean-shutdown marker.
+  string previous_run_id = 1;
+  bool previous_clean = 2;
+  HostInfo host = 3;
+  // Effective settings that change what is reported (recheck, heartbeat, proxy map,
+  // tamper interval, spool cap), as "name=value" for display.
+  repeated string settings = 4;
+}
+
+// asm.agent.heartbeat (legacy Heartbeat). Liveness itself comes from the request
+// (the server's last_contact_at); this carries counters and status.
+message Heartbeat {
+  reserved 1 to 5, 8, 9, 10;
+  reserved "event_id", "host_id", "run_id", "seq", "at", "dropped_foreign_netns",
+    "boot_id", "run_number";
+  uint64 ringbuf_drops = 6;
+  uint64 queue_drops = 7;
+  TamperStatus tamper = 11;
+  optional string firewall_fingerprint = 12;
+  string agent_version = 13;
+  string exe_sha256 = 14;
+  // NEW: unsent events and bytes in the agent's spool when it built this heartbeat.
+  uint64 spool_events = 15;
+  uint64 spool_bytes = 16;
+  // NEW: the agent's estimate of (its clock - server clock) from the last response,
+  // milliseconds. A large or moving skew is itself worth a look.
+  sint64 clock_skew_ms = 17;
+  // NEW: digest of the agent's current listener state (HostSnapshot.digest), so the
+  // product can ask for a resync when its own view drifted.
+  string state_digest = 18;
+}
+
+// asm.agent.stopping (legacy HostEvent with stopping=true): the last event of a run
+// that stopped on SIGTERM/SIGINT.
+message AgentStopping {
+  string signal = 1;   // TERM, INT
+}
+
+// asm.agent.tamper (legacy TamperEvent).
+message TamperChange {
+  reserved 1 to 5, 9, 10;
+  reserved "event_id", "host_id", "run_id", "seq", "observed_at", "boot_id", "run_number";
+  TamperStatus status = 6;
+  repeated TamperFlag raised = 7;
+  repeated TamperFlag cleared = 8;
+}
+
+// asm.agent.spool_overflow (NEW): the agent dropped events it could not keep (spool
+// full). Sent as soon as there is room again, ahead of the resnapshot that repairs
+// state. The sequence gap it explains is then not a protocol error.
+message SpoolOverflow {
+  string run_id = 1;          // the run whose events were dropped
+  uint64 first_seq = 2;
+  uint64 last_seq = 3;
+  uint64 dropped = 4;
+  google.protobuf.Duration window = 5; // how long the overflow lasted
+}
+
+// asm.host.changed (legacy HostEvent without stopping).
+message HostChange {
+  reserved 1 to 5, 8, 9, 10;
+  reserved "event_id", "host_id", "run_id", "seq", "observed_at", "boot_id",
+    "run_number", "stopping";
+  HostInfo host = 6;
+  HostInfo previous = 7;
+}
+
+// asm.host.snapshot (legacy Snapshot): the host's full listener state. Sent at the start
+// of each run, every recheck (5 min) and on a RESYNC_SNAPSHOT directive.
+// NEW: digest + unchanged. A recheck whose state hashes the same as the last snapshot
+// the server acknowledged is sent with unchanged=true and no lists (~150 bytes instead of
+// tens of KiB). A run's first snapshot and a resync are always full.
+message HostSnapshot {
+  reserved 1 to 5, 9, 10;
+  reserved "event_id", "host_id", "run_id", "seq", "taken_at", "boot_id", "run_number";
+  repeated ListenerState listeners = 6;
+  HostInfo host = 7;
+  repeated ProxyState proxies = 8;
+  // Lowercase hex SHA-256 of the deterministic encoding of (listeners sorted by key,
+  // proxies sorted by id, host without public_ips[].via=ingest-observed).
+  string digest = 11;
+  bool unchanged = 12;
+  uint32 listener_count = 13;
+}
+
+// asm.listener.opened | asm.listener.closed | asm.listener.owner_changed
+// (legacy ListenerEvent; the event type carries the kind).
+message ListenerChange {
+  enum Source {
+    SOURCE_UNSPECIFIED = 0;
+    EBPF = 1;
+    BASELINE = 2;
+    RECONCILE = 3;
+  }
+  reserved 1 to 5, 6, 14, 15;
+  reserved "event_id", "host_id", "run_id", "seq", "observed_at", "kind", "boot_id",
+    "run_number";
+  Source source = 7;
+  Listener listener = 8;
+  repeated Process processes = 9;
+  // owner_changed only: the holders before the change.
+  repeated Process previous_processes = 10;
+  // At publish time (closed: the last one).
+  Exposure exposure = 11;
+  HostInfo host = 12;
+  repeated ProxyRef behind_proxy = 13;
+}
+
+// asm.exposure.changed (legacy ExposureEvent from an agent). Agent levels 0-2 only;
+// the cloud's and the prober's verdicts are their own types (exposure.proto).
+message ExposureChange {
+  reserved 1 to 5, 12, 13, 14;
+  reserved "event_id", "host_id", "run_id", "seq", "observed_at", "origin", "boot_id",
+    "run_number";
+  Listener listener = 6;
+  repeated Process processes = 7;
+  Exposure exposure = 8;
+  Exposure previous = 9;
+  // opened, listener, firewall, interfaces, recheck.
+  string trigger = 10;
+  HostInfo host = 11;
+}
+
+// asm.proxy.routes (legacy ProxyRoutes).
+message ProxyRoutes {
+  reserved 1 to 5, 13, 14;
+  reserved "event_id", "host_id", "run_id", "seq", "observed_at", "boot_id", "run_number";
+  Proxy proxy = 6;
+  repeated ProxyRoute routes = 7;
+  // started, config, listener, traffic, recheck, stopped, snapshot.
+  string trigger = 8;
+  bool removed = 9;
+  HostInfo host = 10;
+  bool truncated = 11;
+  uint32 total_routes = 12;
+  // NEW: the route-set digest (ProxyState.routes_digest). With unchanged=true and no
+  // routes, the set equals the one the server holds under this digest.
+  string routes_digest = 15;
+  bool unchanged = 16;
+}

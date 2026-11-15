@@ -100,7 +100,7 @@ func TestPeekCoversDiskThenTheMemoryTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chmod(dir, 0o700) //nolint:errcheck
-	s.segBytes = 1 // the next push needs a new segment, which fails: it goes to the tail
+	s.segBytes = 1             // the next push needs a new segment, which fails: it goes to the tail
 	s.Push(msg(3))
 	s.Push(msg(4))
 	if got := seqs(s.Peek(10, 1<<20)); got != "[1 2 3 4]" {

@@ -1,0 +1,17 @@
+# buf v2: lint and breaking-change settings for asm.events.v1 (make schema-check).
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # Payload messages keep Portwarden's legacy names and field numbers, and nested
+    # enums use short value names (HOST, OPEN, COMPLETE) that protojson spells on the
+    # wire; renaming them would change the JSON form.
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
+breaking:
+  use:
+    # Binary and JSON compatibility: field names are part of the JSON wire form.
+    - WIRE_JSON

@@ -1,0 +1,207 @@
+// asm.events.v1. The envelope of every ASM event and the ingest batch.
+//
+// Wire forms (same semantics, one Go type after decoding):
+//   - binary: Batch below, Content-Type application/x-protobuf (agents);
+//   - JSON:   CloudEvents 1.0 structured batch, Content-Type
+//             application/cloudevents-batch+json (tools, curl, CloudEvents SDKs).
+//             Each element is {"specversion":"1.0","id","source","type","subject","time",
+//             "dataschema","datacontenttype":"application/json","data":{...},
+//             extension attributes...}; "data" is the protojson form of the payload
+//             message named by "type" (see README.md, the registry).
+// The binary form is deliberately NOT the CloudEvents protobuf format (attributes map +
+// google.protobuf.Any): a typed oneof gives compile-time types, a closed registry, and
+// `buf breaking` checks over every payload. Conversion to and from CloudEvents is
+// lossless for every attribute named here.
+syntax = "proto3";
+
+package asm.events.v1;
+
+import "asm/events/v1/agent.proto";
+import "asm/events/v1/discovery.proto";
+import "asm/events/v1/exposure.proto";
+import "asm/events/v1/finding.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/slidehq/signal/schema/eventsv1;eventsv1";
+
+// Event is one thing a producer observed. Producer-set fields only: everything the
+// server knows better (who sent it, when it arrived, its log offset) is stamped at
+// ingest into StoredEvent and is never accepted from a producer.
+message Event {
+  // CloudEvents `id`. A ULID (26 chars, Crockford base32) chosen by the producer,
+  // unique per producer principal. Retries MUST reuse it. Required.
+  string id = 1;
+  // CloudEvents `type`, from the registry, e.g. "asm.listener.opened". Required; must
+  // name the payload case set below (validated).
+  string type = 2;
+  // CloudEvents `source`: the producer instance as a URI reference, e.g.
+  // "urn:asm:agent:4f1c...e2" or "urn:asm:scanner:nuclei@scan-node-1". Informational:
+  // the server derives provenance from the authenticated principal, and refuses an
+  // event whose source names another principal (a Rejection with code
+  // forbidden_subject in a 200 answer; the event is quarantined).
+  string source = 3;
+  // CloudEvents `subject`: the canonical key of the asset the event is ABOUT
+  // (AssetRef.key form, e.g. "host:4f1c...e2", "ip:198.51.100.7",
+  // "dns:api.example.com", "url:https://api.example.com/login"). Required. Agents may
+  // only use "host:<their own host id>".
+  string subject = 4;
+  // CloudEvents `time`: when the producer observed it (not when it was sent). Advisory:
+  // ordering uses `sequence`, liveness uses the server's clock.
+  google.protobuf.Timestamp time = 5;
+  // CloudEvents `dataschema`: "asm.events.v1/<PayloadMessage>", e.g.
+  // "asm.events.v1/ListenerChange". Optional in binary form (implied by the case).
+  string dataschema = 6;
+  // Which tool and version produced it.
+  Producer producer = 7;
+  // Per-producer ordering (CloudEvents extensions `runid`, `sequence`, `bootid`,
+  // `runnumber`). Required for agents; optional for tools (they dedupe on id).
+  Sequence sequence = 8;
+  // W3C trace context (CloudEvents distributed-tracing extension `traceparent`).
+  string traceparent = 9;
+  // Groups the events of one scan or one tool invocation (extension `correlationid`):
+  // a scan's ScanStarted id, so ScanCompleted can close the scope.
+  string correlationid = 10;
+  // The event this one was derived from (extension `causationid`), e.g. an adapter's
+  // FindingReport points at the ToolOutput it parsed.
+  string causationid = 11;
+
+  // Envelope growth uses 12 to 19, then 1000 and up; 20 to 999 are data cases.
+  reserved 12 to 19;
+
+  // The payload. Exactly one is set; it must match `type` (eventsv1/registry.go).
+  // Case numbers: agent 20-39, product services 40-59, tools 60-999.
+  oneof data {
+    // Host agent (Portwarden). Subject host:<own id> only.
+    AgentStarted agent_started = 20;            // asm.agent.started
+    Heartbeat heartbeat = 21;                   // asm.agent.heartbeat
+    AgentStopping agent_stopping = 22;          // asm.agent.stopping
+    TamperChange tamper_change = 23;            // asm.agent.tamper
+    SpoolOverflow spool_overflow = 24;          // asm.agent.spool_overflow
+    HostChange host_change = 25;                // asm.host.changed
+    HostSnapshot host_snapshot = 26;            // asm.host.snapshot
+    ListenerChange listener_change = 27;        // asm.listener.opened|closed|owner_changed
+    ExposureChange exposure_change = 28;        // asm.exposure.changed
+    ProxyRoutes proxy_routes = 29;              // asm.proxy.routes
+
+    // Product services (cloud look-up, outside prober, operator actions).
+    CloudExposureAssessment cloud_exposure = 40; // asm.exposure.cloud_assessed
+    ProbeResult probe_result = 41;              // asm.exposure.probed
+    HostForgotten host_forgotten = 42;          // asm.host.forgotten
+
+    // Tools (scanners, discovery, SCA/SAST, importers).
+    ScanStarted scan_started = 60;              // asm.scan.started
+    ScanCompleted scan_completed = 61;          // asm.scan.completed
+    ServiceObservation service_observed = 62;   // asm.service.observed
+    AssetDiscovery asset_discovered = 63;       // asm.asset.discovered
+    FindingReport finding_reported = 64;        // asm.finding.reported
+    SbomPublished sbom_published = 65;          // asm.sbom.published
+    ToolOutput tool_output = 66;                // asm.tool.output
+  }
+}
+
+message Producer {
+  // Tool name, lowercase: "portwarden-agent", "nuclei", "nmap", "httpx", "asmctl".
+  string name = 1;
+  // The tool's own version string, e.g. "v0.9.3", "3.3.7", "7.95".
+  string version = 2;
+  // The adapter that turned the tool's output into this event, when not the tool
+  // itself, e.g. "asm-adapter-nuclei/1.0.0".
+  string adapter = 3;
+}
+
+// Sequence orders one producer's events. A run is one start of the producer process.
+// Within a run seq starts at 1 and increases by exactly 1 per event, across all types,
+// so the server can detect a gap. Runs of one host are ordered by (boot_id, run_number),
+// never by wall-clock time (Portwarden's M5 fix wave).
+message Sequence {
+  // ULID, new at each producer start.
+  string run_id = 1;
+  // 1, 2, 3, ... within run_id. 0 = not sequenced (tools without a spool).
+  uint64 seq = 2;
+  // Kernel boot id (/proc/sys/kernel/random/boot_id) for host agents.
+  string boot_id = 3;
+  // Run counter persisted by the producer (Portwarden: run-number in the spool dir).
+  uint64 run_number = 4;
+}
+
+// Batch is the body of POST /v1/ingest/batch in binary form. Events of one sequenced
+// producer must be in seq order and contiguous within a run (a batch may span the end
+// of one run and the start of the next, spool order); a SpoolOverflow may follow the
+// gap it explains.
+message Batch {
+  repeated Event events = 1;
+  // Optional, for logs and support: a ULID the producer picks per request attempt.
+  string request_id = 2;
+}
+
+// IngestResponse is the body of a 200 (and, with only `directives`/`error` set, of
+// 4xx/5xx answers). JSON form: protojson.
+message IngestResponse {
+  // Events stored now.
+  uint32 accepted = 1;
+  // Events already stored (same principal and id, or (run_id, seq) at or below the
+  // cursor). Not an error: a retry after a lost response.
+  uint32 duplicates = 2;
+  // Events stored in the quarantine instead of the log (invalid, forbidden subject or
+  // type, too large). They still advance the cursor: the producer MUST NOT resend them.
+  repeated Rejection rejected = 3;
+  // The server's cursor for the producer's newest run after this batch.
+  Sequence cursor = 4;
+  // What the producer should do next.
+  repeated Directive directives = 5;
+  // The server's clock when it answered (also the HTTP Date header, at 1 s precision).
+  google.protobuf.Timestamp server_time = 6;
+  // The address the request came from as the server saw it: a public-IP candidate
+  // ("via=ingest-observed") that needs no third-party what's-my-IP service.
+  string observed_remote_addr = 7;
+  // Set on non-200 answers: a stable code ("rate_limited", "bad_signature", ...) and a
+  // human sentence. Never echoes request content.
+  ErrorInfo error = 8;
+}
+
+message Rejection {
+  uint32 index = 1;   // position in the batch
+  string id = 2;      // the event id, when readable
+  string code = 3;    // invalid_payload, type_mismatch, forbidden_subject,
+                      // forbidden_type, too_large, unknown_type, bad_time
+  string reason = 4;  // e.g. "data.listener.port: 70000 > 65535"
+}
+
+message Directive {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    // Send a full asm.host.snapshot as the next event (gap the server cannot cover,
+    // unknown digest in a snapshot marked unchanged, host forgotten then back).
+    RESYNC_SNAPSHOT = 1;
+    // Send full route sets for every proxy (proxy digest unknown to the server).
+    RESYNC_PROXIES = 2;
+    // Wait at least `after` before the next request (also Retry-After on 429/503).
+    BACKOFF = 3;
+    // Use at most `max_events` per batch / `max_bytes` per body from now on.
+    LIMITS = 4;
+    // This principal is disabled: stop sending and alert locally (403 also carries it).
+    STOP = 5;
+  }
+  Kind kind = 1;
+  google.protobuf.Timestamp after = 2;
+  uint32 max_events = 3;
+  uint32 max_bytes = 4;
+  string reason = 5;
+}
+
+message ErrorInfo {
+  string code = 1;
+  string message = 2;
+}
+
+// StoredEvent is the server's record in the event log (not accepted on the wire).
+// Shown here so processors, replay and exports share one definition.
+message StoredEvent {
+  uint64 offset = 1;                            // log position, commit-ordered
+  Event event = 2;
+  string principal_id = 3;                      // who sent it (authenticated)
+  string principal_kind = 4;                    // agent, scanner, service, bridge
+  google.protobuf.Timestamp received_at = 5;    // server clock
+  string batch_id = 6;                          // the request it came in
+  string via = 7;                               // "https", "bridge:nats", "internal"
+}

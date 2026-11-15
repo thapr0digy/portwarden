@@ -1,0 +1,3 @@
+{"specversion":"1.0","datacontenttype":"application/json","source":"urn:asm:scanner:edge-scan-1","id":"01JC90BBBB0000000000000D01","subject":"dns:staging-app.example.com","type":"asm.asset.discovered","time":"2026-11-10T19:55:00.000Z","dataschema":"asm.events.v1/AssetDiscovery","producer":"subfinder/2.6.7",
+ "data":{"asset":{"kind":"DNS","key":"dns:staging-app.example.com"},"method":"ct_log","attributes":{"source":"crtsh"},
+          "relations":[{"kind":"resolves_to","to":{"kind":"IP","key":"ip:203.0.113.11"}},{"kind":"cname","to":{"kind":"DNS","key":"dns:lb-1.cdn.example.com"}}],"present":true}}

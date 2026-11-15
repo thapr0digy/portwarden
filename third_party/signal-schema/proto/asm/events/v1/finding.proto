@@ -1,0 +1,71 @@
+// asm.events.v1. A vulnerability or misconfiguration a tool reports about an
+// asset: nuclei, Nessus, the deps collector, SAST (through the SARIF adapter), a cloud
+// posture check. The product scores it; the tool's severity is an input, not the verdict.
+syntax = "proto3";
+
+package asm.events.v1;
+
+import "asm/events/v1/common.proto";
+
+option go_package = "github.com/slidehq/signal/schema/eventsv1;eventsv1";
+
+// asm.finding.reported. Subject: the asset the finding is on (svc:..., url:..., host:...,
+// repo:..., image:...). One event per (rule, location) per observation; re-reporting is
+// expected and cheap (the product folds re-observations).
+message FindingReport {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    VULNERABILITY = 1;    // a known flaw (CVE/GHSA/OSV id) in deployed software
+    MISCONFIGURATION = 2; // exposed panel, default credentials, weak TLS, open bucket
+    EXPOSURE = 3;         // sensitive data or endpoint reachable (.git, backups, debug)
+    MALWARE = 4;          // known-malicious package or file
+    CODE = 5;             // static analysis (SARIF)
+    INFORMATIONAL = 6;    // technology or version detected, no flaw claimed
+  }
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    PRESENT = 1;  // observed now
+    ABSENT = 2;   // explicitly re-checked and gone (a tool that verifies a fix)
+  }
+  Kind kind = 1;
+  State state = 2;
+  // The tool's rule: nuclei template id, Nessus plugin id, semgrep rule, OSV id.
+  string rule_id = 3;
+  string rule_version = 4;   // template hash or plugin version, when known
+  string title = 5;
+  string description = 6;    // <= 8 KiB
+  Severity severity = 7;
+  // CVE-..., GHSA-..., OSV/MAL-..., CWE-... identifiers; the product looks up KEV and
+  // EPSS itself at triage time.
+  repeated string ids = 8;
+  // 0-100: how sure the tool is (nuclei matchers are near-certain; version-only checks
+  // are not). 0 = unknown.
+  uint32 confidence = 9;
+  // Where exactly: the matched URL, the package and version, file:line.
+  Location location = 10;
+  // What proves it: matcher name, extracted values, request/response (as blobs).
+  Evidence evidence = 11;
+  // Fix guidance from the tool: upgrade target, config change.
+  string remediation = 12;
+  repeated string references = 13;  // URLs
+  repeated string tags = 14;
+}
+
+message Location {
+  string url = 1;            // matched-at for web findings
+  string address = 2;        // ip:port for network findings
+  string package_purl = 3;   // pkg:golang/golang.org/x/net@v0.17.0
+  string fixed_version = 4;  // the smallest fixed version above the installed one
+  string file = 5;           // path for code/config findings
+  uint32 line = 6;
+  string component = 7;      // free-form: plugin output section, cloud resource attribute
+}
+
+message Evidence {
+  string matcher = 1;                 // nuclei matcher-name, Nessus plugin output head
+  repeated string extracted = 2;      // extracted-results, <= 32 items, <= 512 B each
+  BlobRef request = 3;
+  BlobRef response = 4;
+  string curl = 5;                    // reproduction, secrets masked
+  string output = 6;                  // short tool output, <= 4 KiB
+}

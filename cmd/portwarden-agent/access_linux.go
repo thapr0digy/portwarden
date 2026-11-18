@@ -75,11 +75,42 @@ func hostAccessConfig(opts options) (*access.Config, error) {
 
 // hostPackagesConfig is the package list reader's configuration (README "Host packages"),
 // or nil when it does not run: --host-packages off, no Signal door (the list exists only
-// in Signal's schema), or in a container (a private cgroup namespace), whose dpkg
-// database is the image's, not the host's.
+// in Signal's schema), or in a container (any "/" checkHostRoot cannot show is the
+// host's), whose dpkg database is the image's, not the host's.
 func hostPackagesConfig(opts options, inContainer bool) *dpkg.Config {
 	if opts.hostPackages == "off" || opts.ingestURL == "" || inContainer {
 		return nil
 	}
 	return &dpkg.Config{Root: os.DirFS("/"), Poll: dpkg.DefaultPoll, Settle: dpkg.DefaultSettle, Recheck: dpkg.DefaultRecheck}
+}
+
+// initPIDNamespace is how /proc names the host's PID namespace: the kernel's fixed inode
+// for the initial one (PROC_PID_INIT_INO).
+const initPIDNamespace = "pid:[4026531836]"
+
+// checkHostRoot returns nil when root is the host's root directory, or why it cannot tell:
+// the agent must share the host's PID namespace (so procRoot's 1 is the host's init) and
+// root must be init's root directory, the same device and inode (the unit's own mount
+// namespace binds the same "/"; a container's is the image's). Reading init's root needs
+// CAP_SYS_PTRACE, which the agent holds. Any read that fails is a reason, never a pass.
+func checkHostRoot(procRoot, root string) error {
+	pidNS, err := os.Readlink(filepath.Join(procRoot, "self", "ns", "pid"))
+	if err != nil {
+		return fmt.Errorf("PID namespace: %w", err)
+	}
+	if pidNS != initPIDNamespace {
+		return fmt.Errorf("PID namespace %s is not the host's", pidNS)
+	}
+	initRoot, err := os.Stat(filepath.Join(procRoot, "1", "root") + "/")
+	if err != nil {
+		return fmt.Errorf("init's root: %w", err)
+	}
+	ownRoot, err := os.Stat(root)
+	if err != nil {
+		return fmt.Errorf("own root: %w", err)
+	}
+	if !os.SameFile(initRoot, ownRoot) {
+		return fmt.Errorf("%s is not init's root directory", root)
+	}
+	return nil
 }

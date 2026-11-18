@@ -18,7 +18,7 @@ func TestReadSSHDDefaults(t *testing.T) {
 
 // Assumption: sshd's rules are first value wins, keywords in any case, "=" or spaces (and
 // "Keyword = value", one "=" skipped as OpenSSH's strdelim does), quoted arguments, Include
-// in place in glob order, Match blocks not global.
+// in place in glob order, Match blocks not global for the trust settings.
 func TestReadSSHDFollowsSSHDsRules(t *testing.T) {
 	h := fsOf(map[string]string{
 		"etc/ssh/sshd_config": `authorizedKeysFile=".ssh/authorized_keys" .ssh/keys2
@@ -34,7 +34,7 @@ PasswordAuthentication	=	no
 TrustedUserCAKeys /etc/ssh/late_ca
 `,
 		"etc/ssh/conf.d/20-b.conf": "TRUSTEDUSERCAKEYS /etc/ssh/b_ca\nPermitRootLogin Without-Password\n",
-		"etc/ssh/conf.d/10-a.conf": "TrustedUserCAKeys \"/etc/ssh/a ca\"\nMatch User x\nPermitRootLogin yes\n",
+		"etc/ssh/conf.d/10-a.conf": "TrustedUserCAKeys \"/etc/ssh/a ca\"\nMatch User x\nPermitRootLogin no\n",
 	})
 	cfg, err := ReadSSHD(h, SSHDConfig)
 	if err != nil {
@@ -45,6 +45,44 @@ TrustedUserCAKeys /etc/ssh/late_ca
 		PasswordAuthentication: "no", PermitRootLogin: "prohibit-password"}
 	if cfg != want {
 		t.Fatalf("cfg = %+v\nwant  %+v", cfg, want)
+	}
+}
+
+// Assumption: sshd applies a Match block's PasswordAuthentication and PermitRootLogin to the
+// connections it matches (sshd_config(5)), an Include inside one in its scope, so a block
+// re-enabling passwords or root login for anyone makes the host's worst case the permissive
+// value; one that only tightens them changes nothing. Oracle: sshd_config(5)'s orders, no
+// for PasswordAuthentication below yes, PermitRootLogin's no < forced-commands-only <
+// prohibit-password < yes.
+func TestReadSSHDReportsTheMostPermissiveMatchValue(t *testing.T) {
+	for name, tc := range map[string]struct {
+		files               map[string]string
+		password, rootLogin string
+	}{
+		"global only": {map[string]string{"etc/ssh/sshd_config": "PasswordAuthentication no\nPermitRootLogin no\n"}, "no", "no"},
+		"match re-enables both": {map[string]string{"etc/ssh/sshd_config": `PasswordAuthentication no
+PermitRootLogin no
+Match Address 0.0.0.0/0
+  PasswordAuthentication yes
+Match User root
+  PermitRootLogin yes
+`}, "yes", "yes"},
+		"match before the global line": {map[string]string{"etc/ssh/sshd_config": "Match User root\n  PermitRootLogin forced-commands-only\nMatch all\nPermitRootLogin no\n"}, "yes", "forced-commands-only"},
+		"match only tightens":          {map[string]string{"etc/ssh/sshd_config": "Match User backup\n  PasswordAuthentication no\n  PermitRootLogin no\n"}, "yes", "prohibit-password"},
+		"old name in a match":          {map[string]string{"etc/ssh/sshd_config": "PermitRootLogin no\nMatch Group admins\n  PermitRootLogin without-password\n"}, "yes", "prohibit-password"},
+		"include inside a match": {map[string]string{
+			"etc/ssh/sshd_config": "PasswordAuthentication no\nMatch User deploy\n  Include /etc/ssh/deploy.conf\n",
+			"etc/ssh/deploy.conf": "PasswordAuthentication yes\nTrustedUserCAKeys /etc/ssh/deploy_ca\n",
+		}, "yes", "prohibit-password"},
+	} {
+		cfg, err := ReadSSHD(fsOf(tc.files), SSHDConfig)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if cfg.PasswordAuthentication != tc.password || cfg.PermitRootLogin != tc.rootLogin || cfg.TrustedUserCAKeys != "" {
+			t.Errorf("%s: %+v, want PasswordAuthentication %s, PermitRootLogin %s, no CA", name, cfg, tc.password, tc.rootLogin)
+		}
 	}
 }
 
@@ -75,6 +113,8 @@ func TestReadSSHDRefusesAnUnknownSettingValue(t *testing.T) {
 		"PasswordAuthentication without-password\n",
 		"PermitRootLogin true\n",
 		"PermitRootLogin no\nPermitRootLogin sometimes\n",
+		"Match User root\n  PermitRootLogin always\n",
+		"Match Address 10.0.0.0/8\n  PasswordAuthentication maybe\n",
 	} {
 		if _, err := ReadSSHD(fsOf(map[string]string{"etc/ssh/sshd_config": conf}), SSHDConfig); !errors.Is(err, ErrConfig) {
 			t.Errorf("%q: err = %v, want ErrConfig", conf, err)
@@ -102,10 +142,11 @@ func TestSSHDWordsSkipOneEquals(t *testing.T) {
 
 func TestReadSSHDRefusesWhatSSHDRefuses(t *testing.T) {
 	for name, files := range map[string]map[string]string{
-		"no argument":   {"etc/ssh/sshd_config": "TrustedUserCAKeys\n"},
-		"open quote":    {"etc/ssh/sshd_config": "TrustedUserCAKeys \"/x\n"},
-		"include loop":  {"etc/ssh/sshd_config": "Include /etc/ssh/a\n", "etc/ssh/a": "Include /etc/ssh/sshd_config\n"},
-		"include depth": {"etc/ssh/sshd_config": "Include /etc/ssh/sshd_config\n"},
+		"no argument":            {"etc/ssh/sshd_config": "TrustedUserCAKeys\n"},
+		"no argument in a match": {"etc/ssh/sshd_config": "Match User x\n  PermitRootLogin\n"},
+		"open quote":             {"etc/ssh/sshd_config": "TrustedUserCAKeys \"/x\n"},
+		"include loop":           {"etc/ssh/sshd_config": "Include /etc/ssh/a\n", "etc/ssh/a": "Include /etc/ssh/sshd_config\n"},
+		"include depth":          {"etc/ssh/sshd_config": "Include /etc/ssh/sshd_config\n"},
 	} {
 		if _, err := ReadSSHD(fsOf(files), SSHDConfig); !errors.Is(err, ErrConfig) {
 			t.Errorf("%s: err = %v, want ErrConfig", name, err)

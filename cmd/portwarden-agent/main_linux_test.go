@@ -227,3 +227,38 @@ func TestHostPackagesConfig(t *testing.T) {
 		t.Fatalf("--host-packages on: %v", err)
 	}
 }
+
+// Assumption: the kernel names the initial PID namespace pid:[4026531836] (PROC_PID_INIT_INO),
+// and a container's "/" is not the host init's root directory. "/" counts as the host's only
+// when both are shown; a read that fails, as without CAP_SYS_PTRACE or /proc, fails closed.
+func TestCheckHostRootFailsClosed(t *testing.T) {
+	fakeProc := func(pidNS, initRoot string) string {
+		proc := t.TempDir()
+		for dir, link := range map[string]string{"self/ns/pid": pidNS, "1/root": initRoot} {
+			if link == "" {
+				continue
+			}
+			if err := os.MkdirAll(filepath.Join(proc, filepath.Dir(dir)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(link, filepath.Join(proc, dir)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return proc
+	}
+	hostRoot, imageRoot := t.TempDir(), t.TempDir()
+	if err := checkHostRoot(fakeProc(initPIDNamespace, hostRoot), hostRoot); err != nil {
+		t.Fatalf("the host's root: %v", err)
+	}
+	for name, proc := range map[string]string{
+		"no /proc":               t.TempDir(),
+		"own PID namespace":      fakeProc("pid:[4026532300]", hostRoot),
+		"init's root unreadable": fakeProc(initPIDNamespace, ""),
+		"an image's root":        fakeProc(initPIDNamespace, imageRoot),
+	} {
+		if err := checkHostRoot(proc, hostRoot); err == nil {
+			t.Errorf("%s: / taken as the host's", name)
+		}
+	}
+}

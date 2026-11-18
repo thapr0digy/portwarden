@@ -174,13 +174,15 @@ type Sshd struct {
 	AuthorizedPrincipalsFile string `protobuf:"bytes,5,opt,name=authorized_principals_file,json=authorizedPrincipalsFile,proto3" json:"authorized_principals_file,omitempty"`
 	// True when an AuthorizedPrincipalsCommand is set (the jump host's).
 	AuthorizedPrincipalsCommand bool `protobuf:"varint,6,opt,name=authorized_principals_command,json=authorizedPrincipalsCommand,proto3" json:"authorized_principals_command,omitempty"`
-	// PasswordAuthentication as sshd applies it outside Match blocks, Includes followed: "yes"
-	// or "no" (sshd's own default, "yes", when no file sets it). "" when read is false, or from
-	// an agent older than the field: "cannot tell", never a default.
+	// PasswordAuthentication, the most permissive value sshd applies to any connection (global,
+	// or any Match block), Includes followed: "yes" or "no" (sshd's own default, "yes", when no
+	// file sets it globally). "" when read is false, or from an agent older than the field:
+	// "cannot tell", never a default.
 	PasswordAuthentication string `protobuf:"bytes,7,opt,name=password_authentication,json=passwordAuthentication,proto3" json:"password_authentication,omitempty"`
-	// PermitRootLogin likewise: "yes", "prohibit-password" (also when written as its old name
-	// without-password), "forced-commands-only" or "no" (sshd's default "prohibit-password").
-	// "" when read is false or from an older agent.
+	// PermitRootLogin, the most permissive value sshd applies to any connection (global, or any
+	// Match block), from least to most: "no", "forced-commands-only", "prohibit-password" (also
+	// when written as its old name without-password), "yes" (sshd's default
+	// "prohibit-password"). "" when read is false or from an older agent.
 	PermitRootLogin string `protobuf:"bytes,8,opt,name=permit_root_login,json=permitRootLogin,proto3" json:"permit_root_login,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache

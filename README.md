@@ -216,6 +216,7 @@ Fixtures (`internal/proxy/*/testdata`, recorded on Ubuntu 24.04 with nginx 1.24.
 | `--ssh-access` | `auto` | `auto` reports the host's SSH trust and accepted sign-ins to Signal when `--ingest-url` is set (see "Host identity facts"); `off` never reads them. Ignored without `--ingest-url` |
 | `--ssh-accounts` | `pants,root` | comma-separated local accounts whose principals and sudo presence are reported; an account the host does not have is left out; a name that is not a POSIX user name is a startup error |
 | `--shared-keys` | | the reviewed list of shared SSH keys, one `<name> SHA256:<fingerprint>` per line (`#` comments): the only plain-key fingerprints sent to Signal. Read at start; a line of any other shape (a key, private material) is a startup error that never echoes the line |
+| `--host-packages` | `auto` | `auto` reports the host's installed dpkg packages and its distribution to Signal when `--ingest-url` is set (see "Host packages"); `off` never reads them. Ignored without `--ingest-url` |
 | `--tamper-files` | | comma-separated absolute paths of extra files whose change is a tamper signal (`file_changed`), e.g. the NATS credentials; a missing one is a startup error |
 | `--version` | | prints the version stamped by `make dist` (`dev` otherwise) and exits; every Portwarden command has it |
 
@@ -357,8 +358,9 @@ PORTWARDEN_AGENT_ARGS="--ingest-url https://100.64.0.5:8443 --ingest-pin sha256/
 | `proxy.routes` | `asm.proxy.routes` | `ProxyRoutes` |
 | `host.access` (spooled as a Signal event) | `asm.host.access` | `HostAccess` (full, or `unchanged` + digest) |
 | `host.sign_ins` (spooled as a Signal event) | `asm.host.sign_ins` | `SignInSummary` |
+| `host.packages` (spooled as a Signal event) | `asm.host.packages` | `HostPackages` (full, or `unchanged` + digest) |
 
-The last two exist only in Signal's schema (see "Host identity facts"): they are spooled already as Signal events, and a NATS run that finds them in the spool drops them unpublished (a host's NATS user may not publish them, and a denied publish stops the agent).
+The last three exist only in Signal's schema (see "Host identity facts" and "Host packages"): they are spooled already as Signal events, and a NATS run that finds them in the spool drops them unpublished (a host's NATS user may not publish them, and a denied publish stops the agent).
 
 Each event's envelope: `id` = the event id, `time` = when it was observed, `subject` = `host:<machine id>`, `source` = `urn:asm:agent:<machine id>`, `producer` = `portwarden-agent/<version>`, `sequence` = run id, seq, boot id and run number (Signal's run cursor; one seq per run across all types, as on NATS). Signal's payloads are asm.v1's messages with the same field numbers (`TestSignalPayloadsKeepAsmV1FieldNumbers` fails if that stops being true), so the spooled bytes decode as the payload directly; command lines are masked by the agent first ("Command-line redaction") and Signal redacts every text again.
 
@@ -376,7 +378,7 @@ Each event's envelope: `id` = the event id, `time` = when it was observed, `subj
 
 | Directive | The agent |
 | --- | --- |
-| `RESYNC_SNAPSHOT`, `RESYNC_PROXIES` | queues a full snapshot (which carries every proxy's route set after it) and the full SSH access state |
+| `RESYNC_SNAPSHOT`, `RESYNC_PROXIES` | queues a full snapshot (which carries every proxy's route set after it), the full SSH access state and the full package list |
 | `BACKOFF` | sends nothing until `after` (at most 1 h ahead) |
 | `LIMITS` | sends at most `max_events` events and `max_bytes` bytes per batch from then on (never more than its own limits) |
 | `STOP` | as for `403` |
@@ -385,7 +387,7 @@ An answer can only slow the agent, make its batches smaller, stop it sending or 
 
 **Not sent yet:** `asm.agent.started`, `asm.agent.spool_overflow` (a gap from an overflow is answered by the resnapshot that follows it, as on NATS), heartbeats' `spool_events`, `spool_bytes`, `clock_skew_ms` and `state_digest`, and `unchanged` snapshots and route sets. The backend's own publishers (cloud verdicts, probe results, forgotten hosts) stay on NATS: in a deployment whose agents push to Signal they have no agent events to work from, and Signal's door cannot register the "service" sender cloud verdicts need yet.
 
-**The schema dependency.** The contract is Signal's Go module `github.com/slidehq/signal/schema`, which has no public home yet. `third_party/signal-schema` is a pinned copy of it (the commit is in its `UPSTREAM` file), and `go.mod` points the module there with a `replace`, so every build (`make test`, `make dist`, CI) is reproducible and needs no access to Signal. `dev/sync-signal-schema.sh [<signal checkout>]` refreshes it from a local checkout's committed `schema/`; review the diff like any dependency bump. When Signal tags the module, the copy and the `replace` go and `go.mod` requires the tag. Tests use the module's own reference server (`schema/ingesttest`, the door's decision code without a database) behind pinned TLS (`internal/ingest/doortest`): `TestE2EListenerOpenedOnTheAgentIsStoredBySignal` runs the agent loop, opens a listener and finds `asm.listener.opened` stored by it, in one run with seqs 1..n, nothing quarantined and no gap.
+**The schema dependency.** The contract is Signal's Go module `github.com/slidehq/signal/schema`, which has no public home yet. `third_party/signal-schema` is a pinned copy of it (the commit is in its `UPSTREAM` file), and `go.mod` points the module there with a `replace`, so every build (`make test`, `make dist`, CI) is reproducible and needs no access to Signal. `dev/sync-signal-schema.sh [<signal checkout>]` refreshes it from a local checkout's committed `schema/`; review the diff like any dependency bump. A field Portwarden needs before Signal has it is a local patch on the copy, named in `UPSTREAM` and dropped by the next sync that brings Signal's (today: `Sshd.password_authentication` and `permit_root_login`, fields 7 and 8). When Signal tags the module, the copy and the `replace` go and `go.mod` requires the tag. Tests use the module's own reference server (`schema/ingesttest`, the door's decision code without a database) behind pinned TLS (`internal/ingest/doortest`): `TestE2EListenerOpenedOnTheAgentIsStoredBySignal` runs the agent loop, opens a listener and finds `asm.listener.opened` stored by it, in one run with seqs 1..n, nothing quarantined and no gap.
 
 ## Host identity facts (`asm.host.access`, `asm.host.sign_ins`)
 
@@ -393,7 +395,7 @@ With `--ingest-url` (and `--ssh-access auto`, the default) the agent also tells 
 
 **`asm.host.access`, the access state.** Read from files, never by running sshd:
 
-- sshd's global settings from `/etc/ssh/sshd_config` and its `Include`s (globs, relative to `/etc/ssh`, in place; first value wins; keywords in any case): `TrustedUserCAKeys` (each CA key by its SHA-256 fingerprint, its comment as the label, cut to 64 bytes), `AuthorizedKeysFile`, `AuthorizedPrincipalsFile` and whether an `AuthorizedPrincipalsCommand` is set. Settings inside a `Match` block are not global and are left out. A configuration sshd would refuse (a keyword with no argument, an `Include` loop or more than 16 deep), or one the agent cannot read, is sent as `read=false` with why: never as "trusts nothing".
+- sshd's global settings from `/etc/ssh/sshd_config` and its `Include`s (globs, relative to `/etc/ssh`, in place; first value wins; keywords in any case): `TrustedUserCAKeys` (each CA key by its SHA-256 fingerprint, its comment as the label, cut to 64 bytes), `AuthorizedKeysFile`, `AuthorizedPrincipalsFile`, whether an `AuthorizedPrincipalsCommand` is set, and `PasswordAuthentication` (`yes` or `no`) and `PermitRootLogin` (`yes`, `prohibit-password`, `forced-commands-only` or `no`; its old name `without-password` is sent as `prohibit-password`), each with sshd's own default (`yes`, `prohibit-password`) when no file sets it, as on Ubuntu's stock configuration where both lines are commented out. Settings inside a `Match` block are not global and are left out. A configuration sshd would refuse (a keyword with no argument, an `Include` loop or more than 16 deep, a value of the two settings sshd does not take), or one the agent cannot read, is sent as `read=false` with why and both settings `""`: never as "trusts nothing" or a guessed default.
 - For each `--ssh-accounts` account the host has (`/etc/passwd`): the principals file (`%u`, `%h`, `%U`, `%%` expanded; at most 256 principals; no file at the path is a known empty list) and its sudo rule by presence only: `present`, `nopasswd`, `all_commands`, from `/etc/sudoers` and what it includes (`@includedir`, `#include`, …; `User_Alias`, `%group`, `#uid` resolved). `/etc/sudoers` itself is mode 0440 root on Debian and Ubuntu, so the agent reads `/etc/sudoers.d` directly, whose files Ansible writes 0644: a rule found there is reported (a user list is read as sudo reads it: the last matching item decides, so `ALL, !alice` does not name alice, and a negated alias or `%group` defined in a file the agent could not read leaves presence unknown); while a file was unreadable, `nopasswd` and `all_commands` of a rule found are a lower bound and `unreadable` says so, and no rule found is `sudo_read=false` with why, never "no sudo".
 - `authorized_keys` is never read (it needs a privilege the agent does not hold): `static_keys_read=false` with why, except when `AuthorizedKeysFile none` and no `AuthorizedKeysCommand` turn keys off for everyone.
 
@@ -405,11 +407,27 @@ Bounds: one journal record is at most 64 KiB (a longer one is skipped whole), on
 
 When the journal cannot be read (the agent is not in `systemd-journal`, `adm` or `wheel`, `journalctl` is missing or exits) the summary says `journal_unreadable` with why, so Signal reads "cannot tell", never "nobody"; the agent retries with a backoff from 5 s to 5 min.
 
-**Never sent:** a public or private key, `authorized_keys` content, a sudo rule's text, a command line, a password, a journal line. Failed sign-ins and sudo use are not reported (Signal's schema has no place for them), nor are `PasswordAuthentication` and `PermitRootLogin`.
+**Never sent:** a public or private key, `authorized_keys` content, a sudo rule's text, a command line, a password, a journal line. Failed sign-ins and sudo use are not reported (Signal's schema has no place for them).
 
 **Trust state.** The agent logs the host's trust state when it changes (`ssh trust state`, with the number of trusted CAs, the shared keys seen signing in, `PasswordAuthentication` and `PermitRootLogin`): `cert-only` (a CA trusted, keys off: `AuthorizedKeysFile none` and no `AuthorizedKeysCommand`), `both` (a CA trusted and a plain key seen signing in), `key-only`, `none`, or, while no plain key has been seen and keys are not off, `cert-only or both` / `key-only or none` (without reading `authorized_keys` a key nobody used cannot be seen). Signal derives its own `ssh_state` from the same parts.
 
 **Limits:** in a container (the DaemonSet, which does not carry the ingest flags yet) the agent sees the image's `/etc` and no host journal: sshd's configuration and the journal read as unreadable, never as the host's. Per-connection socket units (`sshd@….service`, `Accept=yes`) are not followed. The shared-key list is read at start; restart the agent after changing it.
+
+## Host packages (`asm.host.packages`)
+
+With `--ingest-url` (and `--host-packages auto`, the default) the agent tells Signal which OS packages the host has installed and which distribution it runs, so Signal can match them against advisories on hosts it has no other view of (appsec-signal `docs/notes/software-inventory.md`, "Host packages"). It runs inside the agent and needs no new capability: `/var/lib/dpkg/status` and `/etc/os-release` are world-readable. The code is `internal/dpkg`.
+
+**What is sent.** The list `dpkg-query -W -f '${Package} ${Version} ${source:Package} ${source:Version} ${Architecture}'` would print for the installed packages, read from dpkg's status file directly (what dpkg-query reads; nothing is run): a package is installed when its `Status` state is `installed`, whatever its selection (a held package or one marked for removal is still on disk; `config-files`, `unpacked` and `half-installed` are not). The source package and version come from the `Source` field (`name` or `name (version)`, the binary's own when absent): Ubuntu and Debian file advisories under the source package. With it, the distribution's `ID`, `VERSION_ID` and `VERSION_CODENAME` from `/etc/os-release` (or `/usr/lib/os-release`; values unquoted as os-release(5) says). Sorted by name, then architecture; `manager` is `dpkg`; `total` counts every installed package; `digest` is the SHA-256 of the deterministic encoding of the distribution and the list.
+
+**Bounds.** At most 6,000 packages and an encoded event under Signal's 1 MiB: past either, the first ones by name go and `truncated` is set (`total` still counts all). A package Signal's door would refuse (a name, version or architecture outside Debian's forms, a malformed `Source`) is left out, counted in `total`, and logged, rather than costing the host its whole list. The status file is read up to 64 MiB (1 MiB a line), os-release up to 64 KiB.
+
+**When.** At start; when the status file changes (a `stat` every 10 s, read once it has stayed unchanged for 30 s, so one apt run sends one list, the final one); and once a day. A list equal to the last one sent this run goes as `unchanged` with the digest only, which Signal confirms (or answers with `RESYNC_SNAPSHOT`, after which the agent sends it in full again, with the snapshot and the access state).
+
+**Cannot tell.** No dpkg database (not a Debian or Ubuntu host), one the agent may not read, or an os-release without an `ID` or `VERSION_ID` in os-release's form (Debian testing and sid have no `VERSION_ID`) is sent as `read=false` with why, never as "no packages". In a container (a private cgroup namespace, as the DaemonSet runs) the dpkg database is the image's, not the host's: the reader does not run there and the agent logs why, so Signal reads the host as "not reported".
+
+**Never sent:** anything of the status file beyond the five fields above (no description, maintainer, dependencies or conffiles), and nothing else of os-release.
+
+**Recorded runs for Signal.** `internal/publish/testdata/signal/*.batch.json` are whole runs of both host-fact readers as the agent sent them (cejson batches, seqs 1..n): `host-facts-ubuntu-2404` from the dev VM's own files, read as `nobody` (`TestHostFactsOfThisHostAreStoredBySignal`, `-tags integration`; `PORTWARDEN_SIGNAL_FIXTURES=<dir>` writes them), and `host-facts-fstest` from the in-process e2e. `TestRecordedSignalFixturesAreStoredBySignal` replays each, signed, to Signal's `ingesttest`: nothing refused, no gap. Signal's own ingest tests take the same files.
 
 ## Tamper signals
 

@@ -33,7 +33,8 @@ FUZZ_TARGETS := \
 	internal/inventory:FuzzHandle \
 	internal/ingest:FuzzAnswer \
 	internal/access:FuzzSSHDConfig \
-	internal/access:FuzzJournalEntry
+	internal/access:FuzzJournalEntry \
+	internal/dpkg:FuzzReadPackages
 
 fuzz:
 	@for t in $(FUZZ_TARGETS); do \

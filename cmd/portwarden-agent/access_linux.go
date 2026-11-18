@@ -74,10 +74,11 @@ func hostAccessConfig(opts options) (*access.Config, error) {
 }
 
 // hostPackagesConfig is the package list reader's configuration (README "Host packages"),
-// or nil when it does not run: --host-packages off, or no Signal door (the list exists
-// only in Signal's schema).
-func hostPackagesConfig(opts options) *dpkg.Config {
-	if opts.hostPackages == "off" || opts.ingestURL == "" {
+// or nil when it does not run: --host-packages off, no Signal door (the list exists only
+// in Signal's schema), or in a container (a private cgroup namespace), whose dpkg
+// database is the image's, not the host's.
+func hostPackagesConfig(opts options, inContainer bool) *dpkg.Config {
+	if opts.hostPackages == "off" || opts.ingestURL == "" || inContainer {
 		return nil
 	}
 	return &dpkg.Config{Root: os.DirFS("/"), Poll: dpkg.DefaultPoll, Settle: dpkg.DefaultSettle, Recheck: dpkg.DefaultRecheck}

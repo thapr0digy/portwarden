@@ -428,7 +428,11 @@ func run(opts options, log *slog.Logger) error {
 			access.Run(ctx, *accessCfg, pub)
 		}()
 	}
-	if pkgCfg := hostPackagesConfig(opts); pkgCfg != nil {
+	inContainer := cgns.Root != ""
+	if inContainer && opts.ingestURL != "" && opts.hostPackages == "auto" {
+		log.Warn("in a container: the host's package list is not read (the image's dpkg database is not the host's)")
+	}
+	if pkgCfg := hostPackagesConfig(opts, inContainer); pkgCfg != nil {
 		pkgCfg.Log = log.With("part", "host_packages")
 		beats.Add(1)
 		go func() {

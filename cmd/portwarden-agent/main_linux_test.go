@@ -197,3 +197,28 @@ func TestHostAccessConfig(t *testing.T) {
 		t.Fatalf("a list that is not one: %v", err)
 	}
 }
+
+// The package list exists only in Signal's schema: the reader runs only with the door,
+// unless --host-packages off; it reads at start, on a settled dpkg change and daily.
+func TestHostPackagesConfig(t *testing.T) {
+	door := []string{"--ingest-url", "https://100.64.0.5:8443", "--ingest-pin", "sha256/pin"}
+	for _, args := range [][]string{nil, append(door[:4:4], "--host-packages", "off")} {
+		o, err := parseFlags(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg := hostPackagesConfig(o); cfg != nil {
+			t.Fatalf("%v: %+v", args, cfg)
+		}
+	}
+	o, err := parseFlags(door)
+	if err != nil || o.hostPackages != "auto" {
+		t.Fatalf("defaults %+v %v", o, err)
+	}
+	if cfg := hostPackagesConfig(o); cfg == nil || cfg.Recheck != 24*time.Hour || cfg.Settle != 30*time.Second || cfg.Root == nil {
+		t.Fatalf("config %+v", cfg)
+	}
+	if _, err := parseFlags([]string{"--host-packages", "on"}); err == nil || !strings.Contains(err.Error(), "--host-packages") {
+		t.Fatalf("--host-packages on: %v", err)
+	}
+}

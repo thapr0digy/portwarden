@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/thapr0digy/portwarden/internal/access"
+	"github.com/thapr0digy/portwarden/internal/dpkg"
 	"github.com/thapr0digy/portwarden/internal/exposure"
 )
 
@@ -70,4 +71,14 @@ func hostAccessConfig(opts options) (*access.Config, error) {
 		Recheck:    opts.recheck,
 		Flush:      access.DefaultFlush,
 	}, nil
+}
+
+// hostPackagesConfig is the package list reader's configuration (README "Host packages"),
+// or nil when it does not run: --host-packages off, or no Signal door (the list exists
+// only in Signal's schema).
+func hostPackagesConfig(opts options) *dpkg.Config {
+	if opts.hostPackages == "off" || opts.ingestURL == "" {
+		return nil
+	}
+	return &dpkg.Config{Root: os.DirFS("/"), Poll: dpkg.DefaultPoll, Settle: dpkg.DefaultSettle, Recheck: dpkg.DefaultRecheck}
 }

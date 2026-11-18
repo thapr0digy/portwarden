@@ -101,6 +101,22 @@ func TestRunReportsAtStartThenOnceAfterTheChangeSettles(t *testing.T) {
 	}
 }
 
+// A zero Poll or Recheck turns that trigger off rather than panicking: only the start
+// report goes out.
+func TestRunZeroIntervalsReportOnlyAtStart(t *testing.T) {
+	s := &sink{seen: make(chan struct{}, 16)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { Run(ctx, Config{Root: host(ubuntuStatus), Log: quietLog()}, s); close(done) }()
+	wait(t, s, "the start report")
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+	if n := s.count(); n != 1 {
+		t.Fatalf("%d reports, want 1", n)
+	}
+}
+
 // Assumption: the daily recheck reports whatever the list is (the publisher turns an
 // unchanged one into its digest), and a status file that cannot be read is reported as
 // such, not skipped.

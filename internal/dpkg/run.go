@@ -29,7 +29,8 @@ type Sink interface {
 type Config struct {
 	// Root is the host's file system ("/").
 	Root fs.FS
-	// Poll, Settle and Recheck pace the reads (see the defaults).
+	// Poll, Settle and Recheck pace the reads (see the defaults); Poll or Recheck 0 never
+	// polls or rechecks.
 	Poll, Settle, Recheck time.Duration
 	Log                   *slog.Logger
 }
@@ -55,17 +56,17 @@ func statStatus(root fs.FS) stamp {
 func Run(ctx context.Context, cfg Config, sink Sink) {
 	last := statStatus(cfg.Root)
 	report(cfg, sink, "start")
-	poll := time.NewTicker(cfg.Poll)
-	defer poll.Stop()
-	recheck := time.NewTicker(cfg.Recheck)
-	defer recheck.Stop()
+	poll, stopPoll := ticker(cfg.Poll)
+	defer stopPoll()
+	recheck, stopRecheck := ticker(cfg.Recheck)
+	defer stopRecheck()
 	var changedAt time.Time // when the stamp last moved; zero when it matches the last read
 	seen := last
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-poll.C:
+		case now := <-poll:
 			s := statStatus(cfg.Root)
 			if s != seen {
 				seen, changedAt = s, now
@@ -77,11 +78,20 @@ func Run(ctx context.Context, cfg Config, sink Sink) {
 					report(cfg, sink, "dpkg_changed")
 				}
 			}
-		case <-recheck.C:
+		case <-recheck:
 			last = statStatus(cfg.Root)
 			report(cfg, sink, "recheck")
 		}
 	}
+}
+
+// ticker ticks every d; for d <= 0 it never ticks.
+func ticker(d time.Duration) (<-chan time.Time, func()) {
+	if d <= 0 {
+		return nil, func() {}
+	}
+	t := time.NewTicker(d)
+	return t.C, t.Stop
 }
 
 func report(cfg Config, sink Sink, trigger string) {

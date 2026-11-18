@@ -115,6 +115,8 @@ var Default = Limits{
 		"asm.events.v1.Sshd.authorized_keys_file":         {Bytes: 256},
 		"asm.events.v1.Sshd.authorized_principals_file":   {Bytes: 256},
 		"asm.events.v1.TrustedKey.label":                  {Bytes: 64},
+		"asm.events.v1.HostPackages.packages":             {Items: 6000},
+		"asm.events.v1.HostPackages.unreadable":           {Bytes: 256},
 		"asm.events.v1.IngestResponse.rejected":           {Items: 1000},
 		"asm.events.v1.Batch.events":                      {Items: 1000},
 	},

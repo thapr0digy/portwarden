@@ -19,6 +19,7 @@ checks.
 | `proto/asm/events/v1/common.proto` | `AssetRef`, `BlobRef`, `Severity`, and Portwarden's listener, process, exposure, host, proxy and tamper types, with their field numbers unchanged |
 | `proto/asm/events/v1/agent.proto` | host-agent payloads (Portwarden) |
 | `proto/asm/events/v1/access.proto` | host-agent SSH access state and sign-ins (the identity join) |
+| `proto/asm/events/v1/packages.proto` | host-agent installed OS packages (the software inventory) |
 | `proto/asm/events/v1/exposure.proto` | product-service payloads: cloud verdict, outside probe, forget |
 | `proto/asm/events/v1/discovery.proto` | tool payloads: scans, services, assets, SBOMs, raw tool output |
 | `proto/asm/events/v1/finding.proto` | `FindingReport` |
@@ -80,6 +81,7 @@ payload and the case number are frozen once released (COMPATIBILITY.md).
 | `asm.proxy.routes` | `ProxyRoutes` (29) | agent | `host:<own id>` | full state of one proxy (or `unchanged` + digest) | `asm.<h>.proxy.routes` |
 | `asm.host.access` | `HostAccess` (30) | agent | `host:<own id>` | **full state** of SSH trust (or `unchanged` + digest) | new |
 | `asm.host.sign_ins` | `SignInSummary` (31) | agent | `host:<own id>` | delta (grouped sign-ins since the last) | new |
+| `asm.host.packages` | `HostPackages` (32) | agent | `host:<own id>` | **full state** of installed dpkg packages (or `unchanged` + digest) | new |
 | `asm.exposure.cloud_assessed` | `CloudExposureAssessment` (40) | service | `host:<id>` | verdict | `pwb.cloud.<h>.exposure` |
 | `asm.exposure.probed` | `ProbeResult` (41) | prober, service | `host:<id>` or `svc:…` | verdict | `pwb.verifier.<h>.exposure` |
 | `asm.host.forgotten` | `HostForgotten` (42) | service (operator action) | `host:<id>` | marker | `pwb.inventory.<h>.forgotten` |

@@ -47,6 +47,9 @@ var rules = map[protoreflect.FullName]rule{
 	name(&ev.SignInSummary{}):      typed(signInSummary),
 	name(&ev.SignInGroup{}):        typed(signInGroup),
 	name(&ev.JumpHop{}):            typed(jumpHop),
+	name(&ev.HostPackages{}):       typed(hostPackages),
+	name(&ev.Distro{}):             typed(distro),
+	name(&ev.OSPackage{}):          typed(osPackage),
 	name(&ev.ScanCompleted{}):      typed(scanCompleted),
 	name(&ev.ServiceObservation{}): typed(serviceObservation),
 	name(&ev.AssetDiscovery{}):     typed(assetDiscovery),
@@ -307,6 +310,84 @@ func hostAccess(a *ev.HostAccess, path string) *Problem {
 		}
 	}
 	return optionalHex(a.GetDigest(), join(path, "digest"))
+}
+
+// The forms a dpkg host's package list is held to (Debian Policy 5.6.1, 5.6.12 and os-release(5)).
+var (
+	debPackageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]{1,127}$`)
+	debVersionRe = regexp.MustCompile(`^[A-Za-z0-9.+~:-]{1,128}$`)
+	debArchRe    = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+	osReleaseRe  = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
+	osVersionRe  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+)
+
+// hostPackages holds a package list to one of three shapes: unchanged (a digest and nothing
+// else), unreadable (a reason and no list, so it is never read as "no packages") or a list from
+// dpkg with the distribution it runs on, each (name, arch) once.
+func hostPackages(p *ev.HostPackages, path string) *Problem {
+	switch {
+	case p.GetUnchanged():
+		if p.GetDigest() == "" {
+			return invalid(join(path, "digest"), "required when unchanged")
+		}
+		if p.GetDistro() != nil || len(p.GetPackages()) > 0 || p.GetRead() || p.GetUnreadable() != "" {
+			return invalid(join(path, "unchanged"), "an unchanged package list carries only its digest")
+		}
+	case !p.GetRead():
+		if p.GetUnreadable() == "" {
+			return invalid(join(path, "unreadable"), "required when the list could not be read")
+		}
+		if len(p.GetPackages()) > 0 || p.GetTruncated() {
+			return invalid(join(path, "packages"), "an unreadable list carries no packages")
+		}
+	default:
+		if p.GetManager() != "dpkg" {
+			return invalid(join(path, "manager"), `want "dpkg"`)
+		}
+		if p.GetDistro() == nil {
+			return invalid(join(path, "distro"), "required")
+		}
+		if uint64(p.GetTotal()) < uint64(len(p.GetPackages())) {
+			return invalid(join(path, "total"), "fewer than the packages sent")
+		}
+		seen := make(map[string]bool, len(p.GetPackages()))
+		for i, k := range p.GetPackages() {
+			key := k.GetName() + " " + k.GetArch()
+			if seen[key] {
+				return invalid(fmt.Sprintf("%s[%d]", join(path, "packages"), i), "a package and architecture listed twice")
+			}
+			seen[key] = true
+		}
+	}
+	return optionalHex(p.GetDigest(), join(path, "digest"))
+}
+
+func distro(d *ev.Distro, path string) *Problem {
+	switch {
+	case !osReleaseRe.MatchString(d.GetId()):
+		return invalid(join(path, "id"), "not an os-release ID")
+	case !osVersionRe.MatchString(d.GetVersionId()):
+		return invalid(join(path, "version_id"), "not an os-release VERSION_ID")
+	case d.GetCodename() != "" && !osReleaseRe.MatchString(d.GetCodename()):
+		return invalid(join(path, "codename"), "not an os-release VERSION_CODENAME")
+	}
+	return nil
+}
+
+func osPackage(k *ev.OSPackage, path string) *Problem {
+	switch {
+	case !debPackageRe.MatchString(k.GetName()):
+		return invalid(join(path, "name"), "not a Debian package name")
+	case !debVersionRe.MatchString(k.GetVersion()):
+		return invalid(join(path, "version"), "not a Debian version")
+	case !debPackageRe.MatchString(k.GetSource()):
+		return invalid(join(path, "source"), "required: the source package, under which advisories are filed")
+	case !debVersionRe.MatchString(k.GetSourceVersion()):
+		return invalid(join(path, "source_version"), "not a Debian version")
+	case !debArchRe.MatchString(k.GetArch()):
+		return invalid(join(path, "arch"), "not a Debian architecture")
+	}
+	return nil
 }
 
 func trustedKey(k *ev.TrustedKey, path string) *Problem {

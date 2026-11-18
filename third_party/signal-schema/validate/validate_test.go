@@ -2,6 +2,7 @@ package validate
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -93,6 +94,25 @@ func accessEvent() *ev.Event {
 	}
 }
 
+func packagesEvent() *ev.Event {
+	return &ev.Event{
+		Id: "01JC8Z6X4Q00000000000000S3", Type: "asm.host.packages",
+		Source: "urn:asm:agent:" + hostID, Subject: "host:" + hostID,
+		Time:     timestamppb.New(now),
+		Sequence: &ev.Sequence{RunId: runID, Seq: 60},
+		Data: &ev.Event_HostPackages{HostPackages: &ev.HostPackages{
+			Read: true, Manager: "dpkg", Total: 2,
+			Distro: &ev.Distro{Id: "ubuntu", VersionId: "22.04", Codename: "jammy"},
+			Packages: []*ev.OSPackage{
+				{Name: "openssh-server", Version: "1:8.9p1-3ubuntu0.6", Source: "openssh", SourceVersion: "1:8.9p1-3ubuntu0.6", Arch: "amd64"},
+				{Name: "libc6", Version: "2.35-0ubuntu3.8", Source: "glibc", SourceVersion: "2.35-0ubuntu3.8", Arch: "amd64"},
+			},
+		}},
+	}
+}
+
+func pkgs(e *ev.Event) *ev.HostPackages { return e.GetHostPackages() }
+
 func grp(e *ev.Event) *ev.SignInGroup { return e.GetSignIns().GetGroups()[0] }
 
 func fr(e *ev.Event) *ev.FindingReport { return e.GetFindingReported() }
@@ -128,6 +148,27 @@ func TestValidateTable(t *testing.T) {
 			e.GetHostAccess().Unchanged = true
 			e.GetHostAccess().Digest = strings.Repeat("a", 64)
 		}), CodeInvalidPayload, "host_access.unchanged"},
+		{"valid package list", packagesEvent(), "", ""},
+		{"valid unreadable package list", with(packagesEvent(), func(e *ev.Event) {
+			e.Data = &ev.Event_HostPackages{HostPackages: &ev.HostPackages{Unreadable: "/var/lib/dpkg/status: permission denied"}}
+		}), "", ""},
+		{"package without its source", with(packagesEvent(), func(e *ev.Event) { pkgs(e).Packages[0].Source = "" }), CodeInvalidPayload, "host_packages.packages[0].source"},
+		{"package name not Debian's", with(packagesEvent(), func(e *ev.Event) { pkgs(e).Packages[0].Name = "OpenSSH Server" }), CodeInvalidPayload, "host_packages.packages[0].name"},
+		{"package version with a space", with(packagesEvent(), func(e *ev.Event) { pkgs(e).Packages[0].Version = "1.0 beta" }), CodeInvalidPayload, "host_packages.packages[0].version"},
+		{"package listed twice", with(packagesEvent(), func(e *ev.Event) { pkgs(e).Packages[1] = pkgs(e).Packages[0] }), CodeInvalidPayload, "host_packages.packages[1]"},
+		{"package list without a distro", with(packagesEvent(), func(e *ev.Event) { pkgs(e).Distro = nil }), CodeInvalidPayload, "host_packages.distro"},
+		{"package list not from dpkg", with(packagesEvent(), func(e *ev.Event) { pkgs(e).Manager = "rpm" }), CodeInvalidPayload, "host_packages.manager"},
+		{"package total below the list", with(packagesEvent(), func(e *ev.Event) { pkgs(e).Total = 1 }), CodeInvalidPayload, "host_packages.total"},
+		{"unreadable list with packages", with(packagesEvent(), func(e *ev.Event) { pkgs(e).Read = false; pkgs(e).Unreadable = "denied" }), CodeInvalidPayload, "host_packages.packages"},
+		{"unreadable list without a reason", with(packagesEvent(), func(e *ev.Event) { pkgs(e).Read = false; pkgs(e).Packages = nil }), CodeInvalidPayload, "host_packages.unreadable"},
+		{"unchanged list with a body", with(packagesEvent(), func(e *ev.Event) { pkgs(e).Unchanged = true; pkgs(e).Digest = strings.Repeat("a", 64) }), CodeInvalidPayload, "host_packages.unchanged"},
+		{"package list over its cap", with(packagesEvent(), func(e *ev.Event) {
+			pkgs(e).Packages = make([]*ev.OSPackage, 6001)
+			for i := range pkgs(e).Packages {
+				pkgs(e).Packages[i] = &ev.OSPackage{Name: fmt.Sprintf("pkg%d", i), Version: "1", Source: "src", SourceVersion: "1", Arch: "all"}
+			}
+			pkgs(e).Total = 6001
+		}), CodeTooLarge, "host_packages.packages"},
 		{"inline at the cap", toolOutputEvent(make([]byte, 256<<10)), "", ""},
 		{"inline over the cap", toolOutputEvent(make([]byte, 256<<10+1)), CodeTooLarge, "tool_output.inline"},
 		{"tool output without a body", with(toolOutputEvent(nil), func(e *ev.Event) { e.GetToolOutput().Body = nil }), CodeInvalidPayload, "tool_output.body"},

@@ -44,7 +44,7 @@ type State struct {
 	// Retired holds the ids of the principal's runs a newer one replaced: a late event of
 	// one is history, never a reason to adopt it again.
 	Retired map[string]bool
-	// Digests maps "snapshot", "access" and "routes:<proxy id>" to the last full state's digest.
+	// Digests maps "snapshot", "access", "packages" and "routes:<proxy id>" to the last full state's digest.
 	Digests map[string]string
 	// HeartbeatStoredAt and HeartbeatFields describe the last stored heartbeat of this run.
 	HeartbeatStoredAt time.Time
@@ -101,6 +101,23 @@ func (p Plan) Count(v Verdict) int {
 		}
 	}
 	return n
+}
+
+// ridersOfSnapshot are the full states an agent resends with its snapshot on RESYNC_SNAPSHOT,
+// each under its digest key.
+var ridersOfSnapshot = []string{"access", "packages"} //nolint:gochecknoglobals // fixed table
+
+// ridesWithSnapshot applies a full state that rides with the snapshot (its digest under key): an
+// unchanged report is confirmed, and asks for the resync when its digest is not the one held; a
+// changed one records its digest.
+func (st *State) ridesWithSnapshot(key string, unchanged bool, digest string) (confirmed, resync bool) {
+	switch {
+	case unchanged:
+		return true, st.Digests[key] == "" || digest != st.Digests[key]
+	case digest != "":
+		st.Digests[key] = digest
+	}
+	return false, false
 }
 
 // Resync is a Directive asking for a full snapshot.
@@ -165,16 +182,14 @@ func PlanBatch(p Principal, st State, els []validate.Element, o Options) Plan {
 					cur.Digests[key] = pr.GetRoutesDigest()
 				}
 			case *eventsv1.Event_HostAccess:
-				// The SSH access state rides with the snapshot: an unknown digest asks for the
-				// same resync, whose answer carries both.
-				acc := d.HostAccess
-				switch {
-				case acc.GetUnchanged() && cur.Digests["access"] != "" && acc.GetDigest() == cur.Digests["access"]:
-					it.Verdict = Confirm
-				case acc.GetUnchanged():
-					it.Verdict, wantSnapshot = Confirm, true
-				case acc.GetDigest() != "":
-					cur.Digests["access"] = acc.GetDigest()
+				// The SSH access state and the package list ride with the snapshot: an unknown
+				// digest asks for the same resync, whose answer carries them all.
+				if confirmed, resync := cur.ridesWithSnapshot("access", d.HostAccess.GetUnchanged(), d.HostAccess.GetDigest()); confirmed {
+					it.Verdict, wantSnapshot = Confirm, wantSnapshot || resync
+				}
+			case *eventsv1.Event_HostPackages:
+				if confirmed, resync := cur.ridesWithSnapshot("packages", d.HostPackages.GetUnchanged(), d.HostPackages.GetDigest()); confirmed {
+					it.Verdict, wantSnapshot = Confirm, wantSnapshot || resync
 				}
 			case *eventsv1.Event_Heartbeat:
 				fields := heartbeatFields(d.Heartbeat)
@@ -208,7 +223,9 @@ func PlanBatch(p Principal, st State, els []validate.Element, o Options) Plan {
 	if wantSnapshot {
 		plan.Directives = append(plan.Directives, resync(eventsv1.Directive_RESYNC_SNAPSHOT, "sequence gap or unknown snapshot digest"))
 		delete(cur.Digests, "snapshot")
-		delete(cur.Digests, "access")
+		for _, key := range ridersOfSnapshot {
+			delete(cur.Digests, key)
+		}
 	}
 	if wantProxies {
 		plan.Directives = append(plan.Directives, resync(eventsv1.Directive_RESYNC_PROXIES, "unknown route digest"))

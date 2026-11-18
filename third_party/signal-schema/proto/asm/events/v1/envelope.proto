@@ -21,6 +21,7 @@ import "asm/events/v1/agent.proto";
 import "asm/events/v1/discovery.proto";
 import "asm/events/v1/exposure.proto";
 import "asm/events/v1/finding.proto";
+import "asm/events/v1/packages.proto";
 import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/slidehq/signal/schema/eventsv1;eventsv1";
@@ -85,6 +86,7 @@ message Event {
     ProxyRoutes proxy_routes = 29;              // asm.proxy.routes
     HostAccess host_access = 30;                // asm.host.access
     SignInSummary sign_ins = 31;                // asm.host.sign_ins
+    HostPackages host_packages = 32;            // asm.host.packages
 
     // Product services (cloud look-up, outside prober, operator actions).
     CloudExposureAssessment cloud_exposure = 40; // asm.exposure.cloud_assessed

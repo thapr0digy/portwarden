@@ -41,11 +41,20 @@ type SSHD struct {
 	AuthorizedPrincipalsFile string
 	// AuthorizedPrincipalsCommand is true when a command decides the principals.
 	AuthorizedPrincipalsCommand bool
-	// PasswordAuthentication is sshd's setting (default yes).
-	PasswordAuthentication bool
-	// PermitRootLogin is the setting as written, lowercased (default prohibit-password).
+	// PasswordAuthentication is sshd's setting: "yes" (its default) or "no".
+	PasswordAuthentication string
+	// PermitRootLogin is sshd's setting: "yes", "prohibit-password" (its default, also
+	// written without-password), "forced-commands-only" or "no".
 	PermitRootLogin string
 }
+
+// The values sshd takes for the two settings (sshd_config(5); any case), each as reported.
+// sshd refuses to start on any other.
+var (
+	passwordAuthValues = map[string]string{"yes": "yes", "no": "no"}
+	rootLoginValues    = map[string]string{"yes": "yes", "prohibit-password": "prohibit-password",
+		"without-password": "prohibit-password", "forced-commands-only": "forced-commands-only", "no": "no"}
+)
 
 // keysOff reports whether sshd takes no plain keys from any account: AuthorizedKeysFile
 // none and no AuthorizedKeysCommand.
@@ -62,7 +71,7 @@ var ErrConfig = errors.New("sshd configuration")
 // sshd does (globs, relative to /etc/ssh, in place). The first value of a keyword wins.
 func ReadSSHD(root fs.FS, name string) (SSHD, error) {
 	r := sshdReader{root: root, seen: map[string]bool{}, set: map[string]bool{}}
-	r.cfg = SSHD{PasswordAuthentication: true, PermitRootLogin: "prohibit-password"}
+	r.cfg = SSHD{PasswordAuthentication: "yes", PermitRootLogin: "prohibit-password"}
 	if err := r.file(name, 0); err != nil {
 		return SSHD{}, err
 	}
@@ -128,7 +137,9 @@ func (r *sshdReader) parse(name, text string, depth int) error {
 			}
 			continue
 		}
-		r.setting(key, args)
+		if err := r.setting(key, args); err != nil {
+			return fmt.Errorf("%w: %s line %d: %v", ErrConfig, name, n+1, err)
+		}
 	}
 	return nil
 }
@@ -152,9 +163,25 @@ func (r *sshdReader) include(patterns []string, depth int) error {
 	return nil
 }
 
-func (r *sshdReader) setting(key string, args []string) {
+// setting applies the first value of a keyword this package reads. A value sshd does not
+// take for PasswordAuthentication or PermitRootLogin is an error, as it is for sshd, in every
+// global occurrence (a later one sshd ignores still stops it).
+func (r *sshdReader) setting(key string, args []string) error {
+	var value string
+	switch key {
+	case "passwordauthentication", "permitrootlogin":
+		values := passwordAuthValues
+		if key == "permitrootlogin" {
+			values = rootLoginValues
+		}
+		v, ok := values[strings.ToLower(args[0])]
+		if !ok {
+			return fmt.Errorf("%s %q is not a value sshd takes", key, args[0])
+		}
+		value = v
+	}
 	if r.set[key] {
-		return
+		return nil
 	}
 	switch key {
 	case "trustedusercakeys":
@@ -168,13 +195,14 @@ func (r *sshdReader) setting(key string, args []string) {
 	case "authorizedprincipalscommand":
 		r.cfg.AuthorizedPrincipalsCommand = !strings.EqualFold(args[0], "none")
 	case "passwordauthentication":
-		r.cfg.PasswordAuthentication = strings.EqualFold(args[0], "yes")
+		r.cfg.PasswordAuthentication = value
 	case "permitrootlogin":
-		r.cfg.PermitRootLogin = strings.ToLower(args[0])
+		r.cfg.PermitRootLogin = value
 	default:
-		return
+		return nil
 	}
 	r.set[key] = true
+	return nil
 }
 
 // sshdWords splits a configuration line as sshd does: a keyword, then arguments separated

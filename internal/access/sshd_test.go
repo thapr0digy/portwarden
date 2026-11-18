@@ -11,7 +11,7 @@ func TestReadSSHDDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg != (SSHD{PasswordAuthentication: true, PermitRootLogin: "prohibit-password"}) {
+	if cfg != (SSHD{PasswordAuthentication: "yes", PermitRootLogin: "prohibit-password"}) {
 		t.Fatalf("defaults = %+v", cfg)
 	}
 }
@@ -42,9 +42,43 @@ TrustedUserCAKeys /etc/ssh/late_ca
 	}
 	want := SSHD{TrustedUserCAKeys: "/etc/ssh/a ca", AuthorizedKeysFile: ".ssh/authorized_keys .ssh/keys2",
 		AuthorizedPrincipalsFile: "/etc/ssh/principals/%u", AuthorizedPrincipalsCommand: true,
-		PermitRootLogin: "without-password"}
+		PasswordAuthentication: "no", PermitRootLogin: "prohibit-password"}
 	if cfg != want {
 		t.Fatalf("cfg = %+v\nwant  %+v", cfg, want)
+	}
+}
+
+// Assumption: sshd takes PasswordAuthentication yes/no and PermitRootLogin's five words in
+// any case, without-password being prohibit-password's old name; Signal gets the four
+// canonical words.
+func TestReadSSHDSettingValues(t *testing.T) {
+	for value, want := range map[string]string{
+		"yes": "yes", "NO": "no", "Prohibit-Password": "prohibit-password", "without-password": "prohibit-password",
+		"forced-commands-only": "forced-commands-only",
+	} {
+		cfg, err := ReadSSHD(fsOf(map[string]string{"etc/ssh/sshd_config": "PermitRootLogin " + value + "\n"}), SSHDConfig)
+		if err != nil || cfg.PermitRootLogin != want {
+			t.Errorf("PermitRootLogin %s: %q %v, want %q", value, cfg.PermitRootLogin, err, want)
+		}
+	}
+	cfg, err := ReadSSHD(fsOf(map[string]string{"etc/ssh/sshd_config": "passwordauthentication No\n"}), SSHDConfig)
+	if err != nil || cfg.PasswordAuthentication != "no" {
+		t.Errorf("PasswordAuthentication No: %q %v", cfg.PasswordAuthentication, err)
+	}
+}
+
+// Assumption: sshd refuses to start on a value it does not take, even in an occurrence the
+// first one overrides, so the setting cannot be told (never a guessed default).
+func TestReadSSHDRefusesAnUnknownSettingValue(t *testing.T) {
+	for _, conf := range []string{
+		"PasswordAuthentication maybe\n",
+		"PasswordAuthentication without-password\n",
+		"PermitRootLogin true\n",
+		"PermitRootLogin no\nPermitRootLogin sometimes\n",
+	} {
+		if _, err := ReadSSHD(fsOf(map[string]string{"etc/ssh/sshd_config": conf}), SSHDConfig); !errors.Is(err, ErrConfig) {
+			t.Errorf("%q: err = %v, want ErrConfig", conf, err)
+		}
 	}
 }
 

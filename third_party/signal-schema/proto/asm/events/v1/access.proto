@@ -40,6 +40,14 @@ message Sshd {
   string authorized_principals_file = 5;
   // True when an AuthorizedPrincipalsCommand is set (the jump host's).
   bool authorized_principals_command = 6;
+  // PasswordAuthentication as sshd applies it outside Match blocks, Includes followed: "yes"
+  // or "no" (sshd's own default, "yes", when no file sets it). "" when read is false, or from
+  // an agent older than the field: "cannot tell", never a default.
+  string password_authentication = 7;
+  // PermitRootLogin likewise: "yes", "prohibit-password" (also when written as its old name
+  // without-password), "forced-commands-only" or "no" (sshd's default "prohibit-password").
+  // "" when read is false or from an older agent.
+  string permit_root_login = 8;
 }
 
 message TrustedKey {

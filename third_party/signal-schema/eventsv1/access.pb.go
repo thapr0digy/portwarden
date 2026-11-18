@@ -174,8 +174,16 @@ type Sshd struct {
 	AuthorizedPrincipalsFile string `protobuf:"bytes,5,opt,name=authorized_principals_file,json=authorizedPrincipalsFile,proto3" json:"authorized_principals_file,omitempty"`
 	// True when an AuthorizedPrincipalsCommand is set (the jump host's).
 	AuthorizedPrincipalsCommand bool `protobuf:"varint,6,opt,name=authorized_principals_command,json=authorizedPrincipalsCommand,proto3" json:"authorized_principals_command,omitempty"`
-	unknownFields               protoimpl.UnknownFields
-	sizeCache                   protoimpl.SizeCache
+	// PasswordAuthentication as sshd applies it outside Match blocks, Includes followed: "yes"
+	// or "no" (sshd's own default, "yes", when no file sets it). "" when read is false, or from
+	// an agent older than the field: "cannot tell", never a default.
+	PasswordAuthentication string `protobuf:"bytes,7,opt,name=password_authentication,json=passwordAuthentication,proto3" json:"password_authentication,omitempty"`
+	// PermitRootLogin likewise: "yes", "prohibit-password" (also when written as its old name
+	// without-password), "forced-commands-only" or "no" (sshd's default "prohibit-password").
+	// "" when read is false or from an older agent.
+	PermitRootLogin string `protobuf:"bytes,8,opt,name=permit_root_login,json=permitRootLogin,proto3" json:"permit_root_login,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Sshd) Reset() {
@@ -248,6 +256,20 @@ func (x *Sshd) GetAuthorizedPrincipalsCommand() bool {
 		return x.AuthorizedPrincipalsCommand
 	}
 	return false
+}
+
+func (x *Sshd) GetPasswordAuthentication() string {
+	if x != nil {
+		return x.PasswordAuthentication
+	}
+	return ""
+}
+
+func (x *Sshd) GetPermitRootLogin() string {
+	if x != nil {
+		return x.PermitRootLogin
+	}
+	return ""
 }
 
 type TrustedKey struct {
@@ -780,7 +802,7 @@ const file_asm_events_v1_access_proto_rawDesc = "" +
 	"\x04sshd\x18\x01 \x01(\v2\x13.asm.events.v1.SshdR\x04sshd\x128\n" +
 	"\baccounts\x18\x02 \x03(\v2\x1c.asm.events.v1.AccountAccessR\baccounts\x12\x16\n" +
 	"\x06digest\x18\x03 \x01(\tR\x06digest\x12\x1c\n" +
-	"\tunchanged\x18\x04 \x01(\bR\tunchanged\"\xba\x02\n" +
+	"\tunchanged\x18\x04 \x01(\bR\tunchanged\"\x9f\x03\n" +
 	"\x04Sshd\x12\x12\n" +
 	"\x04read\x18\x01 \x01(\bR\x04read\x12\x1e\n" +
 	"\n" +
@@ -789,7 +811,9 @@ const file_asm_events_v1_access_proto_rawDesc = "" +
 	"\x14trusted_user_ca_keys\x18\x03 \x03(\v2\x19.asm.events.v1.TrustedKeyR\x11trustedUserCaKeys\x120\n" +
 	"\x14authorized_keys_file\x18\x04 \x01(\tR\x12authorizedKeysFile\x12<\n" +
 	"\x1aauthorized_principals_file\x18\x05 \x01(\tR\x18authorizedPrincipalsFile\x12B\n" +
-	"\x1dauthorized_principals_command\x18\x06 \x01(\bR\x1bauthorizedPrincipalsCommand\"D\n" +
+	"\x1dauthorized_principals_command\x18\x06 \x01(\bR\x1bauthorizedPrincipalsCommand\x127\n" +
+	"\x17password_authentication\x18\a \x01(\tR\x16passwordAuthentication\x12*\n" +
+	"\x11permit_root_login\x18\b \x01(\tR\x0fpermitRootLogin\"D\n" +
 	"\n" +
 	"TrustedKey\x12 \n" +
 	"\vfingerprint\x18\x01 \x01(\tR\vfingerprint\x12\x14\n" +

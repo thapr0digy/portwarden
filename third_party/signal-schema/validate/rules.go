@@ -42,6 +42,7 @@ var rules = map[protoreflect.FullName]rule{
 	name(&ev.ProxyState{}):         typed(proxyState),
 	name(&ev.ProxyRoutes{}):        typed(proxyRoutes),
 	name(&ev.HostAccess{}):         typed(hostAccess),
+	name(&ev.Sshd{}):               typed(sshdSettings),
 	name(&ev.TrustedKey{}):         typed(trustedKey),
 	name(&ev.AccountAccess{}):      typed(accountAccess),
 	name(&ev.SignInSummary{}):      typed(signInSummary),
@@ -310,6 +311,27 @@ func hostAccess(a *ev.HostAccess, path string) *Problem {
 		}
 	}
 	return optionalHex(a.GetDigest(), join(path, "digest"))
+}
+
+// The values sshd takes for PasswordAuthentication and PermitRootLogin (sshd_config(5)), as
+// an agent reports them; "" is "cannot tell".
+var (
+	passwordAuthValues = map[string]bool{"yes": true, "no": true}
+	rootLoginValues    = map[string]bool{"yes": true, "prohibit-password": true, "forced-commands-only": true, "no": true}
+)
+
+// sshdSettings holds the two settings to sshd's values, and to "" when the configuration was
+// not read (a value then would be a guess).
+func sshdSettings(s *ev.Sshd, path string) *Problem {
+	switch pa, rl := s.GetPasswordAuthentication(), s.GetPermitRootLogin(); {
+	case !s.GetRead() && (pa != "" || rl != ""):
+		return invalid(join(path, "read"), "an unread configuration carries no settings")
+	case pa != "" && !passwordAuthValues[pa]:
+		return invalid(join(path, "password_authentication"), `want "yes" or "no"`)
+	case rl != "" && !rootLoginValues[rl]:
+		return invalid(join(path, "permit_root_login"), "not a PermitRootLogin value")
+	}
+	return nil
 }
 
 // The forms a dpkg host's package list is held to (Debian Policy 5.6.1, 5.6.12 and os-release(5)).

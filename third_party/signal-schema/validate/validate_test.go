@@ -144,6 +144,14 @@ func TestValidateTable(t *testing.T) {
 		}), CodeInvalidPayload, "sign_ins.hops[0].person"},
 		{"access key not a fingerprint", with(accessEvent(), func(e *ev.Event) { e.GetHostAccess().Accounts[0].StaticKeys = []string{"ssh-ed25519 AAAA"} }), CodeInvalidPayload, "host_access.accounts[0].static_keys[0]"},
 		{"access trusted key label over its cap", with(accessEvent(), func(e *ev.Event) { e.GetHostAccess().Sshd.TrustedUserCaKeys[0].Label = strings.Repeat("a", 65) }), CodeTooLarge, "host_access.sshd.trusted_user_ca_keys[0].label"},
+		{"access with both sshd settings", with(accessEvent(), func(e *ev.Event) {
+			e.GetHostAccess().Sshd.PasswordAuthentication, e.GetHostAccess().Sshd.PermitRootLogin = "no", "prohibit-password"
+		}), "", ""},
+		{"access password setting not sshd's", with(accessEvent(), func(e *ev.Event) { e.GetHostAccess().Sshd.PasswordAuthentication = "true" }), CodeInvalidPayload, "host_access.sshd.password_authentication"},
+		{"access root login setting not sshd's", with(accessEvent(), func(e *ev.Event) { e.GetHostAccess().Sshd.PermitRootLogin = "without-password" }), CodeInvalidPayload, "host_access.sshd.permit_root_login"},
+		{"unread sshd with a setting", with(accessEvent(), func(e *ev.Event) {
+			e.GetHostAccess().Sshd = &ev.Sshd{Unreadable: "denied", PasswordAuthentication: "yes"}
+		}), CodeInvalidPayload, "host_access.sshd.read"},
 		{"unchanged access with a body", with(accessEvent(), func(e *ev.Event) {
 			e.GetHostAccess().Unchanged = true
 			e.GetHostAccess().Digest = strings.Repeat("a", 64)

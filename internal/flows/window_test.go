@@ -124,6 +124,19 @@ func TestWindowCapsEachDirection(t *testing.T) {
 	}
 }
 
+// connect() to port 0 sends a SYN on Linux, but Signal refuses an outbound row without a
+// remote port, and with it the whole event: such a connection is dropped, not a row.
+func TestWindowDropsOutboundToPortZero(t *testing.T) {
+	w := NewWindow(t0)
+	w.Add(out("10.0.0.1:0", time.Minute))
+	w.Add(out("10.0.0.9:443", time.Minute))
+	got := w.Flush(t0.Add(time.Hour))
+	checkValid(t, got)
+	if f := got[0].GetFlows(); len(f) != 1 || f[0].GetRemotePort() != 443 || got[0].GetDropped() != 1 {
+		t.Errorf("flows = %v, dropped %d", f, got[0].GetDropped())
+	}
+}
+
 // A window too large for one event is split over several with the same bounds, each under
 // Signal's 1 MiB cap, together holding every row once.
 func TestWindowSplitsUnderTheEventCap(t *testing.T) {

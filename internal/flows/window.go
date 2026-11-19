@@ -75,10 +75,15 @@ func NewWindow(start time.Time) *Window {
 	return &Window{start: start, rows: make(map[key]*row), perDir: make(map[string]int)}
 }
 
-// Add counts c. A connection whose key is new once its direction holds MaxFlowsPerDirection
-// rows is counted as dropped.
+// Add counts c. A connection with no port its direction's row needs (an Out one to port 0,
+// an In one on local port 0), or whose key is new once its direction holds
+// MaxFlowsPerDirection rows, is counted as dropped.
 func (w *Window) Add(c Conn) {
 	k := keyOf(c)
+	if !k.hasPort() {
+		w.dropped++
+		return
+	}
 	if r, ok := w.rows[k]; ok {
 		r.count++
 		r.first, r.last = minTime(r.first, c.At), maxTime(r.last, c.At)
@@ -118,6 +123,17 @@ func keyOf(c Conn) key {
 		}
 	}
 	return k
+}
+
+// hasPort reports whether k has the port Signal requires of its direction's row.
+func (k key) hasPort() bool {
+	switch k.direction {
+	case Out:
+		return k.remotePort != 0
+	case In:
+		return k.localPort != 0
+	}
+	return true
 }
 
 // sharedAddressSpace is RFC 6598's carrier-grade NAT range.

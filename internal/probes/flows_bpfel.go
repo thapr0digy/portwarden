@@ -34,6 +34,7 @@ const (
 	flowsMapAwaitingHead = "awaiting_head"
 	flowsMapFlowCounters = "flow_counters"
 	flowsMapFlowEvents   = "flow_events"
+	flowsMapKnownTgids   = "known_tgids"
 	flowsProgOnAccept    = "on_accept"
 	flowsProgOnConnect   = "on_connect"
 	flowsProgOnSendmsg   = "on_sendmsg"
@@ -93,6 +94,7 @@ type flowsMapSpecs struct {
 	AwaitingHead *ebpf.MapSpec `ebpf:"awaiting_head"`
 	FlowCounters *ebpf.MapSpec `ebpf:"flow_counters"`
 	FlowEvents   *ebpf.MapSpec `ebpf:"flow_events"`
+	KnownTgids   *ebpf.MapSpec `ebpf:"known_tgids"`
 }
 
 // flowsVariableSpecs contains global variables before they are loaded into the kernel.
@@ -124,6 +126,7 @@ type flowsMaps struct {
 	AwaitingHead *ebpf.Map `ebpf:"awaiting_head"`
 	FlowCounters *ebpf.Map `ebpf:"flow_counters"`
 	FlowEvents   *ebpf.Map `ebpf:"flow_events"`
+	KnownTgids   *ebpf.Map `ebpf:"known_tgids"`
 }
 
 func (m *flowsMaps) Close() error {
@@ -131,6 +134,7 @@ func (m *flowsMaps) Close() error {
 		m.AwaitingHead,
 		m.FlowCounters,
 		m.FlowEvents,
+		m.KnownTgids,
 	)
 }
 

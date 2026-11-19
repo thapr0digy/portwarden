@@ -17,6 +17,8 @@
 // The ring buffer bounds what a busy host costs: a full ring drops events and counts them.
 // Records are submitted without waking the agent until WAKEUP_BYTES wait in the ring; the
 // agent also drains it on a short timer, so a busy host costs one wakeup per many records.
+// A process's first connection (by tgid, as far as known_tgids remembers) wakes the agent at
+// once, so it reads a short-lived client's executable from /proc before the client exits.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -88,6 +90,14 @@ struct {
 	__type(value, __u64);
 } awaiting_head SEC(".maps");
 
+// Processes the agent was woken for; LRU, so a busy host's churn only costs extra wakeups.
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 8192);
+	__type(key, __u32);
+	__type(value, __u8);
+} known_tgids SEC(".maps");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, COUNTER_COUNT);
@@ -114,6 +124,9 @@ static __always_inline int emit_conn(struct sock *sk, __u32 kind, __u64 cookie)
 {
 	struct flow_conn *e;
 	__u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
+	__u32 tgid = bpf_get_current_pid_tgid() >> 32;
+	__u64 flags;
+	__u8 one = 1;
 
 	if (family != AF_INET && family != AF_INET6)
 		return 0;
@@ -125,7 +138,7 @@ static __always_inline int emit_conn(struct sock *sk, __u32 kind, __u64 cookie)
 	__builtin_memset(e, 0, sizeof(*e));
 	e->cookie = cookie;
 	e->cgroup_id = bpf_get_current_cgroup_id();
-	e->tgid = bpf_get_current_pid_tgid() >> 32;
+	e->tgid = tgid;
 	e->family = family;
 	e->kind = kind;
 	e->lport = BPF_CORE_READ(sk, __sk_common.skc_num);
@@ -139,7 +152,12 @@ static __always_inline int emit_conn(struct sock *sk, __u32 kind, __u64 cookie)
 	}
 	// The process's name, not the calling thread's: a thread can rename itself.
 	bpf_probe_read_kernel_str(e->comm, sizeof(e->comm), bpf_get_current_task_btf()->group_leader->comm);
-	bpf_ringbuf_submit(e, submit_flags());
+	flags = submit_flags();
+	if (!bpf_map_lookup_elem(&known_tgids, &tgid)) {
+		bpf_map_update_elem(&known_tgids, &tgid, &one, BPF_ANY);
+		flags = BPF_RB_FORCE_WAKEUP;
+	}
+	bpf_ringbuf_submit(e, flags);
 	return 1;
 }
 

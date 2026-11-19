@@ -149,6 +149,14 @@ func TestE2EHostPackagesAndSSHSettingsAreStoredBySignal(t *testing.T) {
 	recordSignalFixtures(t, "host-facts-fstest", sent)
 }
 
+// fixtureStores is what Signal must store of each recorded fixture, by its name's prefix: a
+// host-facts run each full state once (the unchanged confirmations answered by digest), a
+// host-flows run its window.
+var fixtureStores = map[string]map[string]int{
+	"host-facts-": {"asm.host.packages": 1, "asm.host.access": 1},
+	"host-flows-": {"asm.host.flows": 1},
+}
+
 // The recorded fixtures (testdata/signal: a real host's run, recorded in the dev VM) are
 // what Signal's ingesttest is handed: each decodes strictly as JSON and, replayed as the
 // recorded host, is stored by the reference door with nothing refused and no gap.
@@ -159,6 +167,15 @@ func TestRecordedSignalFixturesAreStoredBySignal(t *testing.T) {
 	}
 	for _, f := range files {
 		t.Run(filepath.Base(f), func(t *testing.T) {
+			var want map[string]int
+			for prefix, w := range fixtureStores {
+				if strings.HasPrefix(filepath.Base(f), prefix) {
+					want = w
+				}
+			}
+			if want == nil {
+				t.Fatal("a fixture of no known run (fixtureStores)")
+			}
 			body, err := os.ReadFile(f)
 			if err != nil {
 				t.Fatal(err)
@@ -176,8 +193,10 @@ func TestRecordedSignalFixturesAreStoredBySignal(t *testing.T) {
 				batch.Events = append(batch.Events, el.Event)
 				types[el.Event.GetType()] = true
 			}
-			if !types["asm.host.packages"] || !types["asm.host.access"] {
-				t.Fatalf("types %v: want both host facts", types)
+			for typ := range want {
+				if !types[typ] {
+					t.Fatalf("types %v: want %s", types, typ)
+				}
 			}
 			host := strings.TrimPrefix(batch.GetEvents()[0].GetSubject(), "host:")
 			pubKey, key, err := ed25519.GenerateKey(rand.Reader)
@@ -204,8 +223,10 @@ func TestRecordedSignalFixturesAreStoredBySignal(t *testing.T) {
 			for _, e := range ref.Stored() {
 				full[e.GetType()]++
 			}
-			if full["asm.host.packages"] != 1 || full["asm.host.access"] != 1 {
-				t.Fatalf("stored %v: want each full state once", full)
+			for typ, n := range want {
+				if full[typ] != n {
+					t.Fatalf("stored %v, want %v", full, want)
+				}
 			}
 		})
 	}

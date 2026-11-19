@@ -82,6 +82,7 @@ payload and the case number are frozen once released (COMPATIBILITY.md).
 | `asm.host.access` | `HostAccess` (30) | agent | `host:<own id>` | **full state** of SSH trust (or `unchanged` + digest) | new |
 | `asm.host.sign_ins` | `SignInSummary` (31) | agent | `host:<own id>` | delta (grouped sign-ins since the last) | new |
 | `asm.host.packages` | `HostPackages` (32) | agent | `host:<own id>` | **full state** of installed dpkg packages (or `unchanged` + digest) | new |
+| `asm.host.flows` | `HostFlows` (33) | agent | `host:<own id>` | one window's TCP connections, aggregated per process, direction, peer, port and TLS SNI / HTTP Host (never payloads) | new |
 | `asm.exposure.cloud_assessed` | `CloudExposureAssessment` (40) | service | `host:<id>` | verdict | `pwb.cloud.<h>.exposure` |
 | `asm.exposure.probed` | `ProbeResult` (41) | prober, service | `host:<id>` or `svc:…` | verdict | `pwb.verifier.<h>.exposure` |
 | `asm.host.forgotten` | `HostForgotten` (42) | service (operator action) | `host:<id>` | marker | `pwb.inventory.<h>.forgotten` |

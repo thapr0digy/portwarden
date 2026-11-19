@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -51,6 +52,8 @@ var rules = map[protoreflect.FullName]rule{
 	name(&ev.HostPackages{}):       typed(hostPackages),
 	name(&ev.Distro{}):             typed(distro),
 	name(&ev.OSPackage{}):          typed(osPackage),
+	name(&ev.HostFlows{}):          typed(hostFlows),
+	name(&ev.Flow{}):               typed(flow),
 	name(&ev.ScanCompleted{}):      typed(scanCompleted),
 	name(&ev.ServiceObservation{}): typed(serviceObservation),
 	name(&ev.AssetDiscovery{}):     typed(assetDiscovery),
@@ -412,6 +415,91 @@ func osPackage(k *ev.OSPackage, path string) *Problem {
 	return nil
 }
 
+// hostFlows holds a window of connections to its window, and an unread window to no flows
+// (never "no connections"). Flows are sorted by their key, each key once, so one window has one
+// encoding.
+func hostFlows(f *ev.HostFlows, path string) *Problem {
+	start, end := f.GetWindowStart(), f.GetWindowEnd()
+	switch {
+	case start == nil:
+		return invalid(join(path, "window_start"), "required")
+	case end == nil:
+		return invalid(join(path, "window_end"), "required")
+	case !end.AsTime().After(start.AsTime()):
+		return invalid(join(path, "window_end"), "not after window_start")
+	case !f.GetRead() && f.GetUnreadable() == "":
+		return invalid(join(path, "unreadable"), "required when the connections could not be observed")
+	case !f.GetRead() && len(f.GetFlows()) > 0:
+		return invalid(join(path, "flows"), "an unread window carries no flows")
+	case f.GetRead() && f.GetUnreadable() != "":
+		return invalid(join(path, "unreadable"), "set on a read window")
+	}
+	flows := f.GetFlows()
+	for i, fl := range flows {
+		at := fmt.Sprintf("%s[%d]", join(path, "flows"), i)
+		if fl.GetFirstSeen().AsTime().Before(start.AsTime()) || fl.GetLastSeen().AsTime().After(end.AsTime()) {
+			return invalid(at, "seen outside the window")
+		}
+		if i > 0 && compareFlowKeys(flows[i-1], fl) >= 0 {
+			return invalid(at, "not after the flow before it (sorted, each key once)")
+		}
+	}
+	return nil
+}
+
+// compareFlowKeys orders flows by their aggregation key, as HostFlows.flows is sorted.
+func compareFlowKeys(a, b *ev.Flow) int {
+	return cmp.Or(
+		cmp.Compare(a.GetDirection(), b.GetDirection()),
+		cmp.Compare(a.GetRemoteAddr(), b.GetRemoteAddr()),
+		cmp.Compare(a.GetRemotePort(), b.GetRemotePort()),
+		cmp.Compare(a.GetLocalPort(), b.GetLocalPort()),
+		cmp.Compare(a.GetExe(), b.GetExe()),
+		cmp.Compare(a.GetComm(), b.GetComm()),
+		cmp.Compare(a.GetUnit(), b.GetUnit()),
+		cmp.Compare(a.GetAppProto(), b.GetAppProto()),
+		cmp.Compare(a.GetServiceName(), b.GetServiceName()),
+	)
+}
+
+// appProtos are the application protocols an agent names from a connection's first bytes.
+var appProtos = map[string]bool{"": true, "tls": true, "http": true}
+
+func flow(f *ev.Flow, path string) *Problem {
+	out := f.GetDirection() == "out"
+	switch {
+	case !out && f.GetDirection() != "in":
+		return invalid(join(path, "direction"), `want "out" or "in"`)
+	case f.GetProto() != "tcp":
+		return invalid(join(path, "proto"), `want "tcp"`)
+	case f.GetLocalPort() > 65535 || f.GetRemotePort() > 65535:
+		return invalid(path, "a port > 65535")
+	case out && (f.GetLocalPort() != 0 || f.GetRemotePort() == 0):
+		return invalid(join(path, "remote_port"), "an outbound flow has a remote port and no local one")
+	case !out && (f.GetRemotePort() != 0 || f.GetLocalPort() == 0):
+		return invalid(join(path, "local_port"), "an inbound flow has a local port and no remote one")
+	case canonicalIP(f.GetRemoteAddr()) != nil:
+		return invalid(join(path, "remote_addr"), "not a canonical IP address")
+	case !appProtos[f.GetAppProto()]:
+		return invalid(join(path, "app_proto"), `want "tls", "http" or ""`)
+	case f.GetServiceName() != "" && (f.GetAppProto() == "" || !out):
+		return invalid(join(path, "service_name"), "only an outbound flow's TLS or HTTP first bytes name a service")
+	case f.GetServiceName() != "" && (strings.HasPrefix(f.GetServiceName(), "*.") || dnsName(f.GetServiceName()) != nil):
+		return invalid(join(path, "service_name"), "not a lowercase DNS name")
+	case f.GetComm() == "" && f.GetExe() == "":
+		return invalid(join(path, "comm"), "required: the process's name")
+	case !textual(f.GetComm()) || !textual(f.GetExe()) || !textual(f.GetUnit()):
+		return invalid(path, "a process field holds a control character or a byte past ASCII")
+	case f.GetCount() == 0:
+		return invalid(join(path, "count"), "at least 1")
+	case f.GetFirstSeen() == nil || f.GetLastSeen() == nil:
+		return invalid(join(path, "first_seen"), "first_seen and last_seen are required")
+	case f.GetLastSeen().AsTime().Before(f.GetFirstSeen().AsTime()):
+		return invalid(join(path, "last_seen"), "before first_seen")
+	}
+	return nil
+}
+
 func trustedKey(k *ev.TrustedKey, path string) *Problem {
 	return fingerprint(k.GetFingerprint(), join(path, "fingerprint"), true)
 }
@@ -496,6 +584,12 @@ func counted(n uint64, first, last *timestamppb.Timestamp, path string) *Problem
 
 // printable reports whether s holds only printable ASCII other than a space (a key ID as sshd
 // logs it).
+// textual reports whether s is printable ASCII, spaces allowed (a process name or path may
+// hold one).
+func textual(s string) bool {
+	return printable(strings.ReplaceAll(s, " ", ""))
+}
+
 func printable(s string) bool {
 	for i := range len(s) {
 		if s[i] <= ' ' || s[i] > '~' {

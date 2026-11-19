@@ -1,0 +1,62 @@
+// asm.events.v1. The TCP connections a host agent (Portwarden) saw its own host's processes make
+// and accept, aggregated per window: who talks to whom, on which port, naming which service
+// (plan p72 phase 1, observed connections).
+//
+// Subject "host:<machine-id>" (the authenticated agent's own), `sequence` set. Counts and names
+// only: never payloads, URL paths, headers other than Host, cookies or credentials.
+syntax = "proto3";
+
+package asm.events.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/slidehq/signal/schema/eventsv1;eventsv1";
+
+// asm.host.flows: one window's connections. Sent at the end of each window (an hour) and for the
+// partial window when the agent stops. A window with no connections is still sent, so "none" is
+// told apart from "not observed".
+message HostFlows {
+  google.protobuf.Timestamp window_start = 1;
+  google.protobuf.Timestamp window_end = 2;
+  // At most 4,096 (2,048 per direction), sorted by (direction, remote_addr, remote_port,
+  // local_port, exe, comm, unit, app_proto, service_name), each key once.
+  repeated Flow flows = 3;
+  // Connections seen in the window but counted in no flow: past the row cap, or lost when the
+  // kernel's buffer was full.
+  uint64 dropped = 4;
+  // False when the connection probes could not run; unreadable says why (at most 256 bytes).
+  // An unread window is "cannot tell", never "no connections", and carries no flows.
+  bool read = 5;
+  string unreadable = 6;
+}
+
+// Connections that share process, direction, peer, port and service name.
+message Flow {
+  // "out": a process on this host connected; "in": a listener on this host accepted.
+  string direction = 1;
+  // "tcp".
+  string proto = 2;
+  // The process: for "out" the one that connected, for "in" the listener's holder. exe is ""
+  // when it could not be read (the process had exited); comm is its name (at most 16 bytes).
+  string exe = 3;
+  string comm = 4;
+  // The process's systemd unit, "" when none.
+  string unit = 5;
+  // "in": the local port accepted on; "out": 0 (ephemeral ports are not kept).
+  uint32 local_port = 6;
+  // The peer's address, IPv4-mapped IPv6 unmapped.
+  string remote_addr = 7;
+  // "out": the port connected to; "in": 0.
+  uint32 remote_port = 8;
+  // What the client named in its first bytes: the TLS ClientHello's server_name, or a plaintext
+  // HTTP/1.x request's Host (lowercase, port dropped). "" when neither was seen. Only "out"
+  // flows carry one: the agent reads the first bytes its own host's clients send.
+  string service_name = 9;
+  // "tls" when the first bytes were a TLS ClientHello, "http" an HTTP/1.x request, "" otherwise
+  // or when nothing was sent.
+  string app_proto = 10;
+  // Connections in the window, at least 1.
+  uint64 count = 11;
+  google.protobuf.Timestamp first_seen = 12;
+  google.protobuf.Timestamp last_seen = 13;
+}

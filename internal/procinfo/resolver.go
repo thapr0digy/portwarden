@@ -55,18 +55,31 @@ func (r *Resolver) SetCgroupTranslator(host func(string) string) { r.hostCgroup 
 // fails: whatever cannot be read stays empty. Fields already set are kept.
 func (r *Resolver) Enrich(p model.Process) model.Process {
 	dir := filepath.Join(r.procRoot, strconv.FormatUint(uint64(p.PID), 10))
-	exe := filepath.Join(dir, "exe")
-
-	if p.Exe == "" {
-		if target, err := os.Readlink(exe); err == nil {
-			p.Exe = target
-		}
-	}
+	p = r.identity(p)
 	if len(p.Cmdline) == 0 {
 		p.Cmdline = readCmdline(filepath.Join(dir, "cmdline"))
 	}
 	if p.SHA256 == "" {
-		p.SHA256 = r.hashExe(exe)
+		p.SHA256 = r.hashExe(filepath.Join(dir, "exe"))
+	}
+	return p
+}
+
+// Identity reads only what names a process, cheaply enough for every connection's first
+// sight of it: its executable (from /proc/<pid>/exe) and systemd unit (from its cgroup, or
+// from cgroupID once it has exited). No command line, no hash. Unread fields are "".
+func (r *Resolver) Identity(pid uint32, cgroupID uint64) (exe, unit string) {
+	p := r.identity(model.Process{PID: pid, CgroupID: cgroupID})
+	return p.Exe, p.Unit
+}
+
+// identity fills p's empty Exe, Unit and Container fields.
+func (r *Resolver) identity(p model.Process) model.Process {
+	dir := filepath.Join(r.procRoot, strconv.FormatUint(uint64(p.PID), 10))
+	if p.Exe == "" {
+		if target, err := os.Readlink(filepath.Join(dir, "exe")); err == nil {
+			p.Exe = target
+		}
 	}
 	if p.Unit == "" || p.Container == (model.Container{}) {
 		if path, ok := r.cgroupPath(dir, p.CgroupID); ok {

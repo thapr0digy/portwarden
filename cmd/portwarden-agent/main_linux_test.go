@@ -228,6 +228,28 @@ func TestHostPackagesConfig(t *testing.T) {
 	}
 }
 
+// Connection flows exist only in Signal's schema: the reader runs only with the door, unless
+// --host-flows off.
+func TestHostFlowsEnabled(t *testing.T) {
+	door := []string{"--ingest-url", "https://100.64.0.5:8443", "--ingest-pin", "sha256/pin"}
+	for args, want := range map[*[]string]bool{
+		{}:    false,
+		&door: true,
+		{door[0], door[1], door[2], door[3], "--host-flows", "off"}: false,
+	} {
+		o, err := parseFlags(*args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := hostFlowsEnabled(o); got != want {
+			t.Errorf("%v: enabled %v, want %v", *args, got, want)
+		}
+	}
+	if _, err := parseFlags([]string{"--host-flows", "on"}); err == nil || !strings.Contains(err.Error(), "--host-flows") {
+		t.Fatalf("--host-flows on: %v", err)
+	}
+}
+
 // Assumption: the kernel names the initial PID namespace pid:[4026531836] (PROC_PID_INIT_INO),
 // and a container's "/" is not the host init's root directory. "/" counts as the host's only
 // when both are shown; a read that fails, as without CAP_SYS_PTRACE or /proc, fails closed.

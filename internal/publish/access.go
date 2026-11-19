@@ -12,7 +12,8 @@ import (
 	"github.com/thapr0digy/portwarden/internal/spool"
 )
 
-// Host facts (README "Host identity facts", "Host packages") exist only in Signal's schema:
+// Host facts (README "Host identity facts", "Host packages", "Connection flows") exist only in
+// Signal's schema:
 // they are spooled as Signal events (eventsv1.Event with the run cursor filled in) under
 // asm.<host>.<suffix>, and never sent to NATS, whose consumers and per-host permissions do
 // not know them.
@@ -20,10 +21,11 @@ const (
 	suffixHostAccess   = "host.access"
 	suffixSignIns      = "host.sign_ins"
 	suffixHostPackages = "host.packages"
+	suffixHostFlows    = "host.flows"
 )
 
 // signalOnlySuffixes are the Signal-only kinds.
-var signalOnlySuffixes = []string{suffixHostAccess, suffixSignIns, suffixHostPackages} //nolint:gochecknoglobals // fixed table
+var signalOnlySuffixes = []string{suffixHostAccess, suffixSignIns, suffixHostPackages, suffixHostFlows} //nolint:gochecknoglobals // fixed table
 
 // ridersOfSnapshot are the full states that ride with the snapshot: Signal forgets their
 // digests on RESYNC_SNAPSHOT, so each is queued again with every resnapshot, in this order.
@@ -83,6 +85,13 @@ func (p *Publisher) SignIns(s *eventsv1.SignInSummary) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.enqueueSignalLocked(suffixSignIns, &eventsv1.Event{Data: &eventsv1.Event_SignIns{SignIns: s}})
+}
+
+// HostFlows queues asm.host.flows: one window's connections, a delta like SignIns.
+func (p *Publisher) HostFlows(f *eventsv1.HostFlows) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.enqueueSignalLocked(suffixHostFlows, &eventsv1.Event{Data: &eventsv1.Event_HostFlows{HostFlows: f}})
 }
 
 // enqueueSignalLocked fills in ev's type, id, time, subject and run cursor and queues it.

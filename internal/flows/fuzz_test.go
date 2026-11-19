@@ -3,7 +3,14 @@ package flows
 import (
 	"bytes"
 	"testing"
+	"time"
+
+	"github.com/thapr0digy/portwarden/internal/fuzzcheck"
 )
+
+// sniffBudget bounds one Sniff: it reads each byte a few times at most (2,048 come from the
+// kernel), and allocates only the name it returns.
+var sniffBudget = fuzzcheck.Budget{Time: time.Second, Base: 64 << 10, PerByte: 8}
 
 // FuzzSniff feeds Sniff untrusted first bytes (anything a process on the host sends). It
 // must not panic, must read nothing past its input, and may only return a service name that
@@ -16,7 +23,8 @@ func FuzzSniff(f *testing.F) {
 	f.Add([]byte{tlsHandshake, 3, 3, 0xff, 0xff, 1, 0xff, 0xff, 0xff})
 	f.Fuzz(func(t *testing.T, b []byte) {
 		in := bytes.Clone(b)
-		app, service := Sniff(b)
+		var app, service string
+		fuzzcheck.Bounded(t, sniffBudget, len(b), func() { app, service = Sniff(b) })
 		if !bytes.Equal(in, b) {
 			t.Fatal("Sniff changed its input")
 		}

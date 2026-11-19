@@ -3,6 +3,7 @@ package validate
 import (
 	"cmp"
 	"fmt"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -462,34 +463,33 @@ func compareFlowKeys(a, b *ev.Flow) int {
 	)
 }
 
-// appProtos are the application protocols an agent names from a connection's first bytes.
-var appProtos = map[string]bool{"": true, "tls": true, "http": true}
-
+// flow holds one row to its direction's shape. A direction, proto or app_proto this version
+// does not know is opaque (COMPATIBILITY.md 2.4): accepted, and left to the reader.
 func flow(f *ev.Flow, path string) *Problem {
-	out := f.GetDirection() == "out"
+	dir, addr := f.GetDirection(), f.GetRemoteAddr()
 	switch {
-	case !out && f.GetDirection() != "in":
-		return invalid(join(path, "direction"), `want "out" or "in"`)
-	case f.GetProto() != "tcp":
-		return invalid(join(path, "proto"), `want "tcp"`)
+	case dir == "":
+		return invalid(join(path, "direction"), "required")
+	case f.GetProto() == "":
+		return invalid(join(path, "proto"), "required")
 	case f.GetLocalPort() > 65535 || f.GetRemotePort() > 65535:
 		return invalid(path, "a port > 65535")
-	case out && (f.GetLocalPort() != 0 || f.GetRemotePort() == 0):
+	case dir == "out" && (f.GetLocalPort() != 0 || f.GetRemotePort() == 0):
 		return invalid(join(path, "remote_port"), "an outbound flow has a remote port and no local one")
-	case !out && (f.GetRemotePort() != 0 || f.GetLocalPort() == 0):
+	case dir == "in" && (f.GetRemotePort() != 0 || f.GetLocalPort() == 0):
 		return invalid(join(path, "local_port"), "an inbound flow has a local port and no remote one")
-	case canonicalIP(f.GetRemoteAddr()) != nil:
+	case dir == "out" && addr == "":
+		return invalid(join(path, "remote_addr"), "required on an outbound flow")
+	case addr != "" && canonicalIP(addr) != nil:
 		return invalid(join(path, "remote_addr"), "not a canonical IP address")
-	case !appProtos[f.GetAppProto()]:
-		return invalid(join(path, "app_proto"), `want "tls", "http" or ""`)
-	case f.GetServiceName() != "" && (f.GetAppProto() == "" || !out):
-		return invalid(join(path, "service_name"), "only an outbound flow's TLS or HTTP first bytes name a service")
+	case dir == "in" && addr != "" && publicIP(netip.MustParseAddr(addr)):
+		return invalid(join(path, "remote_addr"), `a public client: summed into remote_addr ""`)
+	case f.GetServiceName() != "" && f.GetAppProto() == "":
+		return invalid(join(path, "service_name"), "set without app_proto")
 	case f.GetServiceName() != "" && (strings.HasPrefix(f.GetServiceName(), "*.") || dnsName(f.GetServiceName()) != nil):
 		return invalid(join(path, "service_name"), "not a lowercase DNS name")
-	case f.GetComm() == "" && f.GetExe() == "":
-		return invalid(join(path, "comm"), "required: the process's name")
-	case !textual(f.GetComm()) || !textual(f.GetExe()) || !textual(f.GetUnit()):
-		return invalid(path, "a process field holds a control character or a byte past ASCII")
+	case hasControl(f.GetComm()) || hasControl(f.GetExe()) || hasControl(f.GetUnit()):
+		return invalid(path, "a process field holds a control character")
 	case f.GetCount() == 0:
 		return invalid(join(path, "count"), "at least 1")
 	case f.GetFirstSeen() == nil || f.GetLastSeen() == nil:
@@ -498,6 +498,21 @@ func flow(f *ev.Flow, path string) *Problem {
 		return invalid(join(path, "last_seen"), "before first_seen")
 	}
 	return nil
+}
+
+// sharedAddressSpace is RFC 6598's carrier-grade NAT range.
+var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+
+// publicIP reports whether a is a public address: not private (RFC 1918, unique-local
+// fc00::/7), shared (100.64.0.0/10), link-local or loopback. An inbound flow never names one.
+func publicIP(a netip.Addr) bool {
+	a = a.Unmap()
+	return !a.IsPrivate() && !a.IsLoopback() && !a.IsLinkLocalUnicast() && !sharedAddressSpace.Contains(a)
+}
+
+// hasControl reports whether s holds an ASCII control character.
+func hasControl(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return r < ' ' || r == 0x7f })
 }
 
 func trustedKey(k *ev.TrustedKey, path string) *Problem {
@@ -584,12 +599,6 @@ func counted(n uint64, first, last *timestamppb.Timestamp, path string) *Problem
 
 // printable reports whether s holds only printable ASCII other than a space (a key ID as sshd
 // logs it).
-// textual reports whether s is printable ASCII, spaces allowed (a process name or path may
-// hold one).
-func textual(s string) bool {
-	return printable(strings.ReplaceAll(s, " ", ""))
-}
-
 func printable(s string) bool {
 	for i := range len(s) {
 		if s[i] <= ' ' || s[i] > '~' {

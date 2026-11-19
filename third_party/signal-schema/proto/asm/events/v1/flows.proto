@@ -14,7 +14,8 @@ option go_package = "github.com/slidehq/signal/schema/eventsv1;eventsv1";
 
 // asm.host.flows: one window's connections. Sent at the end of each window (an hour) and for the
 // partial window when the agent stops. A window with no connections is still sent, so "none" is
-// told apart from "not observed".
+// told apart from "not observed". A delta: Signal adds the counts up, so a window too large for
+// one event is split over several with the same window bounds.
 message HostFlows {
   google.protobuf.Timestamp window_start = 1;
   google.protobuf.Timestamp window_end = 2;
@@ -44,7 +45,9 @@ message Flow {
   string unit = 5;
   // "in": the local port accepted on; "out": 0 (ephemeral ports are not kept).
   uint32 local_port = 6;
-  // The peer's address, IPv4-mapped IPv6 unmapped.
+  // The peer's address, canonical (IPv4-mapped IPv6 unmapped). "in": a public peer (not private,
+  // shared 100.64.0.0/10, link-local, loopback or unique-local) is never sent: every public client
+  // of a port is summed into one row with remote_addr "".
   string remote_addr = 7;
   // "out": the port connected to; "in": 0.
   uint32 remote_port = 8;

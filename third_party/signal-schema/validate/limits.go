@@ -121,7 +121,6 @@ var Default = Limits{
 		"asm.events.v1.HostFlows.unreadable":              {Bytes: 256},
 		"asm.events.v1.Flow.comm":                         {Bytes: 16},
 		"asm.events.v1.Flow.unit":                         {Bytes: 256},
-		"asm.events.v1.Flow.remote_addr":                  {Bytes: 45},
 		"asm.events.v1.Flow.service_name":                 {Bytes: 253},
 		"asm.events.v1.IngestResponse.rejected":           {Items: 1000},
 		"asm.events.v1.Batch.events":                      {Items: 1000},

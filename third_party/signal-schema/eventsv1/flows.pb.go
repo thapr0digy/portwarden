@@ -31,7 +31,8 @@ const (
 
 // asm.host.flows: one window's connections. Sent at the end of each window (an hour) and for the
 // partial window when the agent stops. A window with no connections is still sent, so "none" is
-// told apart from "not observed".
+// told apart from "not observed". A delta: Signal adds the counts up, so a window too large for
+// one event is split over several with the same window bounds.
 type HostFlows struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	WindowStart *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=window_start,json=windowStart,proto3" json:"window_start,omitempty"`
@@ -137,7 +138,9 @@ type Flow struct {
 	Unit string `protobuf:"bytes,5,opt,name=unit,proto3" json:"unit,omitempty"`
 	// "in": the local port accepted on; "out": 0 (ephemeral ports are not kept).
 	LocalPort uint32 `protobuf:"varint,6,opt,name=local_port,json=localPort,proto3" json:"local_port,omitempty"`
-	// The peer's address, IPv4-mapped IPv6 unmapped.
+	// The peer's address, canonical (IPv4-mapped IPv6 unmapped). "in": a public peer (not private,
+	// shared 100.64.0.0/10, link-local, loopback or unique-local) is never sent: every public client
+	// of a port is summed into one row with remote_addr "".
 	RemoteAddr string `protobuf:"bytes,7,opt,name=remote_addr,json=remoteAddr,proto3" json:"remote_addr,omitempty"`
 	// "out": the port connected to; "in": 0.
 	RemotePort uint32 `protobuf:"varint,8,opt,name=remote_port,json=remotePort,proto3" json:"remote_port,omitempty"`

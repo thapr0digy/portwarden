@@ -15,6 +15,8 @@
 //          when they start like a TLS handshake record or an HTTP/1.x method, then the mark
 //          is dropped. Server-first protocols (SSH, SMTP) and kernel senders send nothing.
 // The ring buffer bounds what a busy host costs: a full ring drops events and counts them.
+// Records are submitted without waking the agent until WAKEUP_BYTES wait in the ring; the
+// agent also drains it on a short timer, so a busy host costs one wakeup per many records.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -27,6 +29,9 @@
 // The first bytes read of a client's first send: enough for a ClientHello's server_name
 // behind a post-quantum key share, and for an HTTP request line and Host.
 #define HEAD_MAX 2048
+
+// Waiting bytes past which a submit wakes the agent (an eighth of the ring).
+#define WAKEUP_BYTES (256 * 1024)
 
 // A TLS record of type handshake starts with this byte (RFC 8446 5.1).
 #define TLS_HANDSHAKE 0x16
@@ -90,6 +95,12 @@ struct {
 	__type(value, __u64);
 } flow_counters SEC(".maps");
 
+// submit_flags wakes the agent only once enough records wait; it drains the rest on a timer.
+static __always_inline __u64 submit_flags(void)
+{
+	return bpf_ringbuf_query(&flow_events, BPF_RB_AVAIL_DATA) >= WAKEUP_BYTES ? BPF_RB_FORCE_WAKEUP : BPF_RB_NO_WAKEUP;
+}
+
 static __always_inline void count(__u32 index)
 {
 	__u64 *value = bpf_map_lookup_elem(&flow_counters, &index);
@@ -128,7 +139,7 @@ static __always_inline int emit_conn(struct sock *sk, __u32 kind, __u64 cookie)
 	}
 	// The process's name, not the calling thread's: a thread can rename itself.
 	bpf_probe_read_kernel_str(e->comm, sizeof(e->comm), bpf_get_current_task_btf()->group_leader->comm);
-	bpf_ringbuf_submit(e, 0);
+	bpf_ringbuf_submit(e, submit_flags());
 	return 1;
 }
 
@@ -231,7 +242,7 @@ int BPF_PROG(on_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
 		bpf_ringbuf_discard(h, 0);
 		return 0;
 	}
-	bpf_ringbuf_submit(h, 0);
+	bpf_ringbuf_submit(h, submit_flags());
 	return 0;
 }
 

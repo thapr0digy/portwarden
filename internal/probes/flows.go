@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
@@ -25,6 +27,9 @@ const (
 	flowHeadDataOffset = 16
 	flowHeadMax        = 2048
 	flowEventsBuffer   = 4096
+	// flowDrainEvery is how often the reader drains the ring when no wakeup came (the
+	// programs wake it only once 256 KiB wait).
+	flowDrainEvery = 200 * time.Millisecond
 )
 
 // Flows owns the connection programs of bpf/flows.bpf.c, their links and the ring buffer
@@ -159,7 +164,11 @@ func (f *Flows) readLoop() {
 	defer close(f.events)
 	var rec ringbuf.Record
 	for {
+		f.reader.SetDeadline(time.Now().Add(flowDrainEvery))
 		if err := f.reader.ReadInto(&rec); err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				continue
+			}
 			if !errors.Is(err, ringbuf.ErrClosed) {
 				f.readErr = fmt.Errorf("read flows ring buffer: %w", err)
 			}

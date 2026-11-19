@@ -66,6 +66,21 @@ func TestDecodersRefuseWhatTheContractDoesNotName(t *testing.T) {
 	}
 }
 
+// A runner older than the sandbox field had only Firecracker; a name Signal does not know is refused.
+func TestALeaseRequestNamesItsSandboxAndAnOlderRunnerIsFirecracker(t *testing.T) {
+	r, err := lease.DecodeLeaseRequest([]byte(`{"runner_version":"1","image_digest":"` + digest + `","vantage":"v"}`))
+	if err != nil || r.Sandbox != lease.SandboxFirecracker {
+		t.Errorf("an older runner's request: %+v %v", r, err)
+	}
+	r, err = lease.DecodeLeaseRequest([]byte(`{"runner_version":"1","image_digest":"` + digest + `","vantage":"v","sandbox":"container"}`))
+	if err != nil || r.Sandbox != lease.SandboxContainer {
+		t.Errorf("a container worker's request: %+v %v", r, err)
+	}
+	if _, err := lease.DecodeLeaseRequest([]byte(`{"runner_version":"1","image_digest":"` + digest + `","vantage":"v","sandbox":"none"}`)); err == nil {
+		t.Error("an unknown sandbox was accepted")
+	}
+}
+
 func TestGoodBodiesDecode(t *testing.T) {
 	if _, err := lease.DecodeLeaseRequest([]byte(`{"runner_version":"1","image_digest":"` + digest + `","vantage":"scan-1"}`)); err != nil {
 		t.Error(err)

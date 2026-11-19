@@ -1,0 +1,51 @@
+// asm.events.v1. What a host agent (Portwarden) reports about the OS packages installed on its own
+// host (the software inventory, plan p39 phase 6; docs/notes/software-inventory.md "Host packages").
+//
+// Subject "host:<machine-id>" (the authenticated agent's own), `sequence` set. Only dpkg hosts
+// (Ubuntu, Debian) report today. Each package carries its source package and version: Ubuntu's and
+// Debian's advisories are filed under the source package ("openssh"), never the binary one
+// ("openssh-server"), so a list without them could match no advisory.
+syntax = "proto3";
+
+package asm.events.v1;
+
+option go_package = "github.com/slidehq/signal/schema/eventsv1;eventsv1";
+
+// asm.host.packages: the host's whole installed package list. Sent at the start of each run, when
+// the package database changes, at the recheck (unchanged=true with the digest and nothing else)
+// and on a RESYNC_SNAPSHOT directive, as asm.host.snapshot is.
+message HostPackages {
+  // False when the package database could not be read; unreadable says why (at most 256 bytes).
+  // An unreadable list is "cannot tell", never "no packages", and carries no packages.
+  bool read = 1;
+  string unreadable = 2;
+  // The package manager the list comes from: "dpkg".
+  string manager = 3;
+  Distro distro = 4;
+  // Installed packages only (dpkg status "install ok installed"), sorted by name then arch, each
+  // (name, arch) once. At most 6,000: past that the first 6,000 are sent and truncated is set.
+  repeated OSPackage packages = 5;
+  bool truncated = 6;
+  // Installed packages before the cap.
+  uint32 total = 7;
+  // Lowercase hex SHA-256 of the deterministic encoding of distro and packages.
+  string digest = 8;
+  bool unchanged = 9;
+}
+
+// The distribution as /etc/os-release names it.
+message Distro {
+  string id = 1;          // ubuntu, debian (ID)
+  string version_id = 2;  // 24.04, 12 (VERSION_ID)
+  string codename = 3;    // noble, bookworm (VERSION_CODENAME)
+}
+
+// One installed binary package, as dpkg-query prints it:
+// ${Package} ${Version} ${source:Package} ${source:Version} ${Architecture}.
+message OSPackage {
+  string name = 1;
+  string version = 2;
+  string source = 3;
+  string source_version = 4;
+  string arch = 5;
+}

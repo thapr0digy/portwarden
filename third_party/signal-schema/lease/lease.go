@@ -71,7 +71,20 @@ type Request struct {
 	RunnerVersion string `json:"runner_version"`
 	ImageDigest   string `json:"image_digest"`
 	Vantage       string `json:"vantage"`
+	// Sandbox is how the worker isolates a job: SandboxFirecracker or SandboxContainer. A
+	// runner older than the field sends none, which is read as SandboxFirecracker (the only
+	// backend it had).
+	Sandbox string `json:"sandbox,omitempty"`
 }
+
+// The sandboxes a worker may run a job in.
+const (
+	SandboxFirecracker = "firecracker" // one microVM per job (the production path)
+	SandboxContainer   = "container"   // one container per job: weaker isolation
+)
+
+// ValidSandbox reports whether s names a sandbox Signal knows.
+func ValidSandbox(s string) bool { return s == SandboxFirecracker || s == SandboxContainer }
 
 // Target is what the job may touch: one address and its ports (empty: the profile's own).
 type Target struct {
@@ -161,6 +174,12 @@ func DecodeLeaseRequest(b []byte) (Request, error) {
 	}
 	if !plain(r.RunnerVersion, 64) || !plain(r.Vantage, 128) || !ValidImageDigest(r.ImageDigest) {
 		return Request{}, fmt.Errorf("%w: runner_version, vantage or image_digest", ErrInvalid)
+	}
+	if r.Sandbox == "" {
+		r.Sandbox = SandboxFirecracker
+	}
+	if !ValidSandbox(r.Sandbox) {
+		return Request{}, fmt.Errorf("%w: sandbox", ErrInvalid)
 	}
 	return r, nil
 }

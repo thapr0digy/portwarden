@@ -93,6 +93,8 @@ func readSSHDState(root fs.FS) (SSHD, *eventsv1.Sshd) {
 		AuthorizedKeysFile:          clip(cfg.AuthorizedKeysFile, maxReasonBytes),
 		AuthorizedPrincipalsFile:    clip(cfg.AuthorizedPrincipalsFile, maxReasonBytes),
 		AuthorizedPrincipalsCommand: cfg.AuthorizedPrincipalsCommand,
+		PasswordAuthentication:      cfg.PasswordAuthentication,
+		PermitRootLogin:             cfg.PermitRootLogin,
 	}
 	if cfg.TrustedUserCAKeys != "" {
 		keys, err := readCAKeys(root, cfg.TrustedUserCAKeys)

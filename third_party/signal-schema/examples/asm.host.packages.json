@@ -1,0 +1,6 @@
+{"specversion":"1.0","source":"urn:asm:agent:4f1c2a9e7b3d4c5e8f9a0b1c2d3e4f5a","subject":"host:4f1c2a9e7b3d4c5e8f9a0b1c2d3e4f5a","datacontenttype":"application/json","producer":"portwarden-agent/v0.9.3","runid":"01JC8Z6X4P9QK2M3N5R7T8V0WA","bootid":"6e0f9d1c-3b2a-4e8f-9c7d-5a4b3c2d1e0f","runnumber":"7","id":"01JC8Z6X4Q00000000000000B1","type":"asm.host.packages","time":"2026-11-10T14:00:02.500Z","dataschema":"asm.events.v1/HostPackages","sequence":"5",
+ "data":{"read":true,"manager":"dpkg","distro":{"id":"ubuntu","version_id":"22.04","codename":"jammy"},
+         "packages":[{"name":"libc6","version":"2.35-0ubuntu3.8","source":"glibc","source_version":"2.35-0ubuntu3.8","arch":"amd64"},
+                     {"name":"openssh-server","version":"1:8.9p1-3ubuntu0.6","source":"openssh","source_version":"1:8.9p1-3ubuntu0.6","arch":"amd64"}],
+         "total":2,
+         "digest":"8c2f4e6a1b3d5f7092a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8"}}

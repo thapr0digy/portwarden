@@ -5,13 +5,14 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/thapr0digy/portwarden/internal/dpkg"
 )
 
 // Default locations for Dpkg.
 const (
 	UpgradeMarker    = "/run/portwarden-agent/upgrading"
 	DpkgInfoDir      = "/var/lib/dpkg/info"
-	DpkgStatus       = "/var/lib/dpkg/status"
 	UpgradeMarkerAge = 10 * time.Minute
 )
 
@@ -27,7 +28,7 @@ type Dpkg struct {
 
 // NewDpkg returns Dpkg for package pkg at the default paths.
 func NewDpkg(pkg string) *Dpkg {
-	return &Dpkg{Package: pkg, Marker: UpgradeMarker, InfoDir: DpkgInfoDir, Status: DpkgStatus,
+	return &Dpkg{Package: pkg, Marker: UpgradeMarker, InfoDir: DpkgInfoDir, Status: dpkg.StatusFile,
 		MaxAge: UpgradeMarkerAge, Now: time.Now}
 }
 
@@ -73,19 +74,13 @@ func (d *Dpkg) statusVersion() string {
 		return ""
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64<<10), 1<<20)
-	in := false
-	for sc.Scan() {
-		line := sc.Text()
-		switch {
-		case line == "":
-			in = false
-		case strings.HasPrefix(line, "Package: "):
-			in = strings.TrimPrefix(line, "Package: ") == d.Package
-		case in && strings.HasPrefix(line, "Version: "):
-			return strings.TrimPrefix(line, "Version: ")
+	version := ""
+	_ = dpkg.Stanzas(f, func(s dpkg.Stanza) bool { // an unreadable file is no version
+		if s["Package"] == d.Package {
+			version = s["Version"]
+			return false
 		}
-	}
-	return ""
+		return true
+	})
+	return version
 }

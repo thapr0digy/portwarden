@@ -33,11 +33,13 @@ func TestReadHostAccessOnAnAnsibleHost(t *testing.T) {
 			{Fingerprint: caLocalFP, Label: "host-local"},
 		},
 		AuthorizedPrincipalsFile: "/etc/ssh/authorized_principals/%u",
+		PasswordAuthentication:   "no",
+		PermitRootLogin:          "no",
 	}
 	if !proto.Equal(a.GetSshd(), want) {
 		t.Fatalf("sshd = %v\nwant %v", a.GetSshd(), want)
 	}
-	if sshd.PasswordAuthentication || sshd.PermitRootLogin != "no" {
+	if sshd.PasswordAuthentication != "no" || sshd.PermitRootLogin != "no" {
 		t.Fatalf("the drop-in's settings come first: %+v", sshd)
 	}
 	if len(a.GetAccounts()) != 2 || a.GetAccounts()[0].GetAccount() != "pants" {
@@ -115,6 +117,33 @@ func TestUnreadableSSHDConfigIsNotNone(t *testing.T) {
 	a, _ = ReadHostAccess(h, []string{"pants"})
 	if a.GetSshd().GetRead() || !strings.Contains(a.GetSshd().GetUnreadable(), "/etc/ssh/sshd_config: permission denied") {
 		t.Fatalf("sshd = %v", a.GetSshd())
+	}
+}
+
+// Assumption: the two settings are "cannot tell" ("") whenever sshd's configuration is not
+// read (an unreadable file, or a value sshd refuses), never sshd's default.
+func TestSSHDSettingsUnknownWhenUnread(t *testing.T) {
+	h := ansibleHost()
+	h.deny["etc/ssh/sshd_config"] = true
+	a, _ := ReadHostAccess(h, []string{"pants"})
+	if s := a.GetSshd(); s.GetPasswordAuthentication() != "" || s.GetPermitRootLogin() != "" {
+		t.Fatalf("an unread configuration carries no settings: %v", s)
+	}
+	h = ansibleHost()
+	h.write("etc/ssh/sshd_config.d/20-bad.conf", "PermitRootLogin maybe\n")
+	a, _ = ReadHostAccess(h, []string{"pants"})
+	if s := a.GetSshd(); s.GetRead() || s.GetPermitRootLogin() != "" || !strings.Contains(s.GetUnreadable(), "not a value sshd takes") {
+		t.Fatalf("a value sshd refuses is an unread configuration: %v", s)
+	}
+}
+
+// Assumption: Ubuntu's stock sshd_config sets neither setting (both commented out), so the
+// event carries sshd's defaults as read, "yes" and "prohibit-password".
+func TestSSHDSettingsDefaultWhenUnset(t *testing.T) {
+	h := fsOf(map[string]string{"etc/ssh/sshd_config": "#PermitRootLogin prohibit-password\n#PasswordAuthentication yes\nKbdInteractiveAuthentication no\n"})
+	a, _ := ReadHostAccess(h, nil)
+	if s := a.GetSshd(); !s.GetRead() || s.GetPasswordAuthentication() != "yes" || s.GetPermitRootLogin() != "prohibit-password" {
+		t.Fatalf("sshd = %v", s)
 	}
 }
 

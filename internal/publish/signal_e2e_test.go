@@ -1,16 +1,20 @@
 package publish_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/netip"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -19,6 +23,7 @@ import (
 	"github.com/slidehq/signal/schema/ingesttest"
 	"github.com/slidehq/signal/schema/protocol"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/thapr0digy/portwarden/internal/access"
 	"github.com/thapr0digy/portwarden/internal/agent"
@@ -58,12 +63,52 @@ func stored(ref *ingesttest.Server, typ string, port uint32) *eventsv1.Event {
 	return nil
 }
 
-// The task's acceptance proof: a listener opened on the agent (its real event loop, fed
-// one kernel observation) is stored by Signal's reference door, which runs the product's
-// own signature, validation, scope and run-cursor code (schema/protocol). The host's key
-// is the seed natsauth mints, registered the way import-nkeys registers it.
-func TestE2EListenerOpenedOnTheAgentIsStoredBySignal(t *testing.T) {
-	seed := filepath.Join(t.TempDir(), "host-"+e2eHost+".nk")
+// sentLog records the events of every batch sent to the door, in order.
+type sentLog struct {
+	mu     sync.Mutex
+	events []*eventsv1.Event
+}
+
+func (l *sentLog) all() []*eventsv1.Event {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.events)
+}
+
+// recording reads each batch request's events into log before h serves it.
+func recording(t *testing.T, log *sentLog, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		raw := body
+		if r.Header.Get("Content-Encoding") == "gzip" {
+			zr, err := gzip.NewReader(bytes.NewReader(body))
+			if err == nil {
+				raw, err = io.ReadAll(zr)
+			}
+			if err != nil {
+				t.Error(err)
+			}
+		}
+		if b := (&eventsv1.Batch{}); r.Header.Get("Content-Type") == "application/x-protobuf" && proto.Unmarshal(raw, b) == nil {
+			log.mu.Lock()
+			log.events = append(log.events, b.GetEvents()...)
+			log.mu.Unlock()
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// signalDoor is Signal's reference door (ingesttest: the product's own signature,
+// validation, scope and run-cursor code, schema/protocol) behind pinned TLS, with host's key
+// registered the way import-nkeys registers it (the seed natsauth mints), a publisher
+// sending to it as that host, and the log of what was sent.
+func signalDoor(t *testing.T, host string) (*ingesttest.Server, *publish.Publisher, *sentLog) {
+	t.Helper()
+	seed := filepath.Join(t.TempDir(), "host-"+host+".nk")
 	kp, err := natsauth.CreateUserSeed(seed)
 	if err != nil {
 		t.Fatal(err)
@@ -74,17 +119,24 @@ func TestE2EListenerOpenedOnTheAgentIsStoredBySignal(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := ingesttest.New()
-	ref.AddPrincipal(protocol.Principal{ID: "pr-1", Kind: eventsv1.ProducerAgent, HostID: e2eHost}, "ak-1", key.Public().(ed25519.PublicKey))
-	ts, pin := doortest.Start(t, ref, 0)
-
+	ref.AddPrincipal(protocol.Principal{ID: "pr-1", Kind: eventsv1.ProducerAgent, HostID: host}, "ak-1", key.Public().(ed25519.PublicKey))
+	sent := &sentLog{}
+	ts, pin := doortest.Start(t, recording(t, sent, ref), 0)
 	pub, err := publish.New(context.Background(), publish.Config{
-		HostID: e2eHost, AgentVersion: "v1.0.0", BootID: "boot-1", RunNumber: 1,
+		HostID: host, AgentVersion: "v1.0.0", BootID: "boot-1", RunNumber: 1,
 		SpoolDir: t.TempDir(),
 		Ingest:   &publish.IngestConfig{URL: ts.URL, Pin: pin, KeyFile: seed, KeyID: "ak-1"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return ref, pub, sent
+}
+
+// The task's acceptance proof: a listener opened on the agent (its real event loop, fed
+// one kernel observation) is stored by Signal's reference door.
+func TestE2EListenerOpenedOnTheAgentIsStoredBySignal(t *testing.T) {
+	ref, pub, _ := signalDoor(t, e2eHost)
 	pub.SetHost(model.HostInfo{Cloud: "aws", InstanceID: "i-0abc"})
 
 	src := make(events)
@@ -192,27 +244,7 @@ func journalRecord(t *testing.T, msg, cursor string) string {
 // asm.host.sign_ins through the HTTPS sink, and Signal's reference door stores them with
 // nothing refused and no gap.
 func TestE2EHostIdentityFactsAreStoredBySignal(t *testing.T) {
-	seed := filepath.Join(t.TempDir(), "host.nk")
-	kp, err := natsauth.CreateUserSeed(seed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kp.Wipe()
-	key, err := natsauth.ReadUserKey(seed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ref := ingesttest.New()
-	ref.AddPrincipal(protocol.Principal{ID: "pr-1", Kind: eventsv1.ProducerAgent, HostID: e2eHost}, "ak-1", key.Public().(ed25519.PublicKey))
-	ts, pin := doortest.Start(t, ref, 0)
-	pub, err := publish.New(context.Background(), publish.Config{
-		HostID: e2eHost, AgentVersion: "v1.0.0", BootID: "boot-1", RunNumber: 1,
-		SpoolDir: t.TempDir(),
-		Ingest:   &publish.IngestConfig{URL: ts.URL, Pin: pin, KeyFile: seed, KeyID: "ak-1"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	ref, pub, _ := signalDoor(t, e2eHost)
 
 	const fp = "SHA256:I8mg+yasAvN5VKOREFoeN54OIuc1hm+LJL6KAGScwsI"
 	shared, err := access.ParseSharedKeys("underpants " + fp + "\n")

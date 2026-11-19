@@ -8,8 +8,8 @@
 // seq, before the new run's own. The spool holds asm.v1 messages under their NATS
 // subjects whatever the destination; the HTTPS sender converts them as it sends
 // (signalEvent), so a spool written under one destination drains to the other. The host
-// identity facts (HostAccess, SignIns) are the exception: Signal-only, spooled as Signal
-// events and dropped by the NATS sender (access.go).
+// facts (HostAccess, SignIns, HostPackages) are the exception: Signal-only, spooled as
+// Signal events and dropped by the NATS sender (access.go).
 package publish
 
 import (
@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
-	"github.com/slidehq/signal/schema/eventsv1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -116,8 +115,9 @@ type Publisher struct {
 	// first pass.
 	tamper *asmv1.TamperStatus
 
-	// access is the last full SSH access state queued (HostAccess); nil until the first.
-	access *eventsv1.HostAccess
+	// riders are the last full states queued that ride with the snapshot (HostAccess,
+	// HostPackages), by suffix; a kind is absent until its first.
+	riders map[string]rider
 
 	onDenied func(subject string)
 
@@ -151,6 +151,7 @@ func New(ctx context.Context, cfg Config) (*Publisher, error) {
 		hostID:  cfg.HostID,
 		current: make(map[model.ListenerKey]state.Listener),
 		proxies: make(map[string]model.ProxyRoutes),
+		riders:  make(map[string]rider),
 		runID:   ulid.Make().String(),
 		bootID:  cfg.BootID, runNumber: cfg.RunNumber,
 		agentVersion: cfg.AgentVersion, exeSHA256: cfg.ExeSHA256,
@@ -525,16 +526,14 @@ func cloneExposure(e model.Exposure) model.Exposure {
 // resnapshot queues a snapshot of the current listener set (the last snapshot plus every
 // change since) after a reconnect, so a consumer that missed events while the link was
 // down can resynchronise without a stale snapshot undoing a later change. The SSH access
-// state goes with it: Signal forgets its digest on the same resync.
+// state and the package list go with it: Signal forgets their digests on the same resync.
 func (p *Publisher) resnapshot() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.haveSnap {
 		p.resnapshotLocked()
 	}
-	if p.access != nil {
-		p.enqueueAccessLocked()
-	}
+	p.enqueueRidersLocked()
 }
 
 // resnapshotAfterOverflow queues a resnapshot when messages queued after the last

@@ -159,6 +159,7 @@ type Event struct {
 	//	*Event_ProxyRoutes
 	//	*Event_HostAccess
 	//	*Event_SignIns
+	//	*Event_HostPackages
 	//	*Event_CloudExposure
 	//	*Event_ProbeResult
 	//	*Event_HostForgotten
@@ -396,6 +397,15 @@ func (x *Event) GetSignIns() *SignInSummary {
 	return nil
 }
 
+func (x *Event) GetHostPackages() *HostPackages {
+	if x != nil {
+		if x, ok := x.Data.(*Event_HostPackages); ok {
+			return x.HostPackages
+		}
+	}
+	return nil
+}
+
 func (x *Event) GetCloudExposure() *CloudExposureAssessment {
 	if x != nil {
 		if x, ok := x.Data.(*Event_CloudExposure); ok {
@@ -539,6 +549,10 @@ type Event_SignIns struct {
 	SignIns *SignInSummary `protobuf:"bytes,31,opt,name=sign_ins,json=signIns,proto3,oneof"` // asm.host.sign_ins
 }
 
+type Event_HostPackages struct {
+	HostPackages *HostPackages `protobuf:"bytes,32,opt,name=host_packages,json=hostPackages,proto3,oneof"` // asm.host.packages
+}
+
 type Event_CloudExposure struct {
 	// Product services (cloud look-up, outside prober, operator actions).
 	CloudExposure *CloudExposureAssessment `protobuf:"bytes,40,opt,name=cloud_exposure,json=cloudExposure,proto3,oneof"` // asm.exposure.cloud_assessed
@@ -604,6 +618,8 @@ func (*Event_ProxyRoutes) isEvent_Data() {}
 func (*Event_HostAccess) isEvent_Data() {}
 
 func (*Event_SignIns) isEvent_Data() {}
+
+func (*Event_HostPackages) isEvent_Data() {}
 
 func (*Event_CloudExposure) isEvent_Data() {}
 
@@ -1231,7 +1247,7 @@ var File_asm_events_v1_envelope_proto protoreflect.FileDescriptor
 
 const file_asm_events_v1_envelope_proto_rawDesc = "" +
 	"\n" +
-	"\x1casm/events/v1/envelope.proto\x12\rasm.events.v1\x1a\x1aasm/events/v1/access.proto\x1a\x19asm/events/v1/agent.proto\x1a\x1dasm/events/v1/discovery.proto\x1a\x1casm/events/v1/exposure.proto\x1a\x1basm/events/v1/finding.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfc\x0e\n" +
+	"\x1casm/events/v1/envelope.proto\x12\rasm.events.v1\x1a\x1aasm/events/v1/access.proto\x1a\x19asm/events/v1/agent.proto\x1a\x1dasm/events/v1/discovery.proto\x1a\x1casm/events/v1/exposure.proto\x1a\x1basm/events/v1/finding.proto\x1a\x1casm/events/v1/packages.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xc0\x0f\n" +
 	"\x05Event\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x16\n" +
@@ -1260,7 +1276,8 @@ const file_asm_events_v1_envelope_proto_rawDesc = "" +
 	"\fproxy_routes\x18\x1d \x01(\v2\x1a.asm.events.v1.ProxyRoutesH\x00R\vproxyRoutes\x12<\n" +
 	"\vhost_access\x18\x1e \x01(\v2\x19.asm.events.v1.HostAccessH\x00R\n" +
 	"hostAccess\x129\n" +
-	"\bsign_ins\x18\x1f \x01(\v2\x1c.asm.events.v1.SignInSummaryH\x00R\asignIns\x12O\n" +
+	"\bsign_ins\x18\x1f \x01(\v2\x1c.asm.events.v1.SignInSummaryH\x00R\asignIns\x12B\n" +
+	"\rhost_packages\x18  \x01(\v2\x1b.asm.events.v1.HostPackagesH\x00R\fhostPackages\x12O\n" +
 	"\x0ecloud_exposure\x18( \x01(\v2&.asm.events.v1.CloudExposureAssessmentH\x00R\rcloudExposure\x12?\n" +
 	"\fprobe_result\x18) \x01(\v2\x1a.asm.events.v1.ProbeResultH\x00R\vprobeResult\x12E\n" +
 	"\x0ehost_forgotten\x18* \x01(\v2\x1c.asm.events.v1.HostForgottenH\x00R\rhostForgotten\x12?\n" +
@@ -1372,16 +1389,17 @@ var file_asm_events_v1_envelope_proto_goTypes = []any{
 	(*ProxyRoutes)(nil),             // 20: asm.events.v1.ProxyRoutes
 	(*HostAccess)(nil),              // 21: asm.events.v1.HostAccess
 	(*SignInSummary)(nil),           // 22: asm.events.v1.SignInSummary
-	(*CloudExposureAssessment)(nil), // 23: asm.events.v1.CloudExposureAssessment
-	(*ProbeResult)(nil),             // 24: asm.events.v1.ProbeResult
-	(*HostForgotten)(nil),           // 25: asm.events.v1.HostForgotten
-	(*ScanStarted)(nil),             // 26: asm.events.v1.ScanStarted
-	(*ScanCompleted)(nil),           // 27: asm.events.v1.ScanCompleted
-	(*ServiceObservation)(nil),      // 28: asm.events.v1.ServiceObservation
-	(*AssetDiscovery)(nil),          // 29: asm.events.v1.AssetDiscovery
-	(*FindingReport)(nil),           // 30: asm.events.v1.FindingReport
-	(*SbomPublished)(nil),           // 31: asm.events.v1.SbomPublished
-	(*ToolOutput)(nil),              // 32: asm.events.v1.ToolOutput
+	(*HostPackages)(nil),            // 23: asm.events.v1.HostPackages
+	(*CloudExposureAssessment)(nil), // 24: asm.events.v1.CloudExposureAssessment
+	(*ProbeResult)(nil),             // 25: asm.events.v1.ProbeResult
+	(*HostForgotten)(nil),           // 26: asm.events.v1.HostForgotten
+	(*ScanStarted)(nil),             // 27: asm.events.v1.ScanStarted
+	(*ScanCompleted)(nil),           // 28: asm.events.v1.ScanCompleted
+	(*ServiceObservation)(nil),      // 29: asm.events.v1.ServiceObservation
+	(*AssetDiscovery)(nil),          // 30: asm.events.v1.AssetDiscovery
+	(*FindingReport)(nil),           // 31: asm.events.v1.FindingReport
+	(*SbomPublished)(nil),           // 32: asm.events.v1.SbomPublished
+	(*ToolOutput)(nil),              // 33: asm.events.v1.ToolOutput
 }
 var file_asm_events_v1_envelope_proto_depIdxs = []int32{
 	10, // 0: asm.events.v1.Event.time:type_name -> google.protobuf.Timestamp
@@ -1399,31 +1417,32 @@ var file_asm_events_v1_envelope_proto_depIdxs = []int32{
 	20, // 12: asm.events.v1.Event.proxy_routes:type_name -> asm.events.v1.ProxyRoutes
 	21, // 13: asm.events.v1.Event.host_access:type_name -> asm.events.v1.HostAccess
 	22, // 14: asm.events.v1.Event.sign_ins:type_name -> asm.events.v1.SignInSummary
-	23, // 15: asm.events.v1.Event.cloud_exposure:type_name -> asm.events.v1.CloudExposureAssessment
-	24, // 16: asm.events.v1.Event.probe_result:type_name -> asm.events.v1.ProbeResult
-	25, // 17: asm.events.v1.Event.host_forgotten:type_name -> asm.events.v1.HostForgotten
-	26, // 18: asm.events.v1.Event.scan_started:type_name -> asm.events.v1.ScanStarted
-	27, // 19: asm.events.v1.Event.scan_completed:type_name -> asm.events.v1.ScanCompleted
-	28, // 20: asm.events.v1.Event.service_observed:type_name -> asm.events.v1.ServiceObservation
-	29, // 21: asm.events.v1.Event.asset_discovered:type_name -> asm.events.v1.AssetDiscovery
-	30, // 22: asm.events.v1.Event.finding_reported:type_name -> asm.events.v1.FindingReport
-	31, // 23: asm.events.v1.Event.sbom_published:type_name -> asm.events.v1.SbomPublished
-	32, // 24: asm.events.v1.Event.tool_output:type_name -> asm.events.v1.ToolOutput
-	1,  // 25: asm.events.v1.Batch.events:type_name -> asm.events.v1.Event
-	6,  // 26: asm.events.v1.IngestResponse.rejected:type_name -> asm.events.v1.Rejection
-	3,  // 27: asm.events.v1.IngestResponse.cursor:type_name -> asm.events.v1.Sequence
-	7,  // 28: asm.events.v1.IngestResponse.directives:type_name -> asm.events.v1.Directive
-	10, // 29: asm.events.v1.IngestResponse.server_time:type_name -> google.protobuf.Timestamp
-	8,  // 30: asm.events.v1.IngestResponse.error:type_name -> asm.events.v1.ErrorInfo
-	0,  // 31: asm.events.v1.Directive.kind:type_name -> asm.events.v1.Directive.Kind
-	10, // 32: asm.events.v1.Directive.after:type_name -> google.protobuf.Timestamp
-	1,  // 33: asm.events.v1.StoredEvent.event:type_name -> asm.events.v1.Event
-	10, // 34: asm.events.v1.StoredEvent.received_at:type_name -> google.protobuf.Timestamp
-	35, // [35:35] is the sub-list for method output_type
-	35, // [35:35] is the sub-list for method input_type
-	35, // [35:35] is the sub-list for extension type_name
-	35, // [35:35] is the sub-list for extension extendee
-	0,  // [0:35] is the sub-list for field type_name
+	23, // 15: asm.events.v1.Event.host_packages:type_name -> asm.events.v1.HostPackages
+	24, // 16: asm.events.v1.Event.cloud_exposure:type_name -> asm.events.v1.CloudExposureAssessment
+	25, // 17: asm.events.v1.Event.probe_result:type_name -> asm.events.v1.ProbeResult
+	26, // 18: asm.events.v1.Event.host_forgotten:type_name -> asm.events.v1.HostForgotten
+	27, // 19: asm.events.v1.Event.scan_started:type_name -> asm.events.v1.ScanStarted
+	28, // 20: asm.events.v1.Event.scan_completed:type_name -> asm.events.v1.ScanCompleted
+	29, // 21: asm.events.v1.Event.service_observed:type_name -> asm.events.v1.ServiceObservation
+	30, // 22: asm.events.v1.Event.asset_discovered:type_name -> asm.events.v1.AssetDiscovery
+	31, // 23: asm.events.v1.Event.finding_reported:type_name -> asm.events.v1.FindingReport
+	32, // 24: asm.events.v1.Event.sbom_published:type_name -> asm.events.v1.SbomPublished
+	33, // 25: asm.events.v1.Event.tool_output:type_name -> asm.events.v1.ToolOutput
+	1,  // 26: asm.events.v1.Batch.events:type_name -> asm.events.v1.Event
+	6,  // 27: asm.events.v1.IngestResponse.rejected:type_name -> asm.events.v1.Rejection
+	3,  // 28: asm.events.v1.IngestResponse.cursor:type_name -> asm.events.v1.Sequence
+	7,  // 29: asm.events.v1.IngestResponse.directives:type_name -> asm.events.v1.Directive
+	10, // 30: asm.events.v1.IngestResponse.server_time:type_name -> google.protobuf.Timestamp
+	8,  // 31: asm.events.v1.IngestResponse.error:type_name -> asm.events.v1.ErrorInfo
+	0,  // 32: asm.events.v1.Directive.kind:type_name -> asm.events.v1.Directive.Kind
+	10, // 33: asm.events.v1.Directive.after:type_name -> google.protobuf.Timestamp
+	1,  // 34: asm.events.v1.StoredEvent.event:type_name -> asm.events.v1.Event
+	10, // 35: asm.events.v1.StoredEvent.received_at:type_name -> google.protobuf.Timestamp
+	36, // [36:36] is the sub-list for method output_type
+	36, // [36:36] is the sub-list for method input_type
+	36, // [36:36] is the sub-list for extension type_name
+	36, // [36:36] is the sub-list for extension extendee
+	0,  // [0:36] is the sub-list for field type_name
 }
 
 func init() { file_asm_events_v1_envelope_proto_init() }
@@ -1436,6 +1455,7 @@ func file_asm_events_v1_envelope_proto_init() {
 	file_asm_events_v1_discovery_proto_init()
 	file_asm_events_v1_exposure_proto_init()
 	file_asm_events_v1_finding_proto_init()
+	file_asm_events_v1_packages_proto_init()
 	file_asm_events_v1_envelope_proto_msgTypes[0].OneofWrappers = []any{
 		(*Event_AgentStarted)(nil),
 		(*Event_Heartbeat)(nil),
@@ -1449,6 +1469,7 @@ func file_asm_events_v1_envelope_proto_init() {
 		(*Event_ProxyRoutes)(nil),
 		(*Event_HostAccess)(nil),
 		(*Event_SignIns)(nil),
+		(*Event_HostPackages)(nil),
 		(*Event_CloudExposure)(nil),
 		(*Event_ProbeResult)(nil),
 		(*Event_HostForgotten)(nil),

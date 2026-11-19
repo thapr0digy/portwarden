@@ -25,6 +25,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/backend/bus"
 	"github.com/thapr0digy/portwarden/internal/baseline"
 	"github.com/thapr0digy/portwarden/internal/cgroupns"
+	"github.com/thapr0digy/portwarden/internal/dpkg"
 	"github.com/thapr0digy/portwarden/internal/exposure"
 	"github.com/thapr0digy/portwarden/internal/hostid"
 	"github.com/thapr0digy/portwarden/internal/model"
@@ -88,6 +89,8 @@ type options struct {
 	sshAccess   string
 	sshAccounts []string
 	sharedKeys  string
+	// Host packages (README "Host packages"): auto runs with --ingest-url.
+	hostPackages string
 }
 
 // natsFlags are the NATS settings, which --ingest-url replaces.
@@ -127,11 +130,14 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&o.sshAccess, "ssh-access", "auto", "report the host's SSH trust and accepted sign-ins to Signal: auto (with --ingest-url) or off")
 	sshAccounts := fs.String("ssh-accounts", defaultSSHAccounts, "comma-separated local accounts whose principals and sudo presence are reported")
 	fs.StringVar(&o.sharedKeys, "shared-keys", "", "reviewed list of shared SSH keys, one \"<name> SHA256:<fingerprint>\" per line: the only plain-key fingerprints sent to Signal")
+	fs.StringVar(&o.hostPackages, "host-packages", "auto", "report the host's installed dpkg packages and os-release to Signal: auto (with --ingest-url) or off")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
-	if o.sshAccess != "auto" && o.sshAccess != "off" {
-		return o, fmt.Errorf("--ssh-access must be auto or off, got %q", o.sshAccess)
+	for flagName, v := range map[string]string{"ssh-access": o.sshAccess, "host-packages": o.hostPackages} {
+		if v != "auto" && v != "off" {
+			return o, fmt.Errorf("--%s must be auto or off, got %q", flagName, v)
+		}
 	}
 	accounts, err := parseSSHAccounts(*sshAccounts)
 	if err != nil {
@@ -420,6 +426,18 @@ func run(opts options, log *slog.Logger) error {
 		go func() {
 			defer beats.Done()
 			access.Run(ctx, *accessCfg, pub)
+		}()
+	}
+	rootErr := checkHostRoot("/proc", "/")
+	if rootErr != nil && opts.ingestURL != "" && opts.hostPackages == "auto" {
+		log.Warn("the host's package list is not read: / may be a container image's, whose dpkg database is not the host's", "err", rootErr.Error())
+	}
+	if pkgCfg := hostPackagesConfig(opts, rootErr != nil); pkgCfg != nil {
+		pkgCfg.Log = log.With("part", "host_packages")
+		beats.Add(1)
+		go func() {
+			defer beats.Done()
+			dpkg.Run(ctx, *pkgCfg, pub)
 		}()
 	}
 

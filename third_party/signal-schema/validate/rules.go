@@ -42,11 +42,15 @@ var rules = map[protoreflect.FullName]rule{
 	name(&ev.ProxyState{}):         typed(proxyState),
 	name(&ev.ProxyRoutes{}):        typed(proxyRoutes),
 	name(&ev.HostAccess{}):         typed(hostAccess),
+	name(&ev.Sshd{}):               typed(sshdSettings),
 	name(&ev.TrustedKey{}):         typed(trustedKey),
 	name(&ev.AccountAccess{}):      typed(accountAccess),
 	name(&ev.SignInSummary{}):      typed(signInSummary),
 	name(&ev.SignInGroup{}):        typed(signInGroup),
 	name(&ev.JumpHop{}):            typed(jumpHop),
+	name(&ev.HostPackages{}):       typed(hostPackages),
+	name(&ev.Distro{}):             typed(distro),
+	name(&ev.OSPackage{}):          typed(osPackage),
 	name(&ev.ScanCompleted{}):      typed(scanCompleted),
 	name(&ev.ServiceObservation{}): typed(serviceObservation),
 	name(&ev.AssetDiscovery{}):     typed(assetDiscovery),
@@ -307,6 +311,105 @@ func hostAccess(a *ev.HostAccess, path string) *Problem {
 		}
 	}
 	return optionalHex(a.GetDigest(), join(path, "digest"))
+}
+
+// The values sshd takes for PasswordAuthentication and PermitRootLogin (sshd_config(5)), as
+// an agent reports them; "" is "cannot tell".
+var (
+	passwordAuthValues = map[string]bool{"yes": true, "no": true}
+	rootLoginValues    = map[string]bool{"yes": true, "prohibit-password": true, "forced-commands-only": true, "no": true}
+)
+
+// sshdSettings holds the two settings to sshd's values, and to "" when the configuration was
+// not read (a value then would be a guess).
+func sshdSettings(s *ev.Sshd, path string) *Problem {
+	switch pa, rl := s.GetPasswordAuthentication(), s.GetPermitRootLogin(); {
+	case !s.GetRead() && (pa != "" || rl != ""):
+		return invalid(join(path, "read"), "an unread configuration carries no settings")
+	case pa != "" && !passwordAuthValues[pa]:
+		return invalid(join(path, "password_authentication"), `want "yes" or "no"`)
+	case rl != "" && !rootLoginValues[rl]:
+		return invalid(join(path, "permit_root_login"), "not a PermitRootLogin value")
+	}
+	return nil
+}
+
+// The forms a dpkg host's package list is held to (Debian Policy 5.6.1, 5.6.12 and os-release(5)).
+var (
+	debPackageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]{1,127}$`)
+	debVersionRe = regexp.MustCompile(`^[A-Za-z0-9.+~:-]{1,128}$`)
+	debArchRe    = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+	osReleaseRe  = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
+	osVersionRe  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+)
+
+// hostPackages holds a package list to one of three shapes: unchanged (a digest and nothing
+// else), unreadable (a reason and no list, so it is never read as "no packages") or a list from
+// dpkg with the distribution it runs on, each (name, arch) once.
+func hostPackages(p *ev.HostPackages, path string) *Problem {
+	switch {
+	case p.GetUnchanged():
+		if p.GetDigest() == "" {
+			return invalid(join(path, "digest"), "required when unchanged")
+		}
+		if p.GetDistro() != nil || len(p.GetPackages()) > 0 || p.GetRead() || p.GetUnreadable() != "" {
+			return invalid(join(path, "unchanged"), "an unchanged package list carries only its digest")
+		}
+	case !p.GetRead():
+		if p.GetUnreadable() == "" {
+			return invalid(join(path, "unreadable"), "required when the list could not be read")
+		}
+		if len(p.GetPackages()) > 0 || p.GetTruncated() {
+			return invalid(join(path, "packages"), "an unreadable list carries no packages")
+		}
+	default:
+		if p.GetManager() != "dpkg" {
+			return invalid(join(path, "manager"), `want "dpkg"`)
+		}
+		if p.GetDistro() == nil {
+			return invalid(join(path, "distro"), "required")
+		}
+		if uint64(p.GetTotal()) < uint64(len(p.GetPackages())) {
+			return invalid(join(path, "total"), "fewer than the packages sent")
+		}
+		seen := make(map[string]bool, len(p.GetPackages()))
+		for i, k := range p.GetPackages() {
+			key := k.GetName() + " " + k.GetArch()
+			if seen[key] {
+				return invalid(fmt.Sprintf("%s[%d]", join(path, "packages"), i), "a package and architecture listed twice")
+			}
+			seen[key] = true
+		}
+	}
+	return optionalHex(p.GetDigest(), join(path, "digest"))
+}
+
+func distro(d *ev.Distro, path string) *Problem {
+	switch {
+	case !osReleaseRe.MatchString(d.GetId()):
+		return invalid(join(path, "id"), "not an os-release ID")
+	case !osVersionRe.MatchString(d.GetVersionId()):
+		return invalid(join(path, "version_id"), "not an os-release VERSION_ID")
+	case d.GetCodename() != "" && !osReleaseRe.MatchString(d.GetCodename()):
+		return invalid(join(path, "codename"), "not an os-release VERSION_CODENAME")
+	}
+	return nil
+}
+
+func osPackage(k *ev.OSPackage, path string) *Problem {
+	switch {
+	case !debPackageRe.MatchString(k.GetName()):
+		return invalid(join(path, "name"), "not a Debian package name")
+	case !debVersionRe.MatchString(k.GetVersion()):
+		return invalid(join(path, "version"), "not a Debian version")
+	case !debPackageRe.MatchString(k.GetSource()):
+		return invalid(join(path, "source"), "required: the source package, under which advisories are filed")
+	case !debVersionRe.MatchString(k.GetSourceVersion()):
+		return invalid(join(path, "source_version"), "not a Debian version")
+	case !debArchRe.MatchString(k.GetArch()):
+		return invalid(join(path, "arch"), "not a Debian architecture")
+	}
+	return nil
 }
 
 func trustedKey(k *ev.TrustedKey, path string) *Problem {

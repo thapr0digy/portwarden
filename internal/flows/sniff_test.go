@@ -72,8 +72,8 @@ func TestSniffGoClientHello(t *testing.T) {
 func TestSniffTLS(t *testing.T) {
 	keyShare := ext(0x0033, make([]byte, 1220)) // an X25519MLKEM768 share, before the SNI
 	for _, tc := range []struct {
-		name        string
-		in          []byte
+		name         string
+		in           []byte
 		app, service string
 	}{
 		{"sni first", handBuiltHello(sniExt("a.example"), ext(0x000a, []byte{0, 2, 0, 0x1d})), AppTLS, "a.example"},

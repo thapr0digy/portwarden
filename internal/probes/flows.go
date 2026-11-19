@@ -100,7 +100,7 @@ func (f *Flows) Err() error {
 	return f.readErr
 }
 
-// Drops returns the records lost to a full ring buffer, summed over CPUs (0 when unread).
+// Drops returns the connection records lost to a full ring buffer, summed over CPUs (0 when unread).
 func (f *Flows) Drops() uint64 {
 	var perCPU []uint64
 	if err := f.objs.FlowCounters.Lookup(uint32(0), &perCPU); err != nil {

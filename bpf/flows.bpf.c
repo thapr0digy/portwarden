@@ -14,7 +14,8 @@
 //          for any other send): up to HEAD_MAX bytes of the first user buffer, sent only
 //          when they start like a TLS handshake record or an HTTP/1.x method, then the mark
 //          is dropped. Server-first protocols (SSH, SMTP) and kernel senders send nothing.
-// The ring buffer bounds what a busy host costs: a full ring drops events and counts them.
+// The ring buffer bounds what a busy host costs: a full ring drops events and counts the
+// connections lost; a lost FLOW_HEAD only leaves its connection unnamed and is not counted.
 // Records are submitted without waking the agent until WAKEUP_BYTES wait in the ring; the
 // agent also drains it on a short timer, so a busy host costs one wakeup per many records.
 // A process's first connection (by tgid, as far as known_tgids remembers) wakes the agent at
@@ -225,7 +226,7 @@ int BPF_PROG(on_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
 {
 	__u64 key = (__u64)sk;
 	__u64 *awaiting = bpf_map_lookup_elem(&awaiting_head, &key);
-	__u64 cookie = bpf_get_socket_cookie(sk);
+	__u64 cookie;
 	struct flow_head *h;
 	void *base = NULL;
 	__u64 len = 0;
@@ -233,6 +234,7 @@ int BPF_PROG(on_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
 
 	if (!awaiting)
 		return 0;
+	cookie = bpf_get_socket_cookie(sk);
 	// Only the first send is read, whatever it holds; an address reused by another
 	// socket holds a stale cookie and is only dropped.
 	if (*awaiting != cookie) {
@@ -249,10 +251,8 @@ int BPF_PROG(on_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
 		return 0;
 
 	h = bpf_ringbuf_reserve(&flow_events, sizeof(*h), 0);
-	if (!h) {
-		count(COUNTER_RINGBUF_RESERVE_FAILED);
+	if (!h)
 		return 0;
-	}
 	h->cookie = cookie;
 	h->kind = FLOW_HEAD;
 	h->len = n;

@@ -13,6 +13,8 @@ var (
 	listenObject []byte
 	//go:embed proxyconn_bpfel.o
 	proxyconnObject []byte
+	//go:embed flows_bpfel.o
+	flowsObject []byte
 )
 
 // AttachTargets returns the kernel functions this package's programs attach to.
@@ -21,7 +23,7 @@ func AttachTargets() ([]bpftarget.Target, error) {
 	for _, obj := range []struct {
 		name  string
 		bytes []byte
-	}{{"listen_bpfel.o", listenObject}, {"proxyconn_bpfel.o", proxyconnObject}} {
+	}{{"listen_bpfel.o", listenObject}, {"proxyconn_bpfel.o", proxyconnObject}, {"flows_bpfel.o", flowsObject}} {
 		t, err := bpftarget.FromObject(obj.name, obj.bytes)
 		if err != nil {
 			return nil, err

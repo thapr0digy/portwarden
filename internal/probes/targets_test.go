@@ -7,7 +7,7 @@ import (
 )
 
 // The committed listen object hooks exactly the four functions bpf/listen.bpf.c names,
-// and proxyconn's cgroup programs contribute none.
+// proxyconn's cgroup programs contribute none, and flows hooks the three bpf/flows.bpf.c names.
 func TestAttachTargetsMatchTheCommittedObjects(t *testing.T) {
 	got, err := AttachTargets()
 	if err != nil {
@@ -18,6 +18,9 @@ func TestAttachTargetsMatchTheCommittedObjects(t *testing.T) {
 		{Program: "on_stop", Kind: bpftarget.KindFentry, Func: "inet_csk_listen_stop"},
 		{Program: "on_udp_bind", Kind: bpftarget.KindFexit, Func: "udp_lib_get_port"},
 		{Program: "on_udp_unhash", Kind: bpftarget.KindFentry, Func: "udp_lib_unhash"},
+		{Program: "on_accept", Kind: bpftarget.KindFexit, Func: "inet_csk_accept"},
+		{Program: "on_connect", Kind: bpftarget.KindFexit, Func: "tcp_connect"},
+		{Program: "on_sendmsg", Kind: bpftarget.KindFentry, Func: "tcp_sendmsg"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)

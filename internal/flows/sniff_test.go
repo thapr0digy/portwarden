@@ -20,7 +20,8 @@ func clientHello(t *testing.T, serverName string) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() {
-		c := tls.Client(client, &tls.Config{ServerName: serverName, InsecureSkipVerify: true}) //nolint:gosec // never completes; only its first bytes are read
+		// The handshake never completes: only the ClientHello is read off the pipe.
+		c := tls.Client(client, &tls.Config{ServerName: serverName, MinVersion: tls.VersionTLS12})
 		_ = c.HandshakeContext(ctx)
 	}()
 	buf := make([]byte, 4096)

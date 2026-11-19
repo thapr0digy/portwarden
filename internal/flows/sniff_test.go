@@ -74,7 +74,7 @@ func TestSniffTLS(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		in          []byte
-		app, sevice string
+		app, service string
 	}{
 		{"sni first", handBuiltHello(sniExt("a.example"), ext(0x000a, []byte{0, 2, 0, 0x1d})), AppTLS, "a.example"},
 		{"sni behind a big key share", handBuiltHello(keyShare, sniExt("b.example")), AppTLS, "b.example"},
@@ -88,8 +88,8 @@ func TestSniffTLS(t *testing.T) {
 		{"application data", []byte{0x17, 3, 3, 0, 1, 0}, "", ""},
 		{"empty", nil, "", ""},
 	} {
-		if app, service := Sniff(tc.in); app != tc.app || service != tc.sevice {
-			t.Errorf("%s: Sniff = %q, %q, want %q, %q", tc.name, app, service, tc.app, tc.sevice)
+		if app, service := Sniff(tc.in); app != tc.app || service != tc.service {
+			t.Errorf("%s: Sniff = %q, %q, want %q, %q", tc.name, app, service, tc.app, tc.service)
 		}
 	}
 }

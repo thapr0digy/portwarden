@@ -61,6 +61,25 @@ func TestEnrichReadsProc(t *testing.T) {
 	}
 }
 
+// Identity reads the executable and unit without opening the executable: a connection's
+// process is named without hashing it.
+func TestIdentityReadsExeAndUnitOnly(t *testing.T) {
+	proc := t.TempDir()
+	target := fakeProc(t, proc, 42, "binary-bytes")
+	r := NewResolver(proc, t.TempDir(), 1<<20)
+	r.open = func(string) (*os.File, error) {
+		t.Error("Identity opened the executable")
+		return nil, os.ErrPermission
+	}
+	exe, unit := r.Identity(42, 0)
+	if exe != target || unit != "nginx.service" {
+		t.Errorf("Identity = %q, %q", exe, unit)
+	}
+	if exe, unit := r.Identity(43, 0); exe != "" || unit != "" {
+		t.Errorf("Identity of a missing process = %q, %q", exe, unit)
+	}
+}
+
 func TestEnrichExitedProcessUsesCgroupID(t *testing.T) {
 	cg := t.TempDir()
 	dir := filepath.Join(cg, "system.slice", "docker-"+hex64+".scope")

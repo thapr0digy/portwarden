@@ -8,7 +8,7 @@
 // seq, before the new run's own. The spool holds asm.v1 messages under their NATS
 // subjects whatever the destination; the HTTPS sender converts them as it sends
 // (signalEvent), so a spool written under one destination drains to the other. The host
-// facts (HostAccess, SignIns, HostPackages) are the exception: Signal-only, spooled as
+// facts (HostAccess, SignIns, HostPackages, HostFlows) are the exception: Signal-only, spooled as
 // Signal events and dropped by the NATS sender (access.go).
 package publish
 

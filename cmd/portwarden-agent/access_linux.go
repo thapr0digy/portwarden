@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,9 @@ import (
 	"github.com/thapr0digy/portwarden/internal/access"
 	"github.com/thapr0digy/portwarden/internal/dpkg"
 	"github.com/thapr0digy/portwarden/internal/exposure"
+	"github.com/thapr0digy/portwarden/internal/flows"
+	"github.com/thapr0digy/portwarden/internal/probes"
+	"github.com/thapr0digy/portwarden/internal/procinfo"
 )
 
 // defaultSSHAccounts are the accounts whose SSH access is reported: Ansible's shared
@@ -82,6 +86,36 @@ func hostPackagesConfig(opts options, inContainer bool) *dpkg.Config {
 		return nil
 	}
 	return &dpkg.Config{Root: os.DirFS("/"), Poll: dpkg.DefaultPoll, Settle: dpkg.DefaultSettle, Recheck: dpkg.DefaultRecheck}
+}
+
+// hostFlowsEnabled reports whether the connection flows reader runs: --host-flows auto
+// with Signal's door (the flows exist only in Signal's schema). Unlike the package list it
+// also runs in a container: the probes watch the kernel's sockets, which are the host's.
+func hostFlowsEnabled(opts options) bool {
+	return opts.hostFlows == "auto" && opts.ingestURL != ""
+}
+
+// hostFlowsConfig starts the connection probes for the flows reader (README "Connection
+// flows") and returns its configuration and their events. Probes that cannot start (an old
+// kernel, a refused load) are not fatal: the reader then sends every window unread, with
+// why, so Signal says "could not watch", never "no connections"; started is then nil.
+func hostFlowsConfig(resolver *procinfo.Resolver, log *slog.Logger) (cfg flows.Config, events <-chan flows.Event, started *probes.Flows) {
+	cfg = flows.Config{
+		Window: flows.DefaultWindow,
+		Identify: func(tgid uint32, cgroupID uint64) flows.Process {
+			exe, unit := resolver.Identity(tgid, cgroupID)
+			return flows.Process{Exe: exe, Unit: unit}
+		},
+		Log: log,
+	}
+	fp, err := probes.StartFlows()
+	if err != nil {
+		log.Warn("connection flows are not observed; windows are sent unread", "err", err.Error())
+		cfg.Unreadable = "connection probes did not start: " + err.Error()
+		return cfg, nil, nil
+	}
+	cfg.Drops = fp.Drops
+	return cfg, fp.Events(), fp
 }
 
 // initPIDNamespace is how /proc names the host's PID namespace: the kernel's fixed inode

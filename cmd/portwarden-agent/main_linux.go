@@ -27,6 +27,7 @@ import (
 	"github.com/thapr0digy/portwarden/internal/cgroupns"
 	"github.com/thapr0digy/portwarden/internal/dpkg"
 	"github.com/thapr0digy/portwarden/internal/exposure"
+	"github.com/thapr0digy/portwarden/internal/flows"
 	"github.com/thapr0digy/portwarden/internal/hostid"
 	"github.com/thapr0digy/portwarden/internal/model"
 	"github.com/thapr0digy/portwarden/internal/netif"
@@ -91,6 +92,8 @@ type options struct {
 	sharedKeys  string
 	// Host packages (README "Host packages"): auto runs with --ingest-url.
 	hostPackages string
+	// Connection flows (README "Connection flows"): auto runs with --ingest-url.
+	hostFlows string
 }
 
 // natsFlags are the NATS settings, which --ingest-url replaces.
@@ -131,10 +134,11 @@ func parseFlags(args []string) (options, error) {
 	sshAccounts := fs.String("ssh-accounts", defaultSSHAccounts, "comma-separated local accounts whose principals and sudo presence are reported")
 	fs.StringVar(&o.sharedKeys, "shared-keys", "", "reviewed list of shared SSH keys, one \"<name> SHA256:<fingerprint>\" per line: the only plain-key fingerprints sent to Signal")
 	fs.StringVar(&o.hostPackages, "host-packages", "auto", "report the host's installed dpkg packages and os-release to Signal: auto (with --ingest-url) or off")
+	fs.StringVar(&o.hostFlows, "host-flows", "auto", "report the host's TCP connections per hour (process, peer, port, TLS SNI or HTTP Host; never payloads) to Signal: auto (with --ingest-url) or off")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
-	for flagName, v := range map[string]string{"ssh-access": o.sshAccess, "host-packages": o.hostPackages} {
+	for flagName, v := range map[string]string{"ssh-access": o.sshAccess, "host-packages": o.hostPackages, "host-flows": o.hostFlows} {
 		if v != "auto" && v != "off" {
 			return o, fmt.Errorf("--%s must be auto or off, got %q", flagName, v)
 		}
@@ -457,9 +461,20 @@ func run(opts options, log *slog.Logger) error {
 	if opts.proxyMap == "auto" {
 		proxyConns = startProxyMapping(ctx, opts, hostNetNS, resolver, cgns.Host, &agentOpts, log)
 	}
+	var flowProbes *probes.Flows
+	if hostFlowsEnabled(opts) {
+		// Joined before the publisher closes: its partial window is queued first.
+		cfg, events, started := hostFlowsConfig(resolver, log.With("part", "host_flows"))
+		flowProbes = started
+		beats.Add(1)
+		go func() {
+			defer beats.Done()
+			flows.Run(ctx, cfg, events, pub)
+		}()
+	}
 
 	if opts.tamperInterval > 0 {
-		mon := newTamperMonitor(self, extraFiles, opts.tamperDropRate, pr, proxyConns, pub.IngestCheck(), hardenErr, log)
+		mon := newTamperMonitor(self, extraFiles, opts.tamperDropRate, pr, proxyConns, flowProbes, pub.IngestCheck(), hardenErr, log)
 		beats.Add(1)
 		go func() {
 			defer beats.Done()
@@ -484,6 +499,11 @@ func run(opts options, log *slog.Logger) error {
 	if proxyConns != nil {
 		if err := proxyConns.Close(); err != nil {
 			log.Warn("closing proxy connection probes", "error", err.Error())
+		}
+	}
+	if flowProbes != nil {
+		if err := flowProbes.Close(); err != nil {
+			log.Warn("closing connection flow probes", "error", err.Error())
 		}
 	}
 	if runErr == nil {

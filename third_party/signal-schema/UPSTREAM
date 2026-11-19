@@ -3,3 +3,8 @@ Refreshed with dev/sync-signal-schema.sh; do not edit these files here.
 Local patch until Signal lands it (Flowryn signal-s-ingest-9c; drop on the next sync that has it):
 Sshd.password_authentication = 7 and Sshd.permit_root_login = 8 (proto, access.pb.go via buf
 v1.74.0 and protoc-gen-go v1.36.12, the sshdSettings validator rule and its tests, the example).
+Local patch until Signal lands it (Flowryn portwarden-agent-reports-rc, proposed for plan p72 phase 1
+signal-schema-and-ai; drop on the next sync that has it): asm.host.flows, HostFlows = Event case 33
+(flows.proto, envelope.proto, flows.pb.go and envelope.pb.go via buf v1.74.0 and protoc-gen-go
+v1.36.12, the registry row, the hostFlows and flow validator rules, limits and tests, the README row,
+the example).

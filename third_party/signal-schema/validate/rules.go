@@ -1,7 +1,9 @@
 package validate
 
 import (
+	"cmp"
 	"fmt"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -51,6 +53,8 @@ var rules = map[protoreflect.FullName]rule{
 	name(&ev.HostPackages{}):       typed(hostPackages),
 	name(&ev.Distro{}):             typed(distro),
 	name(&ev.OSPackage{}):          typed(osPackage),
+	name(&ev.HostFlows{}):          typed(hostFlows),
+	name(&ev.Flow{}):               typed(flow),
 	name(&ev.ScanCompleted{}):      typed(scanCompleted),
 	name(&ev.ServiceObservation{}): typed(serviceObservation),
 	name(&ev.AssetDiscovery{}):     typed(assetDiscovery),
@@ -410,6 +414,105 @@ func osPackage(k *ev.OSPackage, path string) *Problem {
 		return invalid(join(path, "arch"), "not a Debian architecture")
 	}
 	return nil
+}
+
+// hostFlows holds a window of connections to its window, and an unread window to no flows
+// (never "no connections"). Flows are sorted by their key, each key once, so one window has one
+// encoding.
+func hostFlows(f *ev.HostFlows, path string) *Problem {
+	start, end := f.GetWindowStart(), f.GetWindowEnd()
+	switch {
+	case start == nil:
+		return invalid(join(path, "window_start"), "required")
+	case end == nil:
+		return invalid(join(path, "window_end"), "required")
+	case !end.AsTime().After(start.AsTime()):
+		return invalid(join(path, "window_end"), "not after window_start")
+	case !f.GetRead() && f.GetUnreadable() == "":
+		return invalid(join(path, "unreadable"), "required when the connections could not be observed")
+	case !f.GetRead() && len(f.GetFlows()) > 0:
+		return invalid(join(path, "flows"), "an unread window carries no flows")
+	case f.GetRead() && f.GetUnreadable() != "":
+		return invalid(join(path, "unreadable"), "set on a read window")
+	}
+	flows := f.GetFlows()
+	for i, fl := range flows {
+		at := fmt.Sprintf("%s[%d]", join(path, "flows"), i)
+		if fl.GetFirstSeen().AsTime().Before(start.AsTime()) || fl.GetLastSeen().AsTime().After(end.AsTime()) {
+			return invalid(at, "seen outside the window")
+		}
+		if i > 0 && compareFlowKeys(flows[i-1], fl) >= 0 {
+			return invalid(at, "not after the flow before it (sorted, each key once)")
+		}
+	}
+	return nil
+}
+
+// compareFlowKeys orders flows by their aggregation key, as HostFlows.flows is sorted.
+func compareFlowKeys(a, b *ev.Flow) int {
+	return cmp.Or(
+		cmp.Compare(a.GetDirection(), b.GetDirection()),
+		cmp.Compare(a.GetRemoteAddr(), b.GetRemoteAddr()),
+		cmp.Compare(a.GetRemotePort(), b.GetRemotePort()),
+		cmp.Compare(a.GetLocalPort(), b.GetLocalPort()),
+		cmp.Compare(a.GetExe(), b.GetExe()),
+		cmp.Compare(a.GetComm(), b.GetComm()),
+		cmp.Compare(a.GetUnit(), b.GetUnit()),
+		cmp.Compare(a.GetAppProto(), b.GetAppProto()),
+		cmp.Compare(a.GetServiceName(), b.GetServiceName()),
+	)
+}
+
+// flow holds one row to its direction's shape. A direction, proto or app_proto this version
+// does not know is opaque (COMPATIBILITY.md 2.4): accepted, and left to the reader.
+func flow(f *ev.Flow, path string) *Problem {
+	dir, addr := f.GetDirection(), f.GetRemoteAddr()
+	switch {
+	case dir == "":
+		return invalid(join(path, "direction"), "required")
+	case f.GetProto() == "":
+		return invalid(join(path, "proto"), "required")
+	case f.GetLocalPort() > 65535 || f.GetRemotePort() > 65535:
+		return invalid(path, "a port > 65535")
+	case dir == "out" && (f.GetLocalPort() != 0 || f.GetRemotePort() == 0):
+		return invalid(join(path, "remote_port"), "an outbound flow has a remote port and no local one")
+	case dir == "in" && (f.GetRemotePort() != 0 || f.GetLocalPort() == 0):
+		return invalid(join(path, "local_port"), "an inbound flow has a local port and no remote one")
+	case dir == "out" && addr == "":
+		return invalid(join(path, "remote_addr"), "required on an outbound flow")
+	case addr != "" && canonicalIP(addr) != nil:
+		return invalid(join(path, "remote_addr"), "not a canonical IP address")
+	case dir == "in" && addr != "" && publicIP(netip.MustParseAddr(addr)):
+		return invalid(join(path, "remote_addr"), `a public client: summed into remote_addr ""`)
+	case f.GetServiceName() != "" && f.GetAppProto() == "":
+		return invalid(join(path, "service_name"), "set without app_proto")
+	case f.GetServiceName() != "" && (strings.HasPrefix(f.GetServiceName(), "*.") || dnsName(f.GetServiceName()) != nil):
+		return invalid(join(path, "service_name"), "not a lowercase DNS name")
+	case hasControl(f.GetComm()) || hasControl(f.GetExe()) || hasControl(f.GetUnit()):
+		return invalid(path, "a process field holds a control character")
+	case f.GetCount() == 0:
+		return invalid(join(path, "count"), "at least 1")
+	case f.GetFirstSeen() == nil || f.GetLastSeen() == nil:
+		return invalid(join(path, "first_seen"), "first_seen and last_seen are required")
+	case f.GetLastSeen().AsTime().Before(f.GetFirstSeen().AsTime()):
+		return invalid(join(path, "last_seen"), "before first_seen")
+	}
+	return nil
+}
+
+// sharedAddressSpace is RFC 6598's carrier-grade NAT range.
+var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+
+// publicIP reports whether a is a public address: not private (RFC 1918, unique-local
+// fc00::/7), shared (100.64.0.0/10), link-local or loopback. An inbound flow never names one.
+func publicIP(a netip.Addr) bool {
+	a = a.Unmap()
+	return !a.IsPrivate() && !a.IsLoopback() && !a.IsLinkLocalUnicast() && !sharedAddressSpace.Contains(a)
+}
+
+// hasControl reports whether s holds an ASCII control character.
+func hasControl(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return r < ' ' || r == 0x7f })
 }
 
 func trustedKey(k *ev.TrustedKey, path string) *Problem {

@@ -105,6 +105,7 @@ var Registry = []TypeInfo{
 	{Type: "asm.host.access", Case: 30, Message: "HostAccess", Producers: agentOnly, Subjects: hostOnly, Sequenced: true},
 	{Type: "asm.host.sign_ins", Case: 31, Message: "SignInSummary", Producers: agentOnly, Subjects: hostOnly, Sequenced: true},
 	{Type: "asm.host.packages", Case: 32, Message: "HostPackages", Producers: agentOnly, Subjects: hostOnly, Sequenced: true},
+	{Type: "asm.host.flows", Case: 33, Message: "HostFlows", Producers: agentOnly, Subjects: hostOnly, Sequenced: true},
 
 	{Type: "asm.exposure.cloud_assessed", Case: 40, Message: "CloudExposureAssessment", Producers: []ProducerKind{ProducerService}, Subjects: hostOnly},
 	{Type: "asm.exposure.probed", Case: 41, Message: "ProbeResult", Producers: []ProducerKind{ProducerProber, ProducerService}, Subjects: []SubjectScheme{SchemeHost, SchemeSvc}},

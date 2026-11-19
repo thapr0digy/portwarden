@@ -201,10 +201,35 @@ func TestSpooledSignalEventIsCheckedAgainstTheMessage(t *testing.T) {
 // may not publish it and a denied publish would stop the agent.
 func TestNATSDropsSignalOnlyEventsWithoutPublishing(t *testing.T) {
 	tr := &natsTransport{} // no connection: delivering anything else would panic
-	for _, subject := range []string{"asm." + testHost + ".host.access", "asm." + testHost + ".host.sign_ins", "asm." + testHost + ".host.packages"} {
+	for _, subject := range []string{"asm." + testHost + ".host.access", "asm." + testHost + ".host.sign_ins", "asm." + testHost + ".host.packages", "asm." + testHost + ".host.flows"} {
 		d := tr.deliver(context.Background(), []spool.Msg{{Subject: subject}})
 		if !d.undeliverable || d.denied || d.sent != 0 {
 			t.Fatalf("%s: %+v", subject, d)
 		}
+	}
+}
+
+// A flows window is spooled as Signal's asm.host.flows and converts back as Signal takes it.
+func TestHostFlowsSpooledAsSignalEvent(t *testing.T) {
+	p := memPublisher(t)
+	end := timestamppb.Now()
+	start := timestamppb.New(end.AsTime().Add(-time.Hour))
+	p.HostFlows(&eventsv1.HostFlows{WindowStart: start, WindowEnd: end, Read: true, Flows: []*eventsv1.Flow{{
+		Direction: "out", Proto: "tcp", Exe: "/usr/bin/curl", Comm: "curl", RemoteAddr: "10.0.0.9", RemotePort: 443,
+		AppProto: "tls", ServiceName: "ledger.internal.example", Count: 2, FirstSeen: start, LastSeen: end,
+	}}})
+	m := p.q.Peek(1, 1<<20)[0]
+	if m.Subject != "asm."+testHost+".host.flows" {
+		t.Fatalf("subject %s", m.Subject)
+	}
+	ev, err := signalEvent(m, testHost, "v1.2.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.GetType() != "asm.host.flows" || ev.GetHostFlows().GetFlows()[0].GetServiceName() != "ledger.internal.example" {
+		t.Fatalf("event %v", ev)
+	}
+	if err := validate.Event(ev, validate.Options{}); err != nil {
+		t.Fatal(err)
 	}
 }

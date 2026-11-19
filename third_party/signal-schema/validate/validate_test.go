@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +112,29 @@ func packagesEvent() *ev.Event {
 	}
 }
 
+func flowsEvent() *ev.Event {
+	start := now.Add(-time.Hour)
+	seen := func(d time.Duration) *timestamppb.Timestamp { return timestamppb.New(start.Add(d)) }
+	return &ev.Event{
+		Id: "01JC8Z6X4Q00000000000000S4", Type: "asm.host.flows",
+		Source: "urn:asm:agent:" + hostID, Subject: "host:" + hostID,
+		Time:     timestamppb.New(now),
+		Sequence: &ev.Sequence{RunId: runID, Seq: 61},
+		Data: &ev.Event_HostFlows{HostFlows: &ev.HostFlows{
+			WindowStart: timestamppb.New(start), WindowEnd: timestamppb.New(now), Read: true,
+			Flows: []*ev.Flow{
+				{Direction: "in", Proto: "tcp", Exe: "/usr/sbin/nginx", Comm: "nginx", Unit: "nginx.service", LocalPort: 443,
+					RemoteAddr: "10.0.0.7", Count: 12, FirstSeen: seen(time.Minute), LastSeen: seen(50 * time.Minute)},
+				{Direction: "out", Proto: "tcp", Exe: "/opt/billing/bin/billing", Comm: "billing", Unit: "billing.service",
+					RemoteAddr: "10.0.0.9", RemotePort: 443, AppProto: "tls", ServiceName: "ledger.internal.example",
+					Count: 340, FirstSeen: seen(0), LastSeen: seen(59 * time.Minute)},
+			},
+		}},
+	}
+}
+
+func flw(e *ev.Event, i int) *ev.Flow { return e.GetHostFlows().GetFlows()[i] }
+
 func pkgs(e *ev.Event) *ev.HostPackages { return e.GetHostPackages() }
 
 func grp(e *ev.Event) *ev.SignInGroup { return e.GetSignIns().GetGroups()[0] }
@@ -130,6 +154,57 @@ func TestValidateTable(t *testing.T) {
 		{"valid listener", listenerEvent(), "", ""},
 		{"valid sign-ins", signInEvent(), "", ""},
 		{"valid access state", accessEvent(), "", ""},
+		{"valid flows", flowsEvent(), "", ""},
+		{"flows without a window start", with(flowsEvent(), func(e *ev.Event) { e.GetHostFlows().WindowStart = nil }), CodeInvalidPayload, "host_flows.window_start"},
+		{"flows window ends at its start", with(flowsEvent(), func(e *ev.Event) { e.GetHostFlows().WindowEnd = e.GetHostFlows().WindowStart }), CodeInvalidPayload, "host_flows.window_end"},
+		{"unread flows window", with(flowsEvent(), func(e *ev.Event) {
+			e.GetHostFlows().Read, e.GetHostFlows().Unreadable, e.GetHostFlows().Flows = false, "probes not loaded", nil
+		}), "", ""},
+		{"unread flows window without a reason", with(flowsEvent(), func(e *ev.Event) { e.GetHostFlows().Read, e.GetHostFlows().Flows = false, nil }), CodeInvalidPayload, "host_flows.unreadable"},
+		{"unread flows window with flows", with(flowsEvent(), func(e *ev.Event) { e.GetHostFlows().Read, e.GetHostFlows().Unreadable = false, "x" }), CodeInvalidPayload, "host_flows.flows"},
+		{"flows out of order", with(flowsEvent(), func(e *ev.Event) {
+			f := e.GetHostFlows().Flows
+			f[0], f[1] = f[1], f[0]
+		}), CodeInvalidPayload, "host_flows.flows[1]"},
+		{"flow key twice", with(flowsEvent(), func(e *ev.Event) { e.GetHostFlows().Flows[1] = flw(e, 0) }), CodeInvalidPayload, "host_flows.flows[1]"},
+		{"flow seen before the window", with(flowsEvent(), func(e *ev.Event) { flw(e, 0).FirstSeen = timestamppb.New(now.Add(-2 * time.Hour)) }), CodeInvalidPayload, "host_flows.flows[0]"},
+		{"flow without a direction", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).Direction = "" }), CodeInvalidPayload, "host_flows.flows[1].direction"},
+		{"flow without a proto", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).Proto = "" }), CodeInvalidPayload, "host_flows.flows[1].proto"},
+		{"flow with a newer agent's direction, proto and app proto", with(flowsEvent(), func(e *ev.Event) {
+			flw(e, 1).Direction, flw(e, 1).Proto, flw(e, 1).AppProto = "zz-relay", "udp", "quic"
+		}), "", ""},
+		{"inbound flow from a public client", with(flowsEvent(), func(e *ev.Event) { flw(e, 0).RemoteAddr = "203.0.113.5" }), CodeInvalidPayload, "host_flows.flows[0].remote_addr"},
+		{"inbound flow from a public IPv6 client", with(flowsEvent(), func(e *ev.Event) { flw(e, 0).RemoteAddr = "2001:db8::5" }), CodeInvalidPayload, "host_flows.flows[0].remote_addr"},
+		{"inbound flow of public clients summed", with(flowsEvent(), func(e *ev.Event) { flw(e, 0).RemoteAddr = "" }), "", ""},
+		{"inbound flows from shared, link-local, loopback and unique-local peers", with(flowsEvent(), func(e *ev.Event) {
+			f := e.GetHostFlows()
+			in := f.Flows[0]
+			f.Flows = nil
+			for _, a := range []string{"100.64.1.2", "127.0.0.1", "169.254.1.1", "::1", "fd00::5", "fe80::1"} {
+				r := proto.CloneOf(in)
+				r.RemoteAddr = a
+				f.Flows = append(f.Flows, r)
+			}
+			slices.SortFunc(f.Flows, func(a, b *ev.Flow) int { return strings.Compare(a.GetRemoteAddr(), b.GetRemoteAddr()) })
+		}), "", ""},
+		{"outbound flow without a remote address", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).RemoteAddr = "" }), CodeInvalidPayload, "host_flows.flows[1].remote_addr"},
+		{"outbound flow to a public address", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).RemoteAddr = "203.0.113.5" }), "", ""},
+		{"empty flows window", with(flowsEvent(), func(e *ev.Event) { e.GetHostFlows().Flows = nil }), "", ""},
+		{"outbound flow with a local port", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).LocalPort = 50123 }), CodeInvalidPayload, "host_flows.flows[1].remote_port"},
+		{"inbound flow with a remote port", with(flowsEvent(), func(e *ev.Event) { flw(e, 0).RemotePort = 50123 }), CodeInvalidPayload, "host_flows.flows[0].local_port"},
+		{"flow port over 65535", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).RemotePort = 70000 }), CodeInvalidPayload, "host_flows.flows[1]"},
+		{"flow remote not canonical", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).RemoteAddr = "::ffff:10.0.0.9" }), CodeInvalidPayload, "host_flows.flows[1].remote_addr"},
+		{"flow service name without an app proto", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).AppProto = "" }), CodeInvalidPayload, "host_flows.flows[1].service_name"},
+		{"flow service name uppercase", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).ServiceName = "Ledger.example" }), CodeInvalidPayload, "host_flows.flows[1].service_name"},
+		{"flow service name an IP", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).ServiceName = "10.0.0.9" }), CodeInvalidPayload, "host_flows.flows[1].service_name"},
+		{"flow service name a wildcard", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).ServiceName = "*.example.com" }), CodeInvalidPayload, "host_flows.flows[1].service_name"},
+		{"flow service name over its cap", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).ServiceName = strings.Repeat("a", 254) }), CodeTooLarge, "host_flows.flows[1].service_name"},
+		{"flow exe with a control character", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).Exe = "/opt/a\x1b[0m" }), CodeInvalidPayload, "host_flows.flows[1]"},
+		{"flow unit with a control character", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).Unit = "a\x7f.service" }), CodeInvalidPayload, "host_flows.flows[1]"},
+		{"flow process name with a space", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).Comm = "Web Content" }), "", ""},
+		{"flow process name with a newline", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).Comm = "a\nb" }), CodeInvalidPayload, "host_flows.flows[1]"},
+		{"flow with no count", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).Count = 0 }), CodeInvalidPayload, "host_flows.flows[1].count"},
+		{"flow last before first", with(flowsEvent(), func(e *ev.Event) { flw(e, 1).LastSeen = timestamppb.New(now.Add(-2 * time.Hour)) }), CodeInvalidPayload, "host_flows.flows[1].last_seen"},
 		{"sign-in without a method", with(signInEvent(), func(e *ev.Event) { grp(e).Method = ev.SignInGroup_METHOD_UNSPECIFIED }), CodeInvalidPayload, "sign_ins.groups[0].method"},
 		{"sign-in with no count", with(signInEvent(), func(e *ev.Event) { grp(e).Count = 0 }), CodeInvalidPayload, "sign_ins.groups[0].count"},
 		{"sign-in last before first", with(signInEvent(), func(e *ev.Event) { grp(e).FirstAt = timestamppb.New(now) }), CodeInvalidPayload, "sign_ins.groups[0].last_at"},
